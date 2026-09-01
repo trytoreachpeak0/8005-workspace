@@ -67,6 +67,12 @@ and the `w2g-rc-*` build output are gitignored.
   exceptions. It does not govern the three repositories owned by other people.
 - `releases/<id>/` — the recipe to rebuild and verify a release candidate:
   manifest, hashes, operator's manual, build scripts. Never the binaries.
-- `hmi-remote-ops/` — read-only probe tooling for HMI machines. Probe output
-  (`probe-*.txt`) is gitignored: it inventories local accounts, the
-  administrators group, autologon config, firewall state, and IP topology.
+- `hmi-remote-ops/` — the SSH remote-operations channel for the onboard HMI
+  machines: probe, bootstrap, and hardening scripts, the control-host SSH
+  config, and the design record. Read its `docs/USAGE.md` before touching a
+  machine. This directory is writable; reaching an HMI machine through it never
+  grants write access to `8005-agv-onboard-hmi`. Two things stay out of git:
+  probe output (`probe-*.txt`), which inventories local accounts, the
+  administrators group, autologon config, firewall state, and IP topology; and
+  `payload/`, the offline OpenSSH package, which `docs/ASSETS.md` describes well
+  enough to re-fetch. The operations private key lives in `~/.ssh/`, never here.

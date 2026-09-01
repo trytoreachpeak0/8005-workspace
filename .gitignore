@@ -19,3 +19,8 @@ desktop.ini
 # firewall state, open remote channels, full IP topology. Never commit these —
 # git history keeps them even after deletion. Regenerate with 01-probe.ps1.
 probe-*.txt
+
+# Offline redistributables staged for the air-gapped HMI machines. Same rule as
+# the release binaries above: hmi-remote-ops/docs/ASSETS.md records the version,
+# size, SHA256, and upstream URL, which is enough to re-fetch and verify.
+/hmi-remote-ops/payload/

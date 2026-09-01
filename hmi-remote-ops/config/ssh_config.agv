@@ -1,0 +1,31 @@
+# AGV onboard HMI machines.
+# Managed by 8005-workspace\hmi-remote-ops. See that README for the full design.
+#
+# Each car sits behind its own KonNaD CPE2458 doing NAT. We reach the HMI by
+# port-forwarding an external port on the CPE's enterprise-LAN address to the
+# HMI's port 22. External 22 is NOT usable: the CPE's own dropbear owns it.
+
+Host agv*
+    User agvops
+    IdentityFile C:\Users\szy\.ssh\agv_ops_ed25519
+    IdentitiesOnly yes
+    # These machines are freshly imaged and their host keys are unknown on first
+    # contact. accept-new records the key on first connect and refuses it if it
+    # ever changes afterwards -- unlike `no`, which would ignore changes forever.
+    StrictHostKeyChecking accept-new
+    ConnectTimeout 10
+    # The link is wireless via CPE; keep dead sessions from hanging forever.
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+
+# Car 1 -- DESKTOP-94OA6CK, HMI LAN 192.168.71.180
+# 22022 chosen because the CPE already forwards 80, 443, 502, 2222, 5001-5003,
+# 5010, 5900, 8001, 8005, 8008, 8009, and owns 22 itself (dropbear).
+Host agv01
+    HostName 172.19.162.210
+    Port 22022
+
+# Cars 2 and 3 have no addresses assigned yet. Fill in when they do.
+# Host agv02
+#     HostName
+#     Port 22022
