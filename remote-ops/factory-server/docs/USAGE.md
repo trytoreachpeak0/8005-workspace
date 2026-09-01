@@ -51,7 +51,7 @@ agvops@WIN-0HD72AV4K31  pwsh 7.6.5  C盘剩余 105.3 GB
 | 认证 | **仅公钥**，密码认证已关闭 |
 | 私钥 | `C:\Users\szy\.ssh\agv_srv_ed25519` |
 | 远程 shell | `pwsh` 7.6.5 |
-| 应急密码 | `%LOCALAPPDATA%\CodexSecrets\agv-server-agvops.xml`（DPAPI，见第 4 节） |
+| 应急密码 | `%LOCALAPPDATA%\AgvOpsSecrets\agv-server-agvops.xml`（DPAPI，见第 4 节） |
 
 服务器 host key 指纹（首次连接或怀疑被顶包时核对）：
 
@@ -258,7 +258,7 @@ sshd"可以安全地远程完成。
 只在需要用 VNC / 向日葵 / 物理控制台以 `agvops` 身份登录时才需要：
 
 ```powershell
-(Import-Clixml "$env:LOCALAPPDATA\CodexSecrets\agv-server-agvops.xml").GetNetworkCredential().Password
+(Import-Clixml "$env:LOCALAPPDATA\AgvOpsSecrets\agv-server-agvops.xml").GetNetworkCredential().Password
 ```
 
 这个文件只能由创建它的 Windows 用户在控制端本机解密。**不要**把结果贴进聊天、
@@ -342,7 +342,7 @@ Remove-Item C:\temp\agv-ops -Recurse -Force -ErrorAction SilentlyContinue
 - 删 `C:\Users\agvops` 配置文件目录。
 - 控制端：`ssh-keygen -R 172.19.205.222`、删 `~/.ssh/config` 里的 `factory01` 段、
   删 `~/.ssh/agv_srv_ed25519*`、删
-  `%LOCALAPPDATA%\CodexSecrets\agv-server-agvops.xml`、
+  `%LOCALAPPDATA%\AgvOpsSecrets\agv-server-agvops.xml`、
   跑 `scripts/01-control-host-route.ps1 -Remove`。
 
 `Administrator`、RealVNC、AweSun、SQL Server 和整套 AGV 服务全程没动过，不需要恢复。

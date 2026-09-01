@@ -19,7 +19,7 @@
   代码所属仓库的写权限。写权限只看根 `CLAUDE.md`。
 - **凭据不进仓库。** 两把运维私钥都在控制端 `~/.ssh/`（上位机
   `agv_ops_ed25519`，服务器 `agv_srv_ed25519`，**互不通用**）；应急用的账户密码
-  在控制端 `%LOCALAPPDATA%\CodexSecrets\` 的 DPAPI 文件里。都不在这里，也不要
+  在控制端 `%LOCALAPPDATA%\AgvOpsSecrets\` 的 DPAPI 文件里。都不在这里，也不要
   复制进来。
 - **探测输出不进 git。** `probe-*.txt` 已 gitignore，内容是本机账户、管理员组、
   自动登录配置、防火墙状态和 IP 拓扑。

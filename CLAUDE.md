@@ -117,5 +117,5 @@ and the `w2g-rc-*` build output are gitignored.
     channel that preceded it was torn down on 2026-09-01 — see that
     subdirectory's README for what was removed and why. Two things stay out of
     git: `probe-*.txt`, and the console-rescue password for the `agvops`
-    account, which lives in `%LOCALAPPDATA%\CodexSecrets\` on the control
+    account, which lives in `%LOCALAPPDATA%\AgvOpsSecrets\` on the control
     machine.

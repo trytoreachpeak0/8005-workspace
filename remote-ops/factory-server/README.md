@@ -167,7 +167,7 @@ SSH 逐条解决：单端口、公钥免密、不需要 `TrustedHosts`、命令�
 需要时再加低权账户不难，反过来才麻烦。
 
 `agvops` 的密码由控制端随机生成，**只存进控制端的 DPAPI 文件
-`%LOCALAPPDATA%\CodexSecrets\agv-server-agvops.xml`，全程没有打印到任何终端或日志**。
+`%LOCALAPPDATA%\AgvOpsSecrets\agv-server-agvops.xml`，全程没有打印到任何终端或日志**。
 它只在 VNC / 向日葵 / 物理控制台应急时用得到，日常一律走公钥。
 
 ### 决策三：独立密钥，不复用上位机那把
