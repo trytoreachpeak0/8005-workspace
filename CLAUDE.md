@@ -102,9 +102,10 @@ and the `w2g-rc-*` build output are gitignored.
 - `remote-ops/` — every channel for reaching a machine in the plant. Writable;
   reaching a machine through it never grants write access to the repository
   whose code runs there. Two channels, one subdirectory each:
-  - `onboard-hmi/` — SSH to the AGV onboard HMI machines: probe, bootstrap, and
-    hardening scripts, the control-host SSH config, and the design record. Read
-    its `docs/USAGE.md` before touching a machine. Two things stay out of git:
+  - `onboard-hmi/` — SSH (`ssh agv01`, one alias per car) to the AGV onboard HMI
+    machines: probe, bootstrap, and hardening scripts, the control-host SSH
+    config, and the design record. Read its `docs/USAGE.md` before touching a
+    machine. Two things stay out of git:
     probe output (`probe-*.txt`), which inventories local accounts, the
     administrators group, autologon config, firewall state, and IP topology;
     and `payload/`, the offline OpenSSH package, which `docs/ASSETS.md`
@@ -112,10 +113,23 @@ and the `w2g-rc-*` build output are gitignored.
     `~/.ssh/`, never here.
   - `factory-server/` — SSH (`ssh factory01`) to the Windows Server 2016 host
     `WIN-0HD72AV4K31` at `172.19.205.222`, which carries SQL Server, the
-    running AGV service stack, and the MES ingest deployment target. Key-only
-    authentication; the private key lives in `~/.ssh/`, never here. The WinRM
-    channel that preceded it was torn down on 2026-09-01 — see that
-    subdirectory's README for what was removed and why. Two things stay out of
-    git: `probe-*.txt`, and the console-rescue password for the `agvops`
-    account, which lives in `%LOCALAPPDATA%\AgvOpsSecrets\` on the control
-    machine.
+    running AGV service stack, and the MES ingest deployment target. Read its
+    `docs/USAGE.md` before touching the machine — production services run on it.
+    Key-only authentication; the private key lives in `~/.ssh/`, never here (a
+    different key from the onboard-HMI one). The WinRM channel that preceded it
+    was torn down on 2026-09-01 — see that subdirectory's README for what was
+    removed and why; do not rebuild it. Two things stay out of git:
+    `probe-*.txt`, and the console-rescue password for the `agvops` account,
+    which lives in `%LOCALAPPDATA%\AgvOpsSecrets\` on the control machine.
+
+  Before trusting ANY ping or port probe from the control host, check that it is
+  not going through the Clash TUN adapter, which answers ICMP itself and
+  completes TCP handshakes locally — nonexistent hosts appear reachable and
+  every port appears open:
+
+  ```powershell
+  Find-NetRoute -RemoteIPAddress <target> | Select-Object -First 1 InterfaceAlias
+  ```
+
+  `Clash` means the result is fiction. `remote-ops/factory-server/scripts/01-control-host-route.ps1`
+  installs the bypass route (pass `-Prefix` for a new subnet, `-Remove` to undo).
