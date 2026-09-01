@@ -1,0 +1,21 @@
+# The five component repositories are cloned in place and tracked on their own
+# remotes. setup.ps1 restores them; this repository never contains their content.
+/8005---AGV/
+/8005-agv-control-server/
+/8005-agv-onboard-hmi/
+/8005-agv-protocol/
+/slots-simulator/
+
+# Release-candidate build output. The recipe under releases/ rebuilds and
+# verifies it; the binaries themselves stay out of git.
+/w2g-rc-*/
+
+# Windows / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Machine probe output: local accounts, administrators group, autologon config,
+# firewall state, open remote channels, full IP topology. Never commit these —
+# git history keeps them even after deletion. Regenerate with 01-probe.ps1.
+probe-*.txt
