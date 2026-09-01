@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
   setup.ps1 - Restore the workspace on a new machine.
 

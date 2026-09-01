@@ -1,4 +1,4 @@
-# AGV 上位机远程运维实验（hmi-remote-ops）
+# AGV 上位机远程运维实验（remote-ops/onboard-hmi）
 
 目标：把车载上位机（onboard HMI）从"只能人肉到现场操作"变成"可远程自动化部署、更新、巡检、操作"。
 当前 3 台车，未来更多，方案必须按台数线性扩展。
@@ -366,7 +366,7 @@ Win32-OpenSSH 所有 release 都带 `Preview`/`Beta` 后缀但 `prerelease=False
 ## 目录结构
 
 ```
-hmi-remote-ops/
+remote-ops/onboard-hmi/
 ├── README.md                     架构、决策理由、分阶段进展
 ├── docs/
 │   ├── USAGE.md                  日常怎么用（接手先读这个）

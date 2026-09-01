@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
   05-setup-control-host.ps1 - Rebuild the CONTROL side of the AGV ops channel.
 

@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
   04-serve-payload.ps1 - Temporary read-only HTTP server on the CONTROL workstation.
 

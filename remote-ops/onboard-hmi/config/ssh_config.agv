@@ -1,5 +1,5 @@
 # AGV onboard HMI machines.
-# Managed by 8005-workspace\hmi-remote-ops. See that README for the full design.
+# Managed by 8005-workspace\remote-ops\onboard-hmi. See that README for the full design.
 #
 # Each car sits behind its own KonNaD CPE2458 doing NAT. We reach the HMI by
 # port-forwarding an external port on the CPE's enterprise-LAN address to the

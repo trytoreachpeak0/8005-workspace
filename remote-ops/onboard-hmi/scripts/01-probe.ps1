@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
   01-probe.ps1 - Read-only environment probe for an AGV onboard HMI machine.
 

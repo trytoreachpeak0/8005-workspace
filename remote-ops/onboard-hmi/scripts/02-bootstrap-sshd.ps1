@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
   02-bootstrap-sshd.ps1 - Install and configure OpenSSH Server on an AGV onboard HMI.
 

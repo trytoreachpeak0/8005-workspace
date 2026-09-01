@@ -54,6 +54,31 @@ user instruction changing this standing policy may alter the list above.
 `w2g-rc-*/` are release-candidate artifact snapshots, not working trees. Read
 them for reference; never develop in them.
 
+## Scripting baseline
+
+PowerShell 7 is the shell for every script written in this workspace. Do not
+write Windows PowerShell 5.1 compatible code, do not add version probes,
+compatibility shims, or 5.1 fallbacks, and do not invoke `powershell.exe` —
+call `pwsh`. Every new `.ps1` opens with:
+
+```powershell
+#Requires -Version 7
+```
+
+Use PS7 features directly where they are the clearest expression: `&&`/`||`,
+`??`, `?.`, the ternary operator, `ForEach-Object -Parallel`,
+`ConvertFrom-Json -AsHashtable`, and UTF-8-without-BOM file defaults. The
+control host and the AGV onboard HMI machines reached through
+`remote-ops/onboard-hmi/` all run pwsh 7.6.5, so remote scripts follow the
+same rule.
+
+One exception, and it does not grow: scripts that execute on a MES factory
+target — the offline Windows Server 2016 host documented under
+`remote-ops/factory-server/`. It is reached over WinRM, has only Windows
+PowerShell 5.1, and no internet access to install pwsh. The scripts that run
+there live under `8005---AGV/mes/` and keep `#Requires -Version 5.1`. Never
+retrofit an already-released script in either direction.
+
 ## Workspace layout
 
 This repository tracks only workspace-level files; the five component clones
@@ -67,12 +92,20 @@ and the `w2g-rc-*` build output are gitignored.
   exceptions. It does not govern the three repositories owned by other people.
 - `releases/<id>/` — the recipe to rebuild and verify a release candidate:
   manifest, hashes, operator's manual, build scripts. Never the binaries.
-- `hmi-remote-ops/` — the SSH remote-operations channel for the onboard HMI
-  machines: probe, bootstrap, and hardening scripts, the control-host SSH
-  config, and the design record. Read its `docs/USAGE.md` before touching a
-  machine. This directory is writable; reaching an HMI machine through it never
-  grants write access to `8005-agv-onboard-hmi`. Two things stay out of git:
-  probe output (`probe-*.txt`), which inventories local accounts, the
-  administrators group, autologon config, firewall state, and IP topology; and
-  `payload/`, the offline OpenSSH package, which `docs/ASSETS.md` describes well
-  enough to re-fetch. The operations private key lives in `~/.ssh/`, never here.
+- `remote-ops/` — every channel for reaching a machine in the plant. Writable;
+  reaching a machine through it never grants write access to the repository
+  whose code runs there. Two channels, one subdirectory each:
+  - `onboard-hmi/` — SSH to the AGV onboard HMI machines: probe, bootstrap, and
+    hardening scripts, the control-host SSH config, and the design record. Read
+    its `docs/USAGE.md` before touching a machine. Two things stay out of git:
+    probe output (`probe-*.txt`), which inventories local accounts, the
+    administrators group, autologon config, firewall state, and IP topology;
+    and `payload/`, the offline OpenSSH package, which `docs/ASSETS.md`
+    describes well enough to re-fetch. The operations private key lives in
+    `~/.ssh/`, never here.
+  - `factory-server/` — WinRM to the offline Windows Server 2016 host that
+    carries SQL Server and the MES ingest deployment, reached over TCP 5985
+    from a connected control machine. That host is the one Scripting baseline
+    exception: Windows PowerShell 5.1 only, no route to install pwsh.
+    Credentials live in `%LOCALAPPDATA%\CodexSecrets\` on the control machine,
+    never here.

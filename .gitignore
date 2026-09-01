@@ -21,6 +21,6 @@ desktop.ini
 probe-*.txt
 
 # Offline redistributables staged for the air-gapped HMI machines. Same rule as
-# the release binaries above: hmi-remote-ops/docs/ASSETS.md records the version,
+# the release binaries above: remote-ops/onboard-hmi/docs/ASSETS.md records the version,
 # size, SHA256, and upstream URL, which is enough to re-fetch and verify.
-/hmi-remote-ops/payload/
+/remote-ops/onboard-hmi/payload/

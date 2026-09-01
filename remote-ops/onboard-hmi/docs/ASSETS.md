@@ -10,7 +10,7 @@
 ## 1. 本目录内
 
 ```
-hmi-remote-ops/
+remote-ops/onboard-hmi/
 ├── README.md                          架构、决策理由、分阶段进展
 ├── docs/
 │   ├── USAGE.md                       日常怎么用 ← 接手先读这个

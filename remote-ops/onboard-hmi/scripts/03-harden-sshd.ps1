@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
   03-harden-sshd.ps1 - Disable password authentication on an AGV onboard HMI.
 
