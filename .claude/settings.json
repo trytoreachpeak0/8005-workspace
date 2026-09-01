@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(dir *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Select-String *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(Resolve-Path *)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(Get-Service *)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(Get-NetIPAddress *)",
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(Get-PSDrive *)",
+      "PowerShell(Get-Item *)",
+      "PowerShell(Get-ItemProperty *)",
+      "Bash(dotnet test *)",
+      "PowerShell(dotnet test *)"
+    ]
+  }
+}
