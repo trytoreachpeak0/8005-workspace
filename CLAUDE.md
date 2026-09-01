@@ -113,8 +113,12 @@ and the `w2g-rc-*` build output are gitignored.
     `~/.ssh/`, never here.
   - `factory-server/` — SSH (`ssh factory01`) to the Windows Server 2016 host
     `WIN-0HD72AV4K31` at `172.19.205.222`, which carries SQL Server, the
-    running AGV service stack, and the MES ingest deployment target. Read its
-    `docs/USAGE.md` before touching the machine — production services run on it.
+    running AGV service stack, the MES ingest deployment target, and — since
+    2026-09-01 — the Hyper-V role hosting lab VMs. Read its `docs/USAGE.md`
+    before touching the machine — production services run on it. Two rules
+    there are load-bearing: never build an External virtual switch on `em4`
+    (it carries the only cabled link and this SSH channel itself), and never
+    touch the `SQAGV` database (it is not this workspace's to manage).
     Key-only authentication; the private key lives in `~/.ssh/`, never here (a
     different key from the onboard-HMI one). The WinRM channel that preceded it
     was torn down on 2026-09-01 — see that subdirectory's README for what was

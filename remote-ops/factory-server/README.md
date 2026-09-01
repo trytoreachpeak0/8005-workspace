@@ -17,6 +17,7 @@
 | 理解为什么从 WinRM 换成 SSH | 本文件第 3 节 |
 | 知道这台机器上跑着什么、不能碰什么 | 本文件第 2 节 |
 | 连不上了要排错 | [docs/USAGE.md](docs/USAGE.md) 第 4 节 |
+| **在这台机器上跑虚拟机** | [docs/USAGE.md](docs/USAGE.md) 第 8 节 |
 | 把服务器恢复到没装过这套东西的状态 | [docs/USAGE.md](docs/USAGE.md) 第 7 节 |
 
 > **接手前提**：私钥在控制端本机 `C:\Users\szy\.ssh\agv_srv_ed25519`，**不在本目录
@@ -44,8 +45,10 @@
 | **外网** | **通**，直连无代理。`github.com:443` 实测 HTTP 200 |
 | PowerShell | Windows PowerShell 5.1 与 **pwsh 7.6.5** 并存 |
 | 远程端点 | `PowerShell.7`、`PowerShell.7.6.5` 已注册（pwsh 安装时自带） |
-| SQL Server | 默认实例 `MSSQLSERVER`（`MSSQL16.MSSQLSERVER` = SQL Server 2022），自动启动 |
-| Hyper-V | 角色 `Available` 未安装；固件虚拟化与 SLAT 均支持 |
+| SQL Server | 唯一实例 `MSSQLSERVER`（`MSSQL16.MSSQLSERVER` = SQL Server 2022，16.0.1190.2，**Developer Edition**），**自动-延迟启动**，混合验证模式 |
+| SQL 数据库 | `SQAGV`（生产 AGV 库，**不归本工作区管，不要碰**）、`DWDiagnostics`/`DWConfiguration`/`DWQueue`（PolyBase 自带）。`MesIngest` 已于 2026-09-01 按用户要求删除 |
+| Hyper-V | **已安装并生效**（2026-09-01，第 4 节阶段 2）。`HypervisorPresent = True`，虚拟机配置版本上限 **8.0** |
+| 虚拟交换机 | `AGV-Internal`（Internal，**不绑定任何物理网卡**）+ 宿主侧 `192.168.200.1/24` + NAT `AGV-NAT` |
 | 防火墙 | **Domain profile 开启；Private 与 Public 均关闭**。`em4` 属 Private |
 
 改造完成后的完整快照在 `evidence/probe-WIN-0HD72AV4K31-20260901-202150.txt`（不进 git）。
@@ -202,7 +205,50 @@ SSH 逐条解决：单端口、公钥免密、不需要 `TrustedHosts`、命令�
 
 ---
 
-## 4. 阶段 1 执行记录（2026-09-01 完成）
+### 决策六：Internal 虚拟交换机 + NAT，**绝不碰 `em4`**
+
+装了 Hyper-V 就要给虚拟机接网，最自然的做法是在 `em4` 上建 External 虚拟交换机。
+**这台机器上不能这么做。**
+
+`em4` 是四个网口里唯一插了线的，承载 `172.19.205.222`，也就是这条 SSH 通道本身。
+建 External 交换机时 Hyper-V 会把物理网卡绑给虚拟交换机、在宿主侧新建
+`vEthernet (...)` 并重走 IP 配置——这中间地址会短暂消失，迁移不成功就再也连不上，
+只剩向日葵 / VNC / 到机房三条后路。为了给虚拟机接网而赌上运维通道本身，不划算。
+
+改用 Internal 交换机：不绑定任何物理网卡，创建过程对宿主网络零影响。代价是虚拟机
+默认没有外网，用 `New-NetNat` 补上——宿主当 NAT 网关，客户机走 `192.168.200.0/24`。
+
+`192.168.200.0/24` 这个网段是**沿用的，不是新选的**：`8005---AGV` 里
+`.scratch/onboard-controlserver-plaintext-transport` 票 07 的异机取证环境就是宿主
+`.1`、客户机 `.50`。将来要在这台服务器上复现那套联调，地址能直接对上。
+
+**WinNAT 不带 DHCP**，客户机必须配静态地址。直接后果是 Windows 11 的 OOBE 强制联网
+那一步会卡住，绕法写在 [docs/USAGE.md](docs/USAGE.md) 第 8 节。这个代价是知情接受的
+——替代方案是装 DHCP Server 角色，而那东西一旦绑错网卡就会往企业内网发地址，风险
+远大于收益。
+
+将来有人去机房把 `em1` 的线插上，再在 `em1` 上建 External 交换机接企业网。两种交换机
+可以并存，虚拟机挂两块网卡即可。**`em4` 永远不参与。**
+
+### 决策七：虚拟机在服务器上重建，不从控制端迁移
+
+用户 2026-09-01 明确本轮范围：本机的虚拟机和数据库都不迁移，在服务器上直接起新的。
+
+即使想迁也迁不了，这里有一条硬约束值得记下来：**控制端（Windows 11）上那四台虚拟机
+的配置版本是 12.0，而 Windows Server 2016 的 Hyper-V 支持上限是 8.0。配置版本只能升
+不能降**，导出再导入这条路根本不通。
+
+这条约束同时意味着：将来若要在这台服务器上重建 `8005---AGV` 那套黄金渲染机
+（`gpt_win11`），它会是**另一台机器**而不是同一台。金机的视觉基线绑在一整套校准环境
+上（主机名、1920x1080、96 DPI、浅色、zh-CN、Microsoft YaHei UI + Consolas、
+SoftwareOnly），换宿主换 Hyper-V 版本之后必须重拍并由用户重新逐张审批。用户
+2026-09-01 已知情并选择先只做到"能装上 Windows 11"，金机重建暂缓。
+
+---
+
+## 4. 执行记录
+
+### 阶段 1：SSH 通道（2026-09-01 完成）
 
 | 项 | 最终状态 |
 | --- | --- |
@@ -233,7 +279,7 @@ RSA      SHA256:e4vkqECN8MORcEY4PynlzPfU7DDYhoc2730IleadJjY
 ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
 ```
 
-### 途中踩到并已解决的坑
+#### 阶段 1 途中踩到并已解决的坑
 
 1. **Clash TUN 劫持**（第 2 节）。这是最花时间的一个，因为它让所有排错手段先失效。
 
@@ -262,20 +308,79 @@ ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
 
    已写进 `scripts/02-remove-winrm-channel.ps1` 的 `-RemoveProfiles` 分支。
 
+### 阶段 2：Hyper-V（2026-09-01 完成）
+
+停机窗口 23:31:16 → 23:37:58，约 6 分半，**两次重启**（装角色一次，hypervisor 初始化
+再一次）。用户当场授权。事前抓了一份服务基线，重启后逐条比对。
+
+| 项 | 最终状态 |
+| --- | --- |
+| 角色 | `Hyper-V` + `Hyper-V-PowerShell` + `RSAT-Hyper-V-Tools`，`HypervisorPresent = True` |
+| 数据根 | `D:\zhengyushao\Hyper-V\{VirtualMachines,VirtualHardDisks}`（用户要求新目录都收在 `D:\zhengyushao` 下） |
+| 虚拟交换机 | `AGV-Internal`（Internal）+ 宿主 `192.168.200.1/24` + NAT `AGV-NAT` |
+| Defender 排除项 | 路径 `D:\zhengyushao\Hyper-V`；扩展名 `.vhdx`/`.avhdx`/`.vhd`；进程 `vmms.exe`/`vmwp.exe`/`vmcompute.exe` |
+| 火绒排除项 | **未加**。它没有命令行接口，只能人工在它的界面里加，见第 5 节 |
+| 首台虚拟机 | `win11-01`：Gen 2 / 版本 8.0 / 4 vCPU / 4 GB 静态 / 动态 VHDX 上限 80 GB / Secure Boot On + `MicrosoftWindows` / **vTPM True** / 引导 DVD→硬盘 |
+| 安装介质 | `D:\zhengyushao\Windows.iso`，实测 Windows 11 24H2，build `10.0.26100.1`，UEFI 引导文件齐全 |
+
+重启后核验：第 1 节服务表上的东西全部回到基线状态，11 个监听端口与重启前完全相同，
+`em4` 的 `172.19.205.222` 未变，`C:`/`D:` 的分配单元仍是 4096——**全程没有格式化任何卷**。
+
+两个事前不确定、现在有实测结论的点：
+
+- **vTPM 在 Windows Server 2016 上可用。** `Set-VMKeyProtector -NewLocalKeyProtector`
+  接 `Enable-VMTPM` 跑通，`TpmEnabled = True`。装 Win11 24H2 不需要 LabConfig 那套
+  绕过 TPM/Secure Boot 检查的手段。
+- **重启比预期快。** 单次从下重启指令到 SSH 恢复约 2 分 45 秒，两次共约 6 分半。
+  66 GB 的 `AGV_log.ldf` 没有拖慢数据库恢复（`Recovery is complete` 在开机后约 2 分钟）。
+
+装系统本身没做——那是交互操作，由用户在 VMConnect 里完成。
+
+#### 阶段 2 途中踩到并已解决的坑
+
+6. **pwsh 7 里 Hyper-V 模块返回的是 `Deserialized.*` 对象**，`Set-VMFirmware` 的
+   `-BootOrder` / `-FirstBootDevice` 这类接受 `VMComponentObject` 的参数一律绑不上。
+   这和坑 3 是同一个根因：pwsh 通过 Windows PowerShell 兼容会话代理这些模块。
+   解法是 **`Import-Module Hyper-V -SkipEditionCheck`**，让 pwsh 原生加载模块，对象
+   类型立刻变回 `Microsoft.HyperV.PowerShell.*`。**不需要退回 `powershell.exe`**，
+   PS7 基线不用为此破例。两个新脚本开头都有这一行。
+
+7. **`MSSQLSERVER` 是"自动-延迟启动"**，重启后约两分钟才上线。`Get-Service` 的
+   `StartType` 只显示 `Automatic`，**不显示延迟标志**，拿它跟基线比对会误判成
+   "服务没起来"。要看真相得查 `Win32_Service` 的 `DelayedAutoStart`。本次因此虚惊
+   一场，还差点多余地手工拉起服务。
+
+8. **Hyper-V 缩略图 API 返回的字节数比 `Width*Height*2` 多 4 个字节。** 按
+   `ImageData.Length` 整体 `Marshal.Copy` 会写爆 `LockBits` 的缓冲区，触发 CLR 致命
+   错误 `0x80131506`，**直接崩掉整个 pwsh 进程**——不是可以 try/catch 的异常。必须按
+   精确长度拷贝，见 `scripts/vm-screenshot.ps1` 里的注释。
+
 ---
 
 ## 5. 未做的事
 
 | 事项 | 状态 |
 | --- | --- |
-| Hyper-V 角色安装、虚拟机从控制端迁过来 | 未做，用户明确本轮不碰 |
-| SQL Server 从控制端迁移过来 | 未做，同上 |
+| **火绒加 Hyper-V 排除项** | **未做，需要人在图形界面操作。** 漏了的症状是"虚拟机莫名很卡"，极难往杀软上想 |
+| 在 `win11-01` 里装 Windows 11 | 未做，交互步骤，由用户在 VMConnect 里完成 |
+| 装第二个 SQL 命名实例到 `D:` | 未做。用户已选定方案 B（独立实例而非共用现有实例），尚未执行 |
+| 重建黄金渲染机 / `plaintext_onboard_07` | 未做，用户 2026-09-01 明确暂缓，见决策七 |
 | MES ingest / WIRE_TO_GATE 部署到这台机器 | 未做，当前仍在控制端本机测试 |
 | 打开 Private profile 防火墙并收紧入站 | 未做，见决策五 |
+| 在 `em1` 上建 External 交换机接企业网 | 未做，等有人去机房插线，见决策六 |
 | 从服务器出发连车载上位机与雷达服务器的通道 | 只验证了 TCP 可达，未建立 |
 
-装 Hyper-V 需要重启，且会把宿主变成根分区，第 1 节那张服务表上的东西全部受影响。
-这件事必须先和用户约停机窗口。
+**有意不做、且不要自作主张去做的：**
+
+- **`SQAGV` 一律不碰。** 用户 2026-09-01 明确"不是我的生产数据库，不用你关心"。
+  它是 FULL 恢复模式、`log_reuse_wait_desc = LOG_BACKUP`、最后一次备份 2025-12-22、
+  日志 `AGV_log.ldf` 已涨到 66 GB（数据文件才 0.51 GB）。**知道这个状况，但不要去
+  备份、改恢复模式、收缩日志或建作业。**
+- **SQL 实例级设置（`max server memory`、停 PolyBase）默认不改。** 早先方案把设内存
+  上限列为装 Hyper-V 的前置条件，那是基于"SQL 会涨到吃满内存"的判断；实测推翻了它
+  ——开机三小时后 `sqlservr` 仍只占 1.23 GB，因为该实例的数据文件总共才约 1.7 GB，
+  缓冲池没东西可缓存。当前内存余量充足，而这些是承载 `SQAGV` 的共享实例的设置，
+  没必要为不存在的问题去动它。将来真要塞多台虚拟机时再重新评估。
 
 ---
 
@@ -319,9 +424,12 @@ remote-ops/factory-server/
 ├── config/
 │   ├── ssh_config.factory          ~/.ssh/config 里 factory01 那段的副本
 │   └── agv_srv_ed25519.pub         运维公钥（私钥不在仓库里）
-├── scripts/                        只放这台服务器特有的脚本
-│   ├── 01-control-host-route.ps1   控制端：绕开 Clash TUN 的路由，带 -Remove
-│   └── 02-remove-winrm-channel.ps1 服务器：拆除旧 WinRM 通道（已执行）
+├── scripts/                            只放这台服务器特有的脚本
+│   ├── 01-control-host-route.ps1       控制端：绕开 Clash TUN 的路由，带 -Remove
+│   ├── 02-remove-winrm-channel.ps1     服务器：拆除旧 WinRM 通道（已执行）
+│   ├── 03-configure-hyper-v-host.ps1   服务器：Hyper-V 宿主配置，幂等（已执行）
+│   ├── 04-create-win11-vm.ps1          服务器：建 Win11 虚拟机（已执行，产出 win11-01）
+│   └── vm-screenshot.ps1               服务器：抓客户机屏幕存 PNG，远程排查装机用
 └── evidence/                       ⛔ 不进 git
     └── probe-*.txt                 环境快照。重跑方式见 docs/USAGE.md 第 3 节
 ```

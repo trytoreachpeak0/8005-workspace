@@ -318,7 +318,148 @@ SSH 彻底不通时的后路，两条都与 sshd 无关，sshd 挂了不影响�
 
 ---
 
-## 8. 完全撤销
+## 8. Hyper-V 虚拟机
+
+2026-09-01 起这台机器装了 Hyper-V。为什么这么配、当时做了什么，见
+[../README.md](../README.md) 决策六、决策七与第 4 节阶段 2。
+
+### 先记住这条：pwsh 7 要加 `-SkipEditionCheck`
+
+```bash
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VM | Select-Object Name,State,Version"
+```
+
+不加它，pwsh 会通过 Windows PowerShell 兼容会话代理 Hyper-V 模块，拿到的是
+`Deserialized.*` 对象。**只读的 `Get-*` 照常能用**，所以问题不会立刻暴露；但凡是要把
+对象再传回去的命令——`Set-VMFirmware -BootOrder`、`-FirstBootDevice`——都会报"无法将
+`Deserialized.Microsoft.HyperV.PowerShell.*` 转换为 `VMComponentObject`"。
+
+**不要因此退回 `powershell.exe`**，加这个参数就够了，PS7 基线不用破例。
+
+### 能远程做什么、不能做什么
+
+| 事 | 走哪 |
+| --- | --- |
+| 建虚拟机、改配置、启停、快照、查状态 | ✅ SSH |
+| 传文件进 Windows 客户机（不需要客户机联网） | ✅ SSH，`Copy-VMFile`，见下 |
+| 看客户机当前画面 | ✅ SSH，`vm-screenshot.ps1`（**只能看，不能点**） |
+| **装系统、过 OOBE、按"任意键"** | ❌ 只能走向日葵 / VNC 开 VMConnect |
+
+### 当前资产
+
+| | |
+| --- | --- |
+| 数据根 | `D:\zhengyushao\Hyper-V\{VirtualMachines,VirtualHardDisks}` |
+| 虚拟交换机 | `AGV-Internal`（Internal，**不绑定物理网卡**），宿主侧 `192.168.200.1/24` |
+| NAT | `AGV-NAT`，`192.168.200.0/24`。**不带 DHCP，客户机必须配静态地址** |
+| 虚拟机 | `win11-01`（Gen 2 / 4 vCPU / 4 GB 静态 / VHDX 上限 80 GB / Secure Boot + vTPM） |
+| 安装介质 | `D:\zhengyushao\Windows.iso` = Windows 11 24H2 build `10.0.26100.1` |
+
+**`em4` 上没有、也永远不要建 External 虚拟交换机**——它是唯一插了线的网卡，也是这条
+SSH 通道本身，理由见 README 决策六。
+
+### 日常查看
+
+```bash
+# 虚拟机清单
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VM | Select-Object Name,State,CPUUsage,MemoryAssigned,Uptime"
+
+# 某台的固件与安全配置
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VMFirmware -VMName win11-01 | Select-Object SecureBoot,SecureBootTemplate; Get-VMSecurity -VMName win11-01 | Select-Object TpmEnabled"
+
+# 磁盘实占（动态 VHDX 会长）
+ssh factory01 "Get-VHD D:\zhengyushao\Hyper-V\VirtualHardDisks\win11-01.vhdx | Select-Object VhdType,FileSize,Size"
+
+# 启停
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Start-VM win11-01"
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Stop-VM win11-01"
+```
+
+### 建一台新虚拟机
+
+```bash
+scp ../scripts/04-create-win11-vm.ps1 factory01:C:/temp/agv-ops/
+ssh factory01 "pwsh -NoProfile -ExecutionPolicy Bypass -File C:\temp\agv-ops\04-create-win11-vm.ps1 -Name win11-02"
+```
+
+宿主侧配置（路径、交换机、NAT、Defender 排除项）是 `03-configure-hyper-v-host.ps1`，
+幂等，怀疑被改动过随时可重跑。
+
+### 看客户机画面
+
+SSH 看不到图形层。`Get-VM` 说 `State = Running` 不代表它在正常跑——它可能卡在
+"No operating system was loaded"，而 `CPUUsage = 0` 这个线索太弱，猜不出来。抓一张：
+
+```bash
+scp ../scripts/vm-screenshot.ps1 factory01:C:/temp/agv-ops/
+ssh factory01 "pwsh -NoProfile -ExecutionPolicy Bypass -File C:\temp\agv-ops\vm-screenshot.ps1 -VMName win11-01"
+scp factory01:C:/temp/agv-ops/vm-screen.png ./
+```
+
+虚拟机必须在运行状态，否则 API 报错。
+
+### 传文件进 Windows 客户机（不需要客户机联网）
+
+Server 2016 有 PowerShell Direct，宿主通过 VMBus 直接进 Windows 客户机。从控制端出发
+是两跳，全程走已有的 SSH 通道：
+
+```bash
+scp 文件.zip factory01:D:/zhengyushao/vm-staging/
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Copy-VMFile -Name win11-01 -SourcePath 'D:\zhengyushao\vm-staging\文件.zip' -DestinationPath 'C:\staging\文件.zip' -CreateFullPath -FileSource Host"
+```
+
+前置：客户机要先启用 Guest Service Interface。
+
+```bash
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Enable-VMIntegrationService -VMName win11-01 -Name 'Guest Service Interface'"
+```
+
+**只对 Windows 客户机有效**（Server 2016 / Win10 及以上）。Linux 客户机不支持
+PowerShell Direct 和 `Copy-VMFile`，只能走网络、挂 ISO 或附加 VHDX——选客户机操作系统
+时这是一个实际差别。
+
+### 装 Windows 11：三个必踩的坑
+
+装系统是交互操作，SSH 做不了。向日葵 / VNC 进服务器桌面 → `virtmgmt.msc` →
+双击虚拟机开 VMConnect。**用基本会话，不要用增强会话。**
+
+1. **"Press any key to boot from CD or DVD" 只给 5 秒。** 不按就超时，落到空白硬盘上
+   报 `No UEFI-compatible file system was found`。看起来像配置错了，其实引导顺序是
+   对的，只是没人按键——2026-09-01 首次启动 `win11-01` 就是这个现象。
+
+2. **Windows 11 24H2 的 OOBE 强制联网。** NAT 不带 DHCP，客户机在 OOBE 阶段拿不到
+   地址，这一步过不去。`Shift+F10` 打开命令行，二选一：
+
+   ```
+   oobe\bypassnro
+   ```
+
+   （执行后机器重启，会多出"我没有 Internet 连接"选项；26100.1 里这个脚本还在，
+   是后来的累积更新才移除的）或者直接配静态地址：
+
+   ```
+   netsh interface ip set address name="Ethernet" static 192.168.200.50 255.255.255.0 192.168.200.1
+   netsh interface ip set dns name="Ethernet" static 172.19.1.31
+   ```
+
+3. **装完记得配静态地址**（同上），否则客户机没有网。
+
+### 火绒排除项——必须人工做
+
+火绒 `HipsDaemon` 和 Windows Defender 在这台机器上同时运行。Defender 的排除项已由
+`03-configure-hyper-v-host.ps1` 加好，**火绒的没有，也加不了——它没有命令行接口**。
+
+在它的图形界面里加：
+
+- 排除路径 `D:\zhengyushao\Hyper-V`
+- 排除进程 `vmms.exe`、`vmwp.exe`、`vmcompute.exe`
+
+漏了的症状是"虚拟机莫名其妙很卡"，极难往杀软上想。而且火绒是 HIPS 不只是杀毒，
+理论上还可能拦 Hyper-V 的驱动——2026-09-01 装角色时它没有拦，但这不构成保证。
+
+---
+
+## 9. 完全撤销
 
 把服务器恢复到没装过这套东西的状态：
 
@@ -346,6 +487,18 @@ Remove-Item C:\temp\agv-ops -Recurse -Force -ErrorAction SilentlyContinue
   跑 `scripts/01-control-host-route.ps1 -Remove`。
 
 `Administrator`、RealVNC、AweSun、SQL Server 和整套 AGV 服务全程没动过，不需要恢复。
+
+**Hyper-V 是另一件事，不在上面这段的范围里。** 要连它一起撤（会再次重启并中断生产
+服务，需要停机窗口）：
+
+```bash
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VM | Stop-VM -TurnOff -Force; Get-VM | Remove-VM -Force"
+ssh factory01 "Remove-NetNat -Name AGV-NAT -Confirm:\$false; Import-Module Hyper-V -SkipEditionCheck; Remove-VMSwitch -Name AGV-Internal -Force"
+ssh factory01 "Uninstall-WindowsFeature -Name Hyper-V -IncludeManagementTools"
+```
+
+然后重启，再删 `D:\zhengyushao\Hyper-V` 和 Defender 的三类排除项。虚拟硬盘删了就
+没了，先确认里面没有要留的东西。
 
 **旧的 WinRM 通道没有恢复脚本**，那是有意的——重建它需要重新创建
 `codex-ops`/`codex-admin`、重新加 `LocalAccountTokenFilterPolicy` 和防火墙规则，

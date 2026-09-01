@@ -5,13 +5,19 @@
 | 目录 | 目标机 | 协议 | 目标机 PowerShell | 先读 |
 | --- | --- | --- | --- | --- |
 | `onboard-hmi/` | AGV 车载上位机 | SSH（`ssh agv01`） | pwsh 7.6.5 | `onboard-hmi/docs/USAGE.md` |
-| `factory-server/` | 厂区服务器 `WIN-0HD72AV4K31`（SQL Server + AGV 服务栈 + MES ingest 目标机） | SSH（`ssh factory01`） | pwsh 7.6.5 | `factory-server/docs/USAGE.md` |
+| `factory-server/` | 厂区服务器 `WIN-0HD72AV4K31`（SQL Server + AGV 服务栈 + MES ingest 目标机 + **Hyper-V 宿主**） | SSH（`ssh factory01`） | pwsh 7.6.5 | `factory-server/docs/USAGE.md` |
 
 两条通道现在都走 SSH、仅公钥认证、远程 shell 都是 pwsh 7.6.5，操作习惯一致。
 
 `factory-server/` 早先走的是 WinRM 5985 加 `codex-ops`/`codex-admin` 双账户，
 已于 2026-09-01 整个拆除——双账户模型从未真正生效、文档里的防火墙加固不成立、
 且它需要关闭远程 UAC 令牌过滤。原委见 `factory-server/README.md` 决策一。
+
+厂区服务器 2026-09-01 起还装了 **Hyper-V**，跑实验虚拟机。虚拟机相关的操作、限制和
+装机的坑在 `factory-server/docs/USAGE.md` 第 8 节。两条硬规矩：**不要在 `em4` 上建
+External 虚拟交换机**（那是唯一插了线的网卡，也是 SSH 通道本身），**pwsh 7 里调
+Hyper-V 模块要加 `-SkipEditionCheck`**，否则拿到的是绑不上参数的 `Deserialized.*`
+对象。
 
 ## 两条通道共同的约束
 
