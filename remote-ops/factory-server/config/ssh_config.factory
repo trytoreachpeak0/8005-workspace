@@ -1,0 +1,16 @@
+# AGV factory server -- WIN-0HD72AV4K31, Windows Server 2016 Standard.
+# Managed by 8005-workspace/remote-ops/factory-server. See that README.
+#
+# Unlike the onboard HMIs there is no CPE and no NAT: the server sits directly
+# on the enterprise network, so this is a plain 22. Its own dedicated key, NOT
+# the onboard-HMI key -- the two are separate trust domains and rotate apart.
+Host factory01
+    HostName 172.19.205.222
+    Port 22
+    User agvops
+    IdentityFile C:\Users\szy\.ssh\agv_srv_ed25519
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ConnectTimeout 10
+    ServerAliveInterval 30
+    ServerAliveCountMax 3

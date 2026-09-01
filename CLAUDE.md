@@ -67,17 +67,24 @@ call `pwsh`. Every new `.ps1` opens with:
 
 Use PS7 features directly where they are the clearest expression: `&&`/`||`,
 `??`, `?.`, the ternary operator, `ForEach-Object -Parallel`,
-`ConvertFrom-Json -AsHashtable`, and UTF-8-without-BOM file defaults. The
-control host and the AGV onboard HMI machines reached through
-`remote-ops/onboard-hmi/` all run pwsh 7.6.5, so remote scripts follow the
-same rule.
+`ConvertFrom-Json -AsHashtable`, and UTF-8-without-BOM file defaults. Every
+machine this workspace reaches runs pwsh 7.6.5 — the control host, the AGV
+onboard HMI machines under `remote-ops/onboard-hmi/`, and the factory server
+under `remote-ops/factory-server/` — so remote scripts follow the same rule.
 
-One exception, and it does not grow: scripts that execute on a MES factory
-target — the offline Windows Server 2016 host documented under
-`remote-ops/factory-server/`. It is reached over WinRM, has only Windows
-PowerShell 5.1, and no internet access to install pwsh. The scripts that run
-there live under `8005---AGV/mes/` and keep `#Requires -Version 5.1`. Never
-retrofit an already-released script in either direction.
+There is no live exception. The earlier one covered the Windows Server 2016
+factory host, on the grounds that it was offline and had only Windows
+PowerShell 5.1. Both premises stopped being true: verified 2026-09-01, that
+host has pwsh 7.6.5, a registered `PowerShell.7` remoting endpoint, and direct
+internet access. New scripts targeting it are PowerShell 7 like everything
+else.
+
+What survives is narrower, and it is a freeze rather than an exception: the
+already-released MES ingest scripts under
+`8005---AGV/mes/ingest/csharp/.artifacts/releases/` keep their
+`#Requires -Version 5.1` header. They were validated and shipped as 5.1
+artifacts. Never retrofit a released script in either direction — not to PS7,
+and not back to 5.1.
 
 ## Workspace layout
 
@@ -103,9 +110,12 @@ and the `w2g-rc-*` build output are gitignored.
     and `payload/`, the offline OpenSSH package, which `docs/ASSETS.md`
     describes well enough to re-fetch. The operations private key lives in
     `~/.ssh/`, never here.
-  - `factory-server/` — WinRM to the offline Windows Server 2016 host that
-    carries SQL Server and the MES ingest deployment, reached over TCP 5985
-    from a connected control machine. That host is the one Scripting baseline
-    exception: Windows PowerShell 5.1 only, no route to install pwsh.
-    Credentials live in `%LOCALAPPDATA%\CodexSecrets\` on the control machine,
-    never here.
+  - `factory-server/` — SSH (`ssh factory01`) to the Windows Server 2016 host
+    `WIN-0HD72AV4K31` at `172.19.205.222`, which carries SQL Server, the
+    running AGV service stack, and the MES ingest deployment target. Key-only
+    authentication; the private key lives in `~/.ssh/`, never here. The WinRM
+    channel that preceded it was torn down on 2026-09-01 — see that
+    subdirectory's README for what was removed and why. Two things stay out of
+    git: `probe-*.txt`, and the console-rescue password for the `agvops`
+    account, which lives in `%LOCALAPPDATA%\CodexSecrets\` on the control
+    machine.
