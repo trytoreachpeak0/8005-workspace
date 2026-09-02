@@ -23,10 +23,19 @@
     afterwards. It is not the runner's long-lived credential — that is
     .credentials in the runner directory, created by config.cmd.
 
-    Service mode runs the runner in session 0, which is correct for everything
-    that does not touch a desktop. The WPF golden-renderer suites need an
-    interactive session and therefore a different runner started from a logged-on
-    desktop; that is a later step and needs autologon first.
+    Two modes. Service mode (default) runs the runner in session 0, which is
+    correct for everything that does not touch a desktop. -Interactive instead
+    registers a scheduled task that starts the runner inside the logged-on
+    desktop session, which the WPF golden-renderer suites require: session 0 has
+    no interactive window station, and WPF fails there with dispatcher
+    thread-affinity errors rather than anything that names the real cause.
+    -Interactive therefore depends on autologon already being configured, so the
+    session exists after an unattended reboot.
+
+    Label the two apart. A workflow that selects only [self-hosted, win11-01]
+    would be picked up by whichever runner is free, which is exactly wrong when
+    one of them cannot draw. Service runners carry 'headless'; the interactive
+    one carries 'golden-renderer'.
 
 .PARAMETER RepoUrl
     Full repository URL, e.g. https://github.com/trytoreachpeak0/riot-sdk
@@ -52,7 +61,9 @@ param(
     [string]$Version = '2.337.0',
     [string]$InstallDir,
     [string]$InstallerPath,
-    [string]$WorkDir = 'C:\agv-ops\downloads'
+    [string]$WorkDir = 'C:\agv-ops\downloads',
+    [switch]$Interactive,
+    [string]$RunnerUser = 'agvops'
 )
 
 Set-StrictMode -Version Latest
@@ -103,24 +114,60 @@ if ($proxy) {
     Write-Output "已写入 .proxy（$proxy）。"
 }
 
-Write-Output '正在注册并安装为服务 ...'
+Write-Output ($Interactive ? '正在注册 runner（交互式）...' : '正在注册并安装为服务 ...')
 Push-Location $InstallDir
 try {
-    & .\config.cmd --unattended --url $RepoUrl --token $token `
-        --name $RunnerName --labels $Labels --work '_work' --runasservice --replace
+    $configArgs = @(
+        '--unattended', '--url', $RepoUrl, '--token', $token,
+        '--name', $RunnerName, '--labels', $Labels, '--work', '_work', '--replace'
+    )
+    if (-not $Interactive) { $configArgs += '--runasservice' }
+    & .\config.cmd @configArgs
     if ($LASTEXITCODE -ne 0) { throw "config.cmd 返回 $LASTEXITCODE。" }
 }
 finally {
     Pop-Location
 }
 
+if ($Interactive) {
+    $taskName = "GitHubRunner-$RunnerName"
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+    # start /min keeps run.cmd's console off the visible desktop. It still owns a
+    # taskbar button; the golden-renderer suites capture individual WPF windows
+    # rather than the whole screen, so that does not reach a baseline.
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' `
+        -Argument "/c start /min `"$RunnerName`" `"$InstallDir\run.cmd`"" `
+        -WorkingDirectory $InstallDir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $RunnerUser
+    # Interactive logon type is the whole point: it puts the process in the user's
+    # desktop session instead of session 0.
+    $principal = New-ScheduledTaskPrincipal -UserId $RunnerUser -LogonType Interactive -RunLevel Highest
+    # ExecutionTimeLimit 0 means no limit — the listener is meant to run forever.
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+        -MultipleInstances IgnoreNew
+
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings | Out-Null
+    Write-Output "已注册计划任务 $taskName（登录时启动，交互式会话）。"
+
+    Start-ScheduledTask -TaskName $taskName
+    Write-Output '已启动。'
+}
+
 Remove-Item -LiteralPath $TokenPath -Force -ErrorAction SilentlyContinue
 
-$svc = Get-Service -Name "actions.runner.*" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like "*$RunnerName*" } | Select-Object -First 1
-if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
+if (-not $Interactive) {
+    $svc = Get-Service -Name "actions.runner.*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "*$RunnerName*" } | Select-Object -First 1
+    if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
+}
 
 Write-Output ''
-Write-Output '=== runner 服务 ==='
+Write-Output '=== runner 服务（headless）==='
 Get-Service -Name 'actions.runner.*' -ErrorAction SilentlyContinue |
     Select-Object Name, Status, StartType | Format-Table -AutoSize | Out-String | Write-Output
+Write-Output '=== runner 计划任务（交互式）==='
+Get-ScheduledTask -TaskName 'GitHubRunner-*' -ErrorAction SilentlyContinue |
+    Select-Object TaskName, State | Format-Table -AutoSize | Out-String | Write-Output

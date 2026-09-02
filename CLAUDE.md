@@ -135,8 +135,30 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 机在别处"才需要的编排——payload 部署、PowerShell Direct 会话、计划任务注册、证
 据回捞全部不再需要。
 
-**实施状态：进行中，runner 尚未建立。**在它跑通之前，验证仍然一律在本地跑，各
-仓的默认测试命令写在自己的 `CLAUDE.md` 里。
+**已落地（2026-09-02）。**win11-01 上跑着三个 runner，用标签分工：
+
+| runner | 模式 | 标签 | 归属仓 |
+| --- | --- | --- | --- |
+| `win11-01-riot-sdk` | 服务（session 0） | `headless` | riot-sdk |
+| `win11-01-mes-ingest` | 服务（session 0） | `headless` | 8005-mes-ingest |
+| `win11-01-mes-ingest-desktop` | 交互式（session 1） | `golden-renderer` | 8005-mes-ingest |
+
+交互式那个由登录触发的计划任务在桌面会话里拉起，依赖客户机的 autologon（用
+Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，`DefaultPassword`
+键不存在）。**workflow 的 `runs-on` 一定要带 `headless` 或 `golden-renderer`**，
+只写 `[self-hosted, win11-01]` 会被两种 runner 里任意一个领走，而其中一个画不了图。
+
+`8005-mes-ingest` 的测试按 `[Collection("WpfDesktop")]` 标记划成两半：`test.yml`
+在 headless 上跑其余全部，`desktop-tests.yml` 在交互式 runner 上跑这些。划分由
+`Get-WpfDesktopTestFilter.ps1` 扫源码推导，不是手写清单——手写过一次，下一轮就漏
+了两个新类。合起来的结果与本地等价：
+
+| | 本地 | CI |
+| --- | --- | --- |
+| 通过 | 962 | 961（798 + 163） |
+| 跳过 | 138 | 138 |
+| 失败 | 0 | 1（`8005-mes-ingest#1`，已知） |
+| 总计 | 1100 | 1100 |
 
 三条硬约束：
 
