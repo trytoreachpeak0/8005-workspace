@@ -494,18 +494,28 @@ ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; (Get-VM win11-01).Networ
 > information 流，`>` 捕获不到，会拿到一个 0 字节的空文件。用 `Write-Output` 或
 > `| Tee-Object`。
 
-### 火绒排除项——必须人工做
+### 杀软排除项（两套都已配好，此节留作参考）
 
-火绒 `HipsDaemon` 和 Windows Defender 在这台机器上同时运行。Defender 的排除项已由
-`03-configure-hyper-v-host.ps1` 加好，**火绒的没有，也加不了——它没有命令行接口**。
+这台机器上**火绒和 Windows Defender 同时运行**，两套都要配排除项，否则症状是
+"虚拟机莫名其妙很卡"——磁盘 I/O 慢而 CPU 不高，极难往杀软上想。
 
-在它的图形界面里加：
+| | 怎么加 | 状态 |
+| --- | --- | --- |
+| Windows Defender | `Add-MpPreference`，有完整命令行接口，已由 `03-configure-hyper-v-host.ps1` 加好 | 2026-09-01 完成 |
+| 火绒 6.0.0.4 | **没有命令行接口**，只能人在图形界面里加 | 2026-09-02 由用户完成 |
 
-- 排除路径 `D:\zhengyushao\Hyper-V`
-- 排除进程 `vmms.exe`、`vmwp.exe`、`vmcompute.exe`
+火绒的加法（新机器或重装后要重来）：向日葵 / VNC 进桌面 → 托盘图标或
+`C:\Program Files (x86)\Huorong\Sysdiagin\HipsMain.exe` → 右上角「≡ 菜单」→
+「设置」→ 左侧「信任区」→「添加」：
 
-漏了的症状是"虚拟机莫名其妙很卡"，极难往杀软上想。而且火绒是 HIPS 不只是杀毒，
-理论上还可能拦 Hyper-V 的驱动——2026-09-01 装角色时它没有拦，但这不构成保证。
+- 文件夹：`D:\zhengyushao\Hyper-V`
+- 文件：`C:\Windows\System32mms.exe`、`vmwp.exe`、`vmcompute.exe`
+
+火绒的信任区对文件夹和单个文件都生效，加可执行文件等于信任那个进程。**火绒是 HIPS
+不只是杀毒**，`vmwp.exe` 会做大量高权限内存与 I/O 操作，它弹窗询问时要选允许。
+
+⚠️ **排除项只在宿主上加，客户机里不用加。** 客户机的杀软扫的是它自己的 `C:`，而 VHDX
+在宿主的 `D:` 上，客户机根本看不到那个文件。
 
 ---
 

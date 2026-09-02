@@ -319,7 +319,7 @@ ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
 | 数据根 | `D:\zhengyushao\Hyper-V\{VirtualMachines,VirtualHardDisks}`（用户要求新目录都收在 `D:\zhengyushao` 下） |
 | 虚拟交换机 | `AGV-Internal`（Internal）+ 宿主 `192.168.200.1/24` + NAT `AGV-NAT` |
 | Defender 排除项 | 路径 `D:\zhengyushao\Hyper-V`；扩展名 `.vhdx`/`.avhdx`/`.vhd`；进程 `vmms.exe`/`vmwp.exe`/`vmcompute.exe` |
-| 火绒排除项 | **未加**。它没有命令行接口，只能人工在它的界面里加，见第 5 节 |
+| 火绒排除项 | 已加（2026-09-02 由用户在界面完成）。火绒 6.0.0.4，无命令行接口，只能人工加 |
 | 首台虚拟机 | `win11-01`：Gen 2 / 版本 8.0 / 4 vCPU / 4 GB 静态 / 动态 VHDX 上限 80 GB / Secure Boot On + `MicrosoftWindows` / **vTPM True** / 引导 DVD→硬盘 |
 | 安装介质 | `D:\zhengyushao\installer\Windows.iso`，实测 Windows 11 24H2，build `10.0.26100.1`，UEFI 引导文件齐全 |
 | 客户机 | `DESKTOP-F9HC40O`，Windows 11 专业版 `26200.9168`（装后已联网更新），已激活，pwsh 7.6.5，`agvops` 本地管理员 |
@@ -374,7 +374,6 @@ ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
 
 | 事项 | 状态 |
 | --- | --- |
-| **火绒加 Hyper-V 排除项** | **未做，需要人在图形界面操作。** 漏了的症状是"虚拟机莫名很卡"，极难往杀软上想 |
 | ~~在 `win11-01` 里装 Windows 11~~ | **已完成**（2026-09-01，用户在 VMConnect 里装的），`ssh vm01` 可用 |
 | 装第二个 SQL 命名实例到 `D:` | 未做。用户已选定方案 B（独立实例而非共用现有实例），尚未执行 |
 | 重建黄金渲染机 / `plaintext_onboard_07` | 未做，用户 2026-09-01 明确暂缓，见决策七 |
