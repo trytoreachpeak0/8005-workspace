@@ -108,10 +108,15 @@ and not back to 5.1.
 通知**（见上面 Notify-after-change）。发布打 tag 仍需双人签名，AI 和 CI 不能批准。
 协议改动要攒批次——补丁发布会作废两边受影响的 G1/G2/G3 证据。
 
-写进 GitHub 的东西用中文：README、文档正文、issue 与 PR 的标题和正文、commit message
-正文。保持英文：commit 的 conventional 前缀、标识符、路径、命令、环境变量、错误码、
-门禁与切片名、协议消息名与 schema 字段与 `vectorId`。引用报错和测试输出先贴英文原文再
-中文解释。不回溯改旧的。
+**agent 指令文件用英文**（各仓 `CLAUDE.md`、`.claude/` 下的规则与 skill、
+`docs/agents/`）；**人看的东西用中文**（README、文档正文、`docs/defects/`、证据
+`SUMMARY.md`、issue 与 PR 的标题和正文、commit message 正文）。中文里保持英文：
+commit 的 conventional 前缀、标识符、路径、命令、环境变量、错误码、门禁与切片名、
+协议消息名与 schema 字段与 `vectorId`。引用报错和测试输出先贴英文原文再中文解释。
+不回溯改旧的。
+
+不知道该做什么时用 **`w2g-next`** skill（`.claude/skills/w2g-next/`）：它读真实状态并
+按固定优先级阶梯给出唯一一个下一步。
 
 ## Workspace layout
 
