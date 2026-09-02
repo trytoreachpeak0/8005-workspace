@@ -11,7 +11,7 @@ why, not a second policy.
 | `8005-agv-control-server` | `8005-agv-control-server` | `ControlServer_MVP` | mine | writable |
 | `8005-agv-onboard-hmi` | `8005-agv-onboard-hmi` | `OnboardHmi_MVP` | colleague | read-only |
 | `slots-simulator` | `slots-simulator` | `main` | colleague | read-only |
-| `8005-agv-protocol` | `8005-agv-protocol` | `main` | shared | approval-gated |
+| `8005-agv-protocol` | `8005-agv-protocol` | `main` | shared | writable, notify Kun Wang |
 
 The naming conventions in `file-naming-convention/` govern this workspace root
 and the two repositories marked "mine". The other three keep their own habits.

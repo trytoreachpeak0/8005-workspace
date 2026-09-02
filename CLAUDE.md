@@ -21,7 +21,7 @@ wherever it sits on disk.
 | `8005-agv-control-server` | Writable — WIRE_TO_GATE server |
 | `8005-agv-onboard-hmi` | **Read-only for agents** |
 | `slots-simulator` | **Read-only for agents** |
-| `8005-agv-protocol` | **Approval-gated**, read-only by default |
+| `8005-agv-protocol` | Writable — **notify Kun Wang after every change** |
 
 ### Read-only
 
@@ -32,17 +32,23 @@ are fine. Run validation that would generate files from a disposable copy, or
 with outputs outside the protected repository, and leave its worktree
 unchanged.
 
-### Approval-gated
+### Notify-after-change
 
-Before any local edit, generated file, branch, commit, push, or remote
-tracker/release action in `8005-agv-protocol`, both Zhengyu Shao (the user) and
-Kun Wang must explicitly approve the same concrete change and destination
-branch. Approvals must be task-specific and present in the current task context
-or an explicitly linked approval record. Do not infer approval from old
-releases, authorship, map Notes, prior tickets, or approval of a different
-change. One approval is not enough. If either is missing, stop at analysis and
-report what approval is still required. If the requested scope changes, obtain
-both approvals again.
+`8005-agv-protocol` is writable. Zhengyu Shao decides its content alone — Kun
+Wang's approval is **not** required in advance (changed 2026-09-02; the earlier
+dual-approval gate no longer applies).
+
+What replaces it: **every pushed change must be announced to Kun Wang**, because
+the protocol is the contract his side builds against and a release invalidates
+his gate evidence. Open an issue in `8005-agv-protocol` that `@SocialKKKK`, and
+state three things — what changed, which `W2G-IS-*` slices it touches, and
+whether his `ONBOARD_HMI_G2` evidence is now void. Do this in the same task as
+the push, not later.
+
+Formal releases are unchanged: `docs/release-governance.md` still requires two
+distinct product owners in the approval attestation before an immutable tag, and
+AI and CI still cannot approve. That governs tagging a `ProtocolRelease`, not
+ordinary commits.
 
 ### Scope
 
@@ -86,6 +92,27 @@ already-released MES ingest scripts under
 artifacts. Never retrofit a released script in either direction — not to PS7,
 and not back to 5.1.
 
+## 协作与语言
+
+项目由两个人推进：Kun Wang（GitHub `SocialKKKK`）负责 `8005-agv-onboard-hmi` 与
+`slots-simulator`；Zhengyu Shao 负责 `8005-agv-control-server`；`8005-agv-protocol`
+共同维护。**权威文档是 `8005---AGV/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md`
+里内联了 agent 必须遵守的部分。
+
+注意 `8005-workspace` 这个仓库**只有 Zhengyu Shao 有访问权**，Kun Wang 看不到。任何需要
+对方看到的东西不能只写在这里。
+
+协作单位是 `8005-agv-protocol/integration-slices/index.json` 里的 integration slice
+（`W2G-IS-00` 到 `W2G-IS-07`），每个切片的 `gates` 就是分工。跨仓库反馈必须带可复现的
+门禁证据。protocol 由 Zhengyu Shao 单独决定内容，但**每次推送都要开 issue @`SocialKKKK`
+通知**（见上面 Notify-after-change）。发布打 tag 仍需双人签名，AI 和 CI 不能批准。
+协议改动要攒批次——补丁发布会作废两边受影响的 G1/G2/G3 证据。
+
+写进 GitHub 的东西用中文：README、文档正文、issue 与 PR 的标题和正文、commit message
+正文。保持英文：commit 的 conventional 前缀、标识符、路径、命令、环境变量、错误码、
+门禁与切片名、协议消息名与 schema 字段与 `vectorId`。引用报错和测试输出先贴英文原文再
+中文解释。不回溯改旧的。
+
 ## Workspace layout
 
 This repository tracks only workspace-level files; the five component clones
@@ -125,6 +152,9 @@ and the `w2g-rc-*` build output are gitignored.
     removed and why; do not rebuild it. Two things stay out of git:
     `probe-*.txt`, and the console-rescue password for the `agvops` account,
     which lives in `%LOCALAPPDATA%\AgvOpsSecrets\` on the control machine.
+    The lab guests on this host are reached from the control machine with
+    `ssh vm01` (and one alias per further guest), which jumps through
+    `factory01` — see **Lab VMs** below.
 
   Before trusting ANY ping or port probe from the control host, check that it is
   not going through the Clash TUN adapter, which answers ICMP itself and
@@ -137,3 +167,38 @@ and the `w2g-rc-*` build output are gitignored.
 
   `Clash` means the result is fiction. `remote-ops/factory-server/scripts/01-control-host-route.ps1`
   installs the bypass route (pass `-Prefix` for a new subnet, `-Remove` to undo).
+
+## Lab VMs
+
+Experiments run on the factory server's Hyper-V, never on the control machine's
+own Hyper-V. As of 2026-09-02 there is one guest:
+
+| Alias | Guest | Address | Notes |
+| --- | --- | --- | --- |
+| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, pwsh 7.6.5, `agvops` local admin, 6 vCPU, dynamic 4/2/8 GB |
+
+Key-only, via `ProxyJump factory01` — the guest sits on the Internal switch
+`AGV-Internal` (`192.168.200.0/24`) with NAT out, so there is no route to it
+from the enterprise network and the jump host is the only way in. Its key
+(`~/.ssh/agv_vm_ed25519`) is a third key, not the server's and not the
+onboard-HMI one. Host config copy: `remote-ops/factory-server/config/ssh_config.vm`.
+Operations, troubleshooting, and the antivirus exclusions are in section 8 of
+`remote-ops/factory-server/docs/USAGE.md`; the scripts that built it are
+`03-configure-hyper-v-host.ps1`, `04-create-win11-vm.ps1`,
+`05-bootstrap-guest-sshd.ps1` (runs inside the guest) and `vm-screenshot.ps1`.
+
+The control machine also runs Hyper-V, with `gpt_win11`, `plaintext_onboard_07`,
+`rocky_9_minimal` and `windows_server_2022_100`. **Those are not scratch space.**
+`gpt_win11` is the golden renderer whose visual baselines are calibrated and
+user-approved (`8005---AGV/.claude/rules/watch-ui.md`), and
+`plaintext_onboard_07` is the off-machine forensics environment; touching either
+outside its own workflow invalidates work that cost the user approval time.
+
+`gpt_win11` has exactly one sanctioned use: the tier 2 and tier 3 golden-renderer
+runs defined in `8005---AGV/CLAUDE.md`, each of which the user must authorize
+first. That path stays open and follows its own rules (1920x1080 at 100% / 96 DPI,
+no RDP or Enhanced Session, never overwrite a baseline before the user reviews
+the preview). Everything else is off limits: do not borrow any of the four as
+scratch space, do not snapshot or reconfigure them, and do not create new VMs on
+the control machine — provision a new guest on the factory server instead.
+Reading their configuration to answer a question is fine.
