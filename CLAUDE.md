@@ -183,6 +183,48 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
 丢失，导致查询文件摘要对不上）。**教训是：改动会影响构建的文件后，用干净
 checkout 验证一次**——例如临时克隆到别处再跑测试。
 
+## CD：MesIngest 部署到 factory-server，控制端中转
+
+**已落地（2026-09-02）**，端到端验证过。权威文档是
+`remote-ops/factory-server/docs/mes-ingest-cd.md`。
+
+```
+release.yml (workflow_dispatch, headless runner) → zip + sha256 → GitHub artifact
+   → 控制端 gh run download → 验哈希 → scp → factory01 → Install-MesIngestServer.ps1
+```
+
+| 位置 | 内容 |
+| --- | --- |
+| `D:\zhengyushao\MesIngest` | 服务器安装根，Windows 服务 `MesIngest`，绑 `0.0.0.0:5088` |
+| `D:\zhengyushao\MesIngest.previous` | 只留一代，`-Rollback` 换回去 |
+| `C:\MesIngest-Watch` | 控制端只装 Watch，连 `172.19.205.222:5088` |
+| 数据库 | 服务器本机 `MSSQLSERVER` 的 `MesIngest` 库，登录 `mesingest` 仅该库 `db_owner` |
+
+四条不显然的约束：
+
+1. **runner 不直接部署，必须经控制端中转。**`win11-01` 是 factory-server 的客户机，
+   宿主就在 `192.168.200.1`，让 runner 直连是最短的路，但那等于把一把能进生产服务器
+   的管理员钥匙放在 CI 上——任何能改那个仓 workflow 的路径最终都能碰到 `AgvAmhs`、
+   `AGV.Web` 和 `SQAGV`。
+2. **部署编排脚本不能进安装包。**`Test-ReleasePackage.ps1` 递归扫包内所有 `.ps1` 找
+   未授权的 `DROP DATABASE`，并且只允许两个 canonical `.sql` 路径。往包里塞脚本会让
+   每次发布验证直接失败。脚本走包外的 `D:\zhengyushao\mes-ingest-ops\`。
+3. **`agvops` 在 SQL Server 上有 `dbcreator` + `ALTER ANY LOGIN`，没有 sysadmin。**
+   这是为了让 CD 自助建库而开的口子，代价真实：`ALTER ANY LOGIN` 能改包括 `sa` 在内
+   的登录密码，所以那把 SSH 私钥理论上顺着它能碰到同实例的 `SQAGV`。收回语句在
+   `scripts/mes-ingest/grant-agvops-sql-access.sql` 末尾。
+4. **Host 绑非 localhost，于是所有请求都要 Bearer**（`MesIngest.Host/Program.cs:182`
+   的中间件不区分来源）。服务器上那个走回环的 Watch 同样要带 SharedSecret，健康检查
+   也要。三个秘密存控制端 `%LOCALAPPDATA%\AgvOpsSecrets\mes-ingest-deployment.xml`，
+   DPAPI 加密。
+
+**CD 不跑打包发布门禁，不删库，不碰 `SQAGV`。**`Invoke-PackagedReleaseGate.ps1` 属于
+切 RC 的流程；唯一会删库的入口仍是 `pack/cutover/Invoke-EmptyDatabaseCutover.ps1`。
+
+首次实跑打出来两个自己的 bug，都值得记住：**`-replace` 的左侧是正则**，`'\'` 是非法
+模式而不是一个反斜杠；**失败要尽早**——密码复杂度原本等到下载 207 MB、建完库才被
+SQL Server 以 15118 拒绝，现在在输入时就检查。
+
 ## .NET 工具链基线
 
 四个可写 .NET 仓库统一到一套工具链，真相来源是
