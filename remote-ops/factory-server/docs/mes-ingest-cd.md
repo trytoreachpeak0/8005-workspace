@@ -101,6 +101,26 @@ pwsh -File remote-ops/factory-server/scripts/mes-ingest/Set-MesIngestSecret.ps1 
 | `SqlPassword` | 你现场输入，`mesingest` 登录就用这个密码创建 |
 | `SharedSecret` | 脚本生成 32 字节随机值，永不显示 |
 
+SQL 密码在输入时就会校验复杂度：**至少 8 位，且大写/小写/数字/符号四类里占三类，
+不含登录名**。不合格会当场重问。这条规则是照 Windows 默认策略写的，故意不比它更严——
+本地检查不可能是权威的，所以过了不等于服务器一定接受，但没过则一定被拒。
+
+登录是用 `CHECK_POLICY = ON` 创建的，密码不合规时 SQL Server 报：
+
+```
+消息 15118，级别 16，状态 1
+密码验证失败。该密码不够复杂，不符合操作系统策略要求。
+```
+
+改密码用 `-ResetSqlPassword`（不加这个开关，已存在的密码不会被重问）：
+
+```bash
+pwsh -File remote-ops/factory-server/scripts/mes-ingest/Set-MesIngestSecret.ps1 -ResetSqlPassword
+```
+
+改完直接重跑部署即可。建库和建登录都是幂等的：库已存在就跳过，登录已存在就把密码
+`ALTER` 成新值。
+
 存储位置 `%LOCALAPPDATA%\AgvOpsSecrets\mes-ingest-deployment.xml`，和 `agvops` 的应急
 密码同一个目录。**不进仓库、不进 CI、不进命令行、不进日志。**
 

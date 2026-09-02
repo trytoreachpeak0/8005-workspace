@@ -29,6 +29,11 @@
     Read OraclePassword (and the SQL password, if that install used one) from an
     existing appsettings.Local.json rather than prompting for it.
 
+.PARAMETER ResetSqlPassword
+    Prompt for the SQL password again even though one is already stored. Needed
+    after SQL Server rejects one for complexity, and whenever the login's
+    password is changed out of band.
+
 .PARAMETER RotateSharedSecret
     Generate a new SharedSecret even if one is already stored. Both the Host and
     every Watch must be redeployed afterwards, or they stop authenticating.
@@ -47,6 +52,9 @@ param(
     [string] $Import,
 
     [Parameter(ParameterSetName = 'Set')]
+    [switch] $ResetSqlPassword,
+
+    [Parameter(ParameterSetName = 'Set')]
     [switch] $RotateSharedSecret,
 
     [Parameter(ParameterSetName = 'Show')]
@@ -59,6 +67,41 @@ function Read-Existing {
     param([string] $StorePath)
     if (Test-Path -LiteralPath $StorePath) { return Import-Clixml -LiteralPath $StorePath }
     return @{}
+}
+
+# SQL Server creates the login with CHECK_POLICY = ON, so the password has to
+# satisfy the server's Windows policy. Getting that wrong used to surface as a
+# failed deployment several minutes later:
+#
+#     消息 15118 ... 密码验证失败。该密码不够复杂，不符合操作系统策略要求。
+#
+# by which point a database had already been created. Checking here turns that
+# into a reprompt. This mirrors the Windows default complexity rule rather than
+# reading the server's actual policy — a local check cannot be authoritative, so
+# it is deliberately no stricter than the default: passing here is not a promise,
+# but failing here is certain.
+function Test-PasswordComplexity {
+    param([securestring] $Password, [string] $LoginName)
+
+    $value = [System.Net.NetworkCredential]::new('', $Password).Password
+    $problems = @()
+
+    if ($value.Length -lt 8) { $problems += '至少 8 个字符' }
+
+    $classes = 0
+    if ($value -cmatch '[A-Z]') { $classes++ }
+    if ($value -cmatch '[a-z]') { $classes++ }
+    if ($value -match '[0-9]') { $classes++ }
+    if ($value -match '[^a-zA-Z0-9]') { $classes++ }
+    if ($classes -lt 3) {
+        $problems += '大写字母、小写字母、数字、符号，四类里至少要占三类'
+    }
+
+    if ($LoginName -and $value -like "*$LoginName*") {
+        $problems += "不能包含登录名 $LoginName"
+    }
+
+    return $problems
 }
 
 if ($Show) {
@@ -99,11 +142,25 @@ if (-not $store.ContainsKey('OraclePassword') -or -not $store['OraclePassword'])
     $store['OraclePassword'] = Read-Host -AsSecureString -Prompt 'MES Oracle password (user fwmes)'
 }
 
-if (-not $store.ContainsKey('SqlPassword') -or -not $store['SqlPassword']) {
+if ($ResetSqlPassword -or -not $store.ContainsKey('SqlPassword') -or -not $store['SqlPassword']) {
     Write-Output ''
     Write-Output 'SQL Server login `mesingest` on the factory server.'
     Write-Output 'Pick it now; the deployment creates the login with this password.'
-    $store['SqlPassword'] = Read-Host -AsSecureString -Prompt 'Password for SQL login mesingest'
+    Write-Output '要求：至少 8 位，且大写/小写/数字/符号四类里占三类。'
+
+    while ($true) {
+        $candidate = Read-Host -AsSecureString -Prompt 'Password for SQL login mesingest'
+        if ($candidate.Length -eq 0) {
+            Write-Warning '密码不能为空。'
+            continue
+        }
+        $problems = Test-PasswordComplexity -Password $candidate -LoginName 'mesingest'
+        if ($problems.Count -eq 0) {
+            $store['SqlPassword'] = $candidate
+            break
+        }
+        Write-Warning "这个密码 SQL Server 会拒绝（CHECK_POLICY = ON）：$($problems -join '；')"
+    }
 }
 
 # The shared secret is machine-generated on purpose. It is never typed by a

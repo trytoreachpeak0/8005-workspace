@@ -99,7 +99,9 @@ Set-StrictMode -Version 3.0
 
 $scriptRoot = $PSScriptRoot
 $installerSource = Join-Path $scriptRoot 'mes-ingest\Install-MesIngestServer.ps1'
-$toPosix = { param($p) $p -replace '\', '/' }
+# .Replace rather than -replace: the right-hand side of -replace is a regular
+# expression, where a lone backslash is an error rather than a backslash.
+$toPosix = { param($p) $p.Replace('\', '/') }
 
 function Write-Step {
     param([string] $Message)
