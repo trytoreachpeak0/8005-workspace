@@ -352,8 +352,10 @@ ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VM | Select-Object N
 | 数据根 | `D:\zhengyushao\Hyper-V\{VirtualMachines,VirtualHardDisks}` |
 | 虚拟交换机 | `AGV-Internal`（Internal，**不绑定物理网卡**），宿主侧 `192.168.200.1/24` |
 | NAT | `AGV-NAT`，`192.168.200.0/24`。**不带 DHCP，客户机必须配静态地址** |
-| 虚拟机 | `win11-01`（Gen 2 / 4 vCPU / 4 GB 静态 / VHDX 上限 80 GB / Secure Boot + vTPM） |
-| 安装介质 | `D:\zhengyushao\Windows.iso` = Windows 11 24H2 build `10.0.26100.1` |
+| 虚拟机 | `win11-01`（Gen 2 / **6 vCPU** / 4 GB 静态 / VHDX 上限 80 GB / Secure Boot + vTPM） |
+| 客户机 | `DESKTOP-F9HC40O`，Windows 11 专业版 `26200.9168`，已激活，pwsh 7.6.5，`agvops` 本地管理员 |
+| **进客户机** | **`ssh vm01`**（经 `factory01` 跳板，仅公钥，密钥 `~/.ssh/agv_vm_ed25519`） |
+| 安装介质 | `D:\zhengyushao\installer\Windows.iso` = Windows 11 24H2 build `10.0.26100.1` |
 
 **`em4` 上没有、也永远不要建 External 虚拟交换机**——它是唯一插了线的网卡，也是这条
 SSH 通道本身，理由见 README 决策六。
@@ -443,6 +445,54 @@ PowerShell Direct 和 `Copy-VMFile`，只能走网络、挂 ISO 或附加 VHDX�
    ```
 
 3. **装完记得配静态地址**（同上），否则客户机没有网。
+
+### 进客户机：`ssh vm01`
+
+装完系统之后客户机自己也是一台可远程运维的机器，走和另外两台一样的路子：仅公钥，
+远程 shell 是 pwsh。它在 Internal 交换机上，企业网没有路由过去，所以必须经 `factory01`
+跳板——这也正是它开 22 端口没有风险的原因。
+
+```bash
+ssh vm01 "hostname; whoami"
+scp 文件 vm01:C:/agv-ops/
+```
+
+别名在 `~/.ssh/config`（副本在 `../config/ssh_config.vm`），用的是**第三把**密钥
+`agv_vm_ed25519`，不复用另外两把，理由同 [../README.md](../README.md) 决策三。
+
+新建一台客户机时，开通通道的脚本是 `../scripts/05-bootstrap-guest-sshd.ps1`，**在客户机
+里跑**。送进去不需要凭据：
+
+```bash
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Enable-VMIntegrationService -VMName <VM> -Name '来宾服务接口'"
+scp ../scripts/05-bootstrap-guest-sshd.ps1 factory01:D:/zhengyushao/
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Copy-VMFile -Name <VM> -SourcePath 'D:\zhengyushao\05-bootstrap-guest-sshd.ps1' -DestinationPath 'C:\agv-ops\05-bootstrap-guest-sshd.ps1' -CreateFullPath -FileSource Host"
+```
+
+然后请人在客户机的**管理员 pwsh** 里跑一次（先装 pwsh 7，MSI 同样用 `Copy-VMFile` 送进去）。
+跑完只需要把它打印的**账户名**告诉你——**密码不需要，也不要让任何人把密码贴进聊天或工单**。
+
+### 客户机连不上：先怀疑它自己的防火墙
+
+症状是**宿主既 ping 不通也连不上 22，而客户机自己上网、Windows Update、装软件全正常**。
+看起来像 sshd 或跳板坏了，其实是客户机把自己封死了：全新 Windows 11 接在 Internal +
+WinNAT 上时，NLA 缺少判定网关可达性所需的特征，把这个网络归入**公用**配置文件，而公用
+配置默认挡掉 ICMP 和几乎所有入站。
+
+先从宿主侧确认是哪一层：
+
+```bash
+ssh factory01 "Test-NetConnection 192.168.200.50 -Port 22 -WarningAction SilentlyContinue | Select-Object TcpTestSucceeded,PingSucceeded"
+ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; (Get-VM win11-01).NetworkAdapters | Select-Object SwitchName,IPAddresses"
+```
+
+客户机报得出 IP、宿主却两项都 False，基本就是这个。修法在
+`../scripts/05-bootstrap-guest-sshd.ps1` 第 5 步（该脚本已包含，重跑幂等）；只能在客户机
+本地执行，走向日葵 / VNC → VMConnect。
+
+> 让人在客户机里跑脚本并把输出重定向到文件时，**别用 `Write-Host` 打印结论**——它走
+> information 流，`>` 捕获不到，会拿到一个 0 字节的空文件。用 `Write-Output` 或
+> `| Tee-Object`。
 
 ### 火绒排除项——必须人工做
 

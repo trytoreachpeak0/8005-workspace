@@ -1,0 +1,20 @@
+
+# Windows 11 lab guest running on the factory server's Hyper-V, reached through
+# factory01. It sits on the Internal switch 192.168.200.0/24 with no route from
+# the enterprise network, so the jump host is the only way in -- which is also
+# why 22 is safe to open there.
+#
+# Third key, not the server's and not the onboard-HMI one: same reasoning as
+# remote-ops/factory-server/README.md decision three, separate trust domains
+# rotate apart.
+Host vm01
+    HostName 192.168.200.50
+    Port 22
+    User agvops
+    ProxyJump factory01
+    IdentityFile C:\Users\szy\.ssh\agv_vm_ed25519
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ConnectTimeout 15
+    ServerAliveInterval 30
+    ServerAliveCountMax 3

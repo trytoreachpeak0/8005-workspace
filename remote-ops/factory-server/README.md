@@ -321,7 +321,9 @@ ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
 | Defender 排除项 | 路径 `D:\zhengyushao\Hyper-V`；扩展名 `.vhdx`/`.avhdx`/`.vhd`；进程 `vmms.exe`/`vmwp.exe`/`vmcompute.exe` |
 | 火绒排除项 | **未加**。它没有命令行接口，只能人工在它的界面里加，见第 5 节 |
 | 首台虚拟机 | `win11-01`：Gen 2 / 版本 8.0 / 4 vCPU / 4 GB 静态 / 动态 VHDX 上限 80 GB / Secure Boot On + `MicrosoftWindows` / **vTPM True** / 引导 DVD→硬盘 |
-| 安装介质 | `D:\zhengyushao\Windows.iso`，实测 Windows 11 24H2，build `10.0.26100.1`，UEFI 引导文件齐全 |
+| 安装介质 | `D:\zhengyushao\installer\Windows.iso`，实测 Windows 11 24H2，build `10.0.26100.1`，UEFI 引导文件齐全 |
+| 客户机 | `DESKTOP-F9HC40O`，Windows 11 专业版 `26200.9168`（装后已联网更新），已激活，pwsh 7.6.5，`agvops` 本地管理员 |
+| 客户机通道 | `ssh vm01` → `agvops@192.168.200.50`，经 `factory01` 跳板，**仅公钥**，第三把密钥 `agv_vm_ed25519` |
 
 重启后核验：第 1 节服务表上的东西全部回到基线状态，11 个监听端口与重启前完全相同，
 `em4` 的 `172.19.205.222` 未变，`C:`/`D:` 的分配单元仍是 4096——**全程没有格式化任何卷**。
@@ -355,6 +357,17 @@ ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
    错误 `0x80131506`，**直接崩掉整个 pwsh 进程**——不是可以 try/catch 的异常。必须按
    精确长度拷贝，见 `scripts/vm-screenshot.ps1` 里的注释。
 
+9. **全新 Windows 11 客户机会把 Internal + NAT 这个网络判成「公用」，把自己封死。**
+   NLA 判定网关可达性时，这种网络缺少所需特征，于是归入公用配置文件——默认挡掉 ICMP
+   和几乎所有入站。症状极具误导性：**宿主既 ping 不通也连不上 22，而客户机自己上网、
+   Windows Update、装软件全都正常**，看起来像是 sshd 或跳板的问题。真因是客户机防火墙。
+   解法是把网卡归到专用并显式加 22 的入站规则（作用域限定宿主网段即可），已并入
+   `scripts/05-bootstrap-guest-sshd.ps1` 第 5 步。
+
+10. **`Write-Host` 的输出无法被 `>` 重定向捕获**，它走的是 information 流。本次让用户
+    在客户机里把脚本输出重定向到文件，结果拿到一个 0 字节的空文件，白跑一趟。要留档就用
+    `Write-Output`（走标准输出）、`| Tee-Object`，或 `6>&1` 把 information 流并进去。
+
 ---
 
 ## 5. 未做的事
@@ -362,7 +375,7 @@ ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
 | 事项 | 状态 |
 | --- | --- |
 | **火绒加 Hyper-V 排除项** | **未做，需要人在图形界面操作。** 漏了的症状是"虚拟机莫名很卡"，极难往杀软上想 |
-| 在 `win11-01` 里装 Windows 11 | 未做，交互步骤，由用户在 VMConnect 里完成 |
+| ~~在 `win11-01` 里装 Windows 11~~ | **已完成**（2026-09-01，用户在 VMConnect 里装的），`ssh vm01` 可用 |
 | 装第二个 SQL 命名实例到 `D:` | 未做。用户已选定方案 B（独立实例而非共用现有实例），尚未执行 |
 | 重建黄金渲染机 / `plaintext_onboard_07` | 未做，用户 2026-09-01 明确暂缓，见决策七 |
 | MES ingest / WIRE_TO_GATE 部署到这台机器 | 未做，当前仍在控制端本机测试 |
@@ -423,12 +436,14 @@ remote-ops/factory-server/
 │   └── USAGE.md                    日常怎么用（接手先读这个）
 ├── config/
 │   ├── ssh_config.factory          ~/.ssh/config 里 factory01 那段的副本
+│   ├── ssh_config.vm               ~/.ssh/config 里 vm01 那段的副本（经 factory01 跳板）
 │   └── agv_srv_ed25519.pub         运维公钥（私钥不在仓库里）
 ├── scripts/                            只放这台服务器特有的脚本
 │   ├── 01-control-host-route.ps1       控制端：绕开 Clash TUN 的路由，带 -Remove
 │   ├── 02-remove-winrm-channel.ps1     服务器：拆除旧 WinRM 通道（已执行）
 │   ├── 03-configure-hyper-v-host.ps1   服务器：Hyper-V 宿主配置，幂等（已执行）
 │   ├── 04-create-win11-vm.ps1          服务器：建 Win11 虚拟机（已执行，产出 win11-01）
+│   ├── 05-bootstrap-guest-sshd.ps1     **客户机内**：开通 SSH 通道（已执行）
 │   └── vm-screenshot.ps1               服务器：抓客户机屏幕存 PNG，远程排查装机用
 └── evidence/                       ⛔ 不进 git
     └── probe-*.txt                 环境快照。重跑方式见 docs/USAGE.md 第 3 节
