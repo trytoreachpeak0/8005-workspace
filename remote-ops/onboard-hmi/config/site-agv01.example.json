@@ -1,0 +1,26 @@
+{
+  "_comment": "Per-vehicle site values for 06-deploy-onboard-hmi.ps1. Copy to site-<alias>.json, fill in, commit. None of these are secrets -- vehicleKey is already in ControlServer's appsettings.json, and the credential and operator id come from the DPAPI store instead. The onboardInstanceId must stay stable for the life of the vehicle: the server treats a new one as a different onboard instance.",
+
+  "agvId": "AGV-8005-01",
+  "onboardInstanceId": "OBU-8005-01",
+
+  "wireToGate": {
+    "onboardInstanceId": "REPLACE_WITH_STABLE_UUID"
+  },
+
+  "vehicleSafety": {
+    "expectedVehicleKey": "BROKERX-0c20ff0600d644869a6a80c186065d85"
+  },
+
+  "ruleGateway": {
+    "host": "REPLACE_RULE_SERVER_IP"
+  },
+
+  "ioModule": {
+    "host": "REPLACE_IO_MODULE_IP"
+  },
+
+  "install": {
+    "root": "C:\\8005\\OnboardHmi"
+  }
+}

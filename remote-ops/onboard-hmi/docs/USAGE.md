@@ -289,7 +289,45 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
 
 ---
 
-## 8. 完全撤销
+## 8. 部署车载端
+
+车载端的 CD 不是独立的：**ControlServer 和 OnboardHmi 打在同一个包里**，因为两端在明文期
+没有协商也没有降级，版本错配的表现是连接被拒而不是一条说明原因的错误。出包在 ControlServer
+仓库的 `release.yml`，本目录只管最后一跳。
+
+完整流程、为什么是这个形状、以及一次性准备（PAT、秘密、站点文件），见
+[`../../factory-server/docs/wire-to-gate-cd.md`](../../factory-server/docs/wire-to-gate-cd.md)。
+
+这里只记与车相关的三件事：
+
+**先填站点文件。**一台车一个，`../config/site-<别名>.json`，从 `site-agv01.example.json` 复制。
+`wireToGate.onboardInstanceId` **必须跨部署稳定**——服务端把新值当成另一个车载实例。文件缺失或
+还留着 `REPLACE_*`，脚本直接拒绝，不猜。
+
+**部署命令，先干跑。**
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
+```
+
+干跑会把渲染好的配置整份打出来，并且已经做完全部校验：包哈希、占位符残留、TLS 期残留键
+（`useTls` / `serverCertificateSha256`——**判据是键在不在，不是值是什么**）、`vehicleSafety`
+必须是 http scheme 且 enabled、`onboardBuildCommit` 必须等于包里那个 commit。去掉 `-WhatIf`
+才真的动车。
+
+**脚本搬完就停，不启动。**上位机是会动的生产设备，`SQCD.Agv.Wpf` 是交互式 WPF 程序不是服务，
+就绪判定要人看着车辆安全投影的返回。客户端正在跑时脚本会拒绝（除非 `-Force`），因为那意味着
+车可能在作业途中。启动要到车前，用它自己的桌面会话：
+
+```
+C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe
+```
+
+上一代留在 `C:\8005\OnboardHmi.previous`，要退回去人工换。
+
+---
+
+## 9. 完全撤销
 
 把一台上位机恢复到没装过这套东西的状态：
 

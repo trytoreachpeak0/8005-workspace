@@ -9,6 +9,16 @@
 
 两条通道现在都走 SSH、仅公钥认证、远程 shell 都是 pwsh 7.6.5，操作习惯一致。
 
+**跨两条通道的部署流程有两份文档**，都在 `factory-server/docs/` 下，因为出包那一侧在那边：
+
+| 文档 | 讲什么 |
+| --- | --- |
+| `factory-server/docs/mes-ingest-cd.md` | MesIngest 部署到厂区服务器 |
+| `factory-server/docs/wire-to-gate-cd.md` | WIRE_TO_GATE 两端。**服务端去厂区服务器，车载端去上位机，同一个包** |
+
+WIRE_TO_GATE 那份跨了这里的两个子目录：服务端脚本是 `factory-server/scripts/15-*`，车载端是
+`onboard-hmi/scripts/06-*`，每台车的现场值在 `onboard-hmi/config/site-<别名>.json`。
+
 `factory-server/` 早先走的是 WinRM 5985 加 `codex-ops`/`codex-admin` 双账户，
 已于 2026-09-01 整个拆除——双账户模型从未真正生效、文档里的防火墙加固不成立、
 且它需要关闭远程 UAC 令牌过滤。原委见 `factory-server/README.md` 决策一。
