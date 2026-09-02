@@ -131,9 +131,12 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 **改用 self-hosted runner**（同日晚些时候的决定，取代了当时"完全不用 CI"的结
 论）：runner 跑在 factory-server 的 Hyper-V 客户机 `win11-01` 上（`ssh vm01`），
 那台机器同时接替控制端的 `gpt_win11` 成为黄金渲染机。它满足全部机器假设，而且
-能砍掉 `8005-mes-ingest/Invoke-GoldenRendererValidation.ps1` 那 823 行"因为测试
-机在别处"才需要的编排——payload 部署、PowerShell Direct 会话、计划任务注册、证
-据回捞全部不再需要。
+砍掉了 `Invoke-GoldenRendererValidation.ps1` 那 823 行"因为测试机在别处"才需要
+的编排——payload 部署、PowerShell Direct 会话、计划任务注册、证据回捞全部不再
+需要。**已于 2026-09-02 落地**：该脚本删除，其中真正有价值的打包发布门禁独立成
+`8005-mes-ingest/Invoke-PackagedReleaseGate.ps1`，视觉基线走
+`.github/workflows/golden-renderer.yml`（`mode=verify` / `mode=candidates`，只能
+手动触发）。
 
 **已落地（2026-09-02）。**win11-01 上跑着三个 runner，用标签分工：
 
@@ -311,16 +314,23 @@ Operations, troubleshooting, and the antivirus exclusions are in section 8 of
 
 The control machine also runs Hyper-V, with `gpt_win11`, `plaintext_onboard_07`,
 `rocky_9_minimal` and `windows_server_2022_100`. **Those are not scratch space.**
-`gpt_win11` is the golden renderer whose visual baselines are calibrated and
-user-approved (`8005-mes-ingest/.claude/rules/watch-ui.md`), and
-`plaintext_onboard_07` is the off-machine forensics environment; touching either
+`plaintext_onboard_07` is the off-machine forensics environment; touching it
 outside its own workflow invalidates work that cost the user approval time.
 
-`gpt_win11` has exactly one sanctioned use: the tier 2 and tier 3 golden-renderer
-runs defined in `8005-mes-ingest/CLAUDE.md`, each of which the user must authorize
-first. That path stays open and follows its own rules (1920x1080 at 100% / 96 DPI,
-no RDP or Enhanced Session, never overwrite a baseline before the user reviews
-the preview). Everything else is off limits: do not borrow any of the four as
+**`gpt_win11` is retired as the golden renderer** (2026-09-02). `win11-01` on the
+factory server took the role, and the baselines it rendered were promoted the
+same day — `8005-mes-ingest` commit `34a7399`, verified with 3 runs and 0
+received. `gpt_win11` now has no sanctioned use at all; the golden-renderer path
+runs through `.github/workflows/golden-renderer.yml` on the `golden-renderer`
+runner, and `8005-mes-ingest/docs/agents/golden-renderer.md` is the contract.
+
+Do not resurrect it as a second renderer. The baselines it produced on
+2026-08-28 carry `+00:00` timestamps, which is only possible on a machine whose
+local timezone is UTC — the contract requires `China Standard Time`, and its
+environment gate would have caught that had it been run. A machine with that
+history is not a fallback.
+
+Everything else about the four stays as it was: do not borrow any of them as
 scratch space, do not snapshot or reconfigure them, and do not create new VMs on
 the control machine — provision a new guest on the factory server instead.
 Reading their configuration to answer a question is fine.
