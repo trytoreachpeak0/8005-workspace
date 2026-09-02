@@ -120,24 +120,61 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 不知道该做什么时用 **`w2g-next`** skill（`.claude/skills/w2g-next/`）：它读真实状态并
 按固定优先级阶梯给出唯一一个下一步。
 
-## 不使用 GitHub Actions
+## CI：不用托管 runner，改用 factory-server 上的 self-hosted runner
 
-**这个项目不用 GitHub CI，开发和发布都不用。**用户 2026-09-02 明确决定，
-不要再提议加、也不要重建 workflow。
+**不要用 GitHub 托管 runner。**2026-09-02 试过五轮，riot-sdk 与 control-server
+通过，但 `8005-mes-ingest` 有一整批测试对运行机器有硬假设，托管 runner 满足不
+了——断言真实桌面工作区 >= 1280x760、要 Oracle 客户端 thick 模式、断言"取消在
+3 秒内返回"这种挂钟行为（托管机上要 46-53 秒）。这不是配置问题，是这套测试的
+固有属性：它本来就是为一台特定机器写的。这个判断没有变。
 
-背景：当天给三个代码仓加过 CI，跑了五轮。riot-sdk 与 control-server 通过，
-但 `8005-mes-ingest` 有一整批测试对运行机器有硬假设，托管 runner 满足不了——
-断言真实桌面工作区 >= 1280x760、要 Oracle 客户端 thick 模式（只有厂区局域网有）、
-断言"取消在 3 秒内返回"这种挂钟行为（runner 上要 46-53 秒）。这不是配置问题，
-是这套测试的固有属性：它本来就是为金机 `gpt_win11` 那台特定机器写的，机器契约
-写在 `8005-mes-ingest/docs/agents/golden-renderer.md`。
+**改用 self-hosted runner**（同日晚些时候的决定，取代了当时"完全不用 CI"的结
+论）：runner 跑在 factory-server 的 Hyper-V 客户机 `win11-01` 上（`ssh vm01`），
+那台机器同时接替控制端的 `gpt_win11` 成为黄金渲染机。它满足全部机器假设，而且
+能砍掉 `8005-mes-ingest/Invoke-GoldenRendererValidation.ps1` 那 823 行"因为测试
+机在别处"才需要的编排——payload 部署、PowerShell Direct 会话、计划任务注册、证
+据回捞全部不再需要。
 
-**验证一律在本地跑。**实测本地也更快：riot-sdk 31 秒对 50 秒、control-server
-84 秒对 148 秒。各仓的默认测试命令写在自己的 `CLAUDE.md` 里。
+**实施状态：进行中，runner 尚未建立。**在它跑通之前，验证仍然一律在本地跑，各
+仓的默认测试命令写在自己的 `CLAUDE.md` 里。
 
-那轮 CI 抓到过一个本地发现不了的真 bug（`.gitattributes` 的字节规则在拆分时
-丢失，导致查询文件摘要对不上）。**教训不是"要用 CI"，而是：改动会影响构建的
-文件后，用干净 checkout 验证一次**——例如临时克隆到别处再跑测试。
+三条硬约束：
+
+1. **挂了 self-hosted runner 的仓库绝不能是 public。**任何人提一个 PR 就能在那
+   台机器上执行任意代码，而它经跳板能碰到 factory-server 上的生产服务。
+   `8005-agv-protocol` 已于 2026-09-02 从 public 转为 private，正是为此。不要把
+   任何仓库改回 public。
+2. **同一台机器上只注册一个 runner 实例。**单并发天然满足黄金渲染机契约的
+   "Never run two desktop suites in parallel"；多开就破坏了这个保证。
+3. **黄金渲染机的 Validation 阶段只能 `workflow_dispatch` 手动触发。**它会产生
+   候选基线，那必须是用户点头之后的动作，见 `8005-mes-ingest/CLAUDE.md`。
+
+那轮托管 CI 抓到过一个本地发现不了的真 bug（`.gitattributes` 的字节规则在拆分时
+丢失，导致查询文件摘要对不上）。**教训是：改动会影响构建的文件后，用干净
+checkout 验证一次**——例如临时克隆到别处再跑测试。
+
+## .NET 工具链基线
+
+四个可写 .NET 仓库统一到一套工具链，真相来源是
+`8005-agv-program/docs/adr/cross/0056-dotnet-toolchain-baseline.md`：
+
+| 项 | 锁定值 |
+| --- | --- |
+| SDK | 8.0.424，`rollForward: disable` |
+| 运行时目标 | `net8.0`（`8005-mes-ingest` 的 WPF 侧另有 `net8.0-windows`，那是合理的） |
+| 测试栈 | xunit.v3 3.2.2 + Microsoft.NET.Test.Sdk 18.8.1 + xunit.runner.visualstudio 3.1.5 |
+
+**禁用 xunit v2、NUnit、MSTest 与 coverlet.collector。**基线不靠读文档维持，靠
+四层机制：`global.json` 锁 SDK、`Directory.Packages.props` 集中版本（配
+`CentralPackageVersionOverrideEnabled=false`，内联 `Version=` 触发 NU1008）、
+`Directory.Build.props` 统一目标框架与 `LangVersion`、`Directory.Build.targets`
+的禁用包守卫在构建期报错。
+
+工作区根的 `check-toolchain.ps1` 扫全部七个仓报告偏离，可写仓有偏离则退出码 1。
+`8005-agv-onboard-hmi` 与 `slots-simulator` 属于 Kun Wang，**只报告不修改**，也不
+影响退出码。
+
+**不要单独升某一个仓的版本。**改 ADR 和各仓的 props 文件，一起动。
 
 ## Workspace layout
 
