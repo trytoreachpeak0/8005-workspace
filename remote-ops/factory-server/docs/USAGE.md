@@ -505,11 +505,11 @@ ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; (Get-VM win11-01).Networ
 | 火绒 6.0.0.4 | **没有命令行接口**，只能人在图形界面里加 | 2026-09-02 由用户完成 |
 
 火绒的加法（新机器或重装后要重来）：向日葵 / VNC 进桌面 → 托盘图标或
-`C:\Program Files (x86)\Huorong\Sysdiagin\HipsMain.exe` → 右上角「≡ 菜单」→
+`C:\Program Files (x86)\Huorong\Sysdiag\bin\HipsMain.exe` → 右上角「≡ 菜单」→
 「设置」→ 左侧「信任区」→「添加」：
 
 - 文件夹：`D:\zhengyushao\Hyper-V`
-- 文件：`C:\Windows\System32mms.exe`、`vmwp.exe`、`vmcompute.exe`
+- 文件：`C:\Windows\System32\vmms.exe`、`vmwp.exe`、`vmcompute.exe`
 
 火绒的信任区对文件夹和单个文件都生效，加可执行文件等于信任那个进程。**火绒是 HIPS
 不只是杀毒**，`vmwp.exe` 会做大量高权限内存与 I/O 操作，它弹窗询问时要选允许。
