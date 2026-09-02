@@ -120,6 +120,25 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 不知道该做什么时用 **`w2g-next`** skill（`.claude/skills/w2g-next/`）：它读真实状态并
 按固定优先级阶梯给出唯一一个下一步。
 
+## 不使用 GitHub Actions
+
+**这个项目不用 GitHub CI，开发和发布都不用。**用户 2026-09-02 明确决定，
+不要再提议加、也不要重建 workflow。
+
+背景：当天给三个代码仓加过 CI，跑了五轮。riot-sdk 与 control-server 通过，
+但 `8005-mes-ingest` 有一整批测试对运行机器有硬假设，托管 runner 满足不了——
+断言真实桌面工作区 >= 1280x760、要 Oracle 客户端 thick 模式（只有厂区局域网有）、
+断言"取消在 3 秒内返回"这种挂钟行为（runner 上要 46-53 秒）。这不是配置问题，
+是这套测试的固有属性：它本来就是为金机 `gpt_win11` 那台特定机器写的，机器契约
+写在 `8005-mes-ingest/docs/agents/golden-renderer.md`。
+
+**验证一律在本地跑。**实测本地也更快：riot-sdk 31 秒对 50 秒、control-server
+84 秒对 148 秒。各仓的默认测试命令写在自己的 `CLAUDE.md` 里。
+
+那轮 CI 抓到过一个本地发现不了的真 bug（`.gitattributes` 的字节规则在拆分时
+丢失，导致查询文件摘要对不上）。**教训不是"要用 CI"，而是：改动会影响构建的
+文件后，用干净 checkout 验证一次**——例如临时克隆到别处再跑测试。
+
 ## Workspace layout
 
 This repository tracks only workspace-level files; the seven component clones
