@@ -17,8 +17,10 @@ wherever it sits on disk.
 
 | Remote under `github.com/trytoreachpeak0/` | Authority |
 | --- | --- |
-| `8005---AGV` | Writable — requirements, MES ingest, agent docs, issue tracker |
+| `8005-agv-program` | Writable — requirements, cross-subsystem ADRs, decision archive. No code |
 | `8005-agv-control-server` | Writable — WIRE_TO_GATE server |
+| `8005-mes-ingest` | Writable — MesIngest service and its Watch client |
+| `riot-sdk` | Writable — RIoT SDK, C# and Python |
 | `8005-agv-onboard-hmi` | **Read-only for agents** |
 | `slots-simulator` | **Read-only for agents** |
 | `8005-agv-protocol` | Writable — **notify Kun Wang after every change** |
@@ -87,7 +89,7 @@ else.
 
 What survives is narrower, and it is a freeze rather than an exception: the
 already-released MES ingest scripts under
-`8005---AGV/mes/ingest/csharp/.artifacts/releases/` keep their
+`8005-mes-ingest/.artifacts/releases/` keep their
 `#Requires -Version 5.1` header. They were validated and shipped as 5.1
 artifacts. Never retrofit a released script in either direction — not to PS7,
 and not back to 5.1.
@@ -96,7 +98,7 @@ and not back to 5.1.
 
 项目由两个人推进：Kun Wang（GitHub `SocialKKKK`）负责 `8005-agv-onboard-hmi` 与
 `slots-simulator`；Zhengyu Shao 负责 `8005-agv-control-server`；`8005-agv-protocol`
-共同维护。**权威文档是 `8005---AGV/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md`
+共同维护。**权威文档是 `8005-agv-program/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md`
 里内联了 agent 必须遵守的部分。
 
 注意 `8005-workspace` 这个仓库**只有 Zhengyu Shao 有访问权**，Kun Wang 看不到。任何需要
@@ -120,14 +122,21 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 
 ## Workspace layout
 
-This repository tracks only workspace-level files; the five component clones
+This repository tracks only workspace-level files; the seven component clones
 and the `w2g-rc-*` build output are gitignored.
 
-- `repos.md` — the five repositories, their working branches, and who owns each.
+`8005---AGV` was split and renamed on 2026-09-02 — it is now `8005-agv-program`
+(requirements and decisions, no code), plus `8005-mes-ingest` and `riot-sdk`.
+Its history was rewritten to purge `.artifacts/`, so every commit hash changed
+and any old clone must be re-cloned. The pre-split mirror sits outside the
+workspace at `C:\Users\szy\8005-restructure-backup`. See `repos.md`.
+
+- `repos.md` — the seven repositories, their working branches, and who owns each.
+  It also records the 2026-09-02 split of `8005---AGV`.
 - `setup.ps1` — clones whatever is missing on a new machine. Never pulls or
   resets an existing clone.
-- `file-naming-convention/` — naming rules for this root, `8005---AGV`, and
-  `8005-agv-control-server`. Lowercase kebab-case; the document states the
+- `file-naming-convention/` — naming rules for this root and the four
+  repositories owned here. Lowercase kebab-case; the document states the
   exceptions. It does not govern the three repositories owned by other people.
 - `releases/<id>/` — the recipe to rebuild and verify a release candidate:
   manifest, hashes, operator's manual, build scripts. Never the binaries.
@@ -195,12 +204,12 @@ Operations, troubleshooting, and the antivirus exclusions are in section 8 of
 The control machine also runs Hyper-V, with `gpt_win11`, `plaintext_onboard_07`,
 `rocky_9_minimal` and `windows_server_2022_100`. **Those are not scratch space.**
 `gpt_win11` is the golden renderer whose visual baselines are calibrated and
-user-approved (`8005---AGV/.claude/rules/watch-ui.md`), and
+user-approved (`8005-mes-ingest/.claude/rules/watch-ui.md`), and
 `plaintext_onboard_07` is the off-machine forensics environment; touching either
 outside its own workflow invalidates work that cost the user approval time.
 
 `gpt_win11` has exactly one sanctioned use: the tier 2 and tier 3 golden-renderer
-runs defined in `8005---AGV/CLAUDE.md`, each of which the user must authorize
+runs defined in `8005-mes-ingest/CLAUDE.md`, each of which the user must authorize
 first. That path stays open and follows its own rules (1920x1080 at 100% / 96 DPI,
 no RDP or Enhanced Session, never overwrite a baseline before the user reviews
 the preview). Everything else is off limits: do not borrow any of the four as

@@ -15,8 +15,10 @@ $root = $PSScriptRoot
 $base = 'https://github.com/trytoreachpeak0'
 
 $repos = @(
-    @{ Dir = '8005---AGV';              Branch = 'main' }
+    @{ Dir = '8005-agv-program';        Branch = 'main' }
     @{ Dir = '8005-agv-control-server'; Branch = 'ControlServer_MVP' }
+    @{ Dir = '8005-mes-ingest';         Branch = 'main' }
+    @{ Dir = 'riot-sdk';                Branch = 'main' }
     @{ Dir = '8005-agv-onboard-hmi';    Branch = 'OnboardHmi_MVP' }
     @{ Dir = 'slots-simulator';         Branch = 'main' }
     @{ Dir = '8005-agv-protocol';       Branch = 'main' }

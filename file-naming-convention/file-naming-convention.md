@@ -1,6 +1,6 @@
 # Project File and Folder Naming Conventions
 
-> **Scope:** Newly created folders and files in the repositories developed here — the `8005-workspace` root itself, `8005---AGV`, and `8005-agv-control-server`.
+> **Scope:** Newly created folders and files in the repositories developed here — the `8005-workspace` root itself, `8005-agv-program`, `8005-agv-control-server`, `8005-mes-ingest`, and `riot-sdk`.
 > **Out of scope:** `8005-agv-onboard-hmi`, `slots-simulator`, and `8005-agv-protocol`. Those are owned by other people; follow whatever conventions each already uses and do not rename anything in them on the strength of this document.
 > **Goals:** ① Safe and conflict-free on both Windows and Linux; ② Consistent, predictable naming across the project; ③ Names that clearly describe content for easy search and reference.
 > **Note:** This guide applies only to **newly created** files and folders. Existing files do not need to be renamed immediately, but should gradually align with these conventions during future cleanup.
