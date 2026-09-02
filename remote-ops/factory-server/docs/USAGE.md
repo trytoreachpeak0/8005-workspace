@@ -572,7 +572,18 @@ ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; (Get-VM win11-01).Networ
 
 ---
 
-## 9. 完全撤销
+## 9. 部署 MesIngest
+
+Host 和 Watch 的持续部署自成一套流程，写在
+[mes-ingest-cd.md](mes-ingest-cd.md)：CI 出包、控制端验哈希后中转、服务器上换包起服务。
+装在 `D:\zhengyushao\MesIngest`，监听 `0.0.0.0:5088`，用本机 SQL Server 的 `MesIngest`
+库，Watch 快捷方式在 `C:\Users\Public\Desktop`。
+
+首次要做两件一次性准备（SQL 授权、部署凭证），都在那份文档第 3 节。
+
+---
+
+## 10. 完全撤销
 
 把服务器恢复到没装过这套东西的状态：
 

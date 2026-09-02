@@ -18,6 +18,7 @@
 | 知道这台机器上跑着什么、不能碰什么 | 本文件第 2 节 |
 | 连不上了要排错 | [docs/USAGE.md](docs/USAGE.md) 第 4 节 |
 | **在这台机器上跑虚拟机** | [docs/USAGE.md](docs/USAGE.md) 第 8 节 |
+| **部署 MesIngest（CD）** | [docs/mes-ingest-cd.md](docs/mes-ingest-cd.md) |
 | 把服务器恢复到没装过这套东西的状态 | [docs/USAGE.md](docs/USAGE.md) 第 7 节 |
 
 > **接手前提**：私钥在控制端本机 `C:\Users\szy\.ssh\agv_srv_ed25519`，**不在本目录
