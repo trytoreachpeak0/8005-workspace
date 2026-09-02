@@ -117,8 +117,22 @@ function Set-SecretFileAcl {
 
 function Invoke-SqlNonQuery {
     param([string] $Sql, [string] $ServerInstance)
+
     # Piped through stdin rather than -Q or -i: a password in -Q lands in the
     # process command line, and -i needs a file that briefly holds it on disk.
+    #
+    # $OutputEncoding must not carry a BOM. PowerShell writes the encoding's
+    # preamble ahead of the first piped byte, and sqlcmd then parses EF BB BF as
+    # part of the statement:
+    #
+    #     消息 102，级别 15，状态 1 ... "﻿"附近有语法错误。
+    #
+    # This host's $PROFILE sets a BOM-carrying UTF-8 encoding for the console, so
+    # an interactive SSH session hits it while `pwsh -NoProfile` does not. Setting
+    # it here rather than relying on -NoProfile means the function is correct
+    # either way. The assignment is function-scoped, so it reverts on return.
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
     $out = $Sql | & sqlcmd -S $ServerInstance -E -b 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "sqlcmd failed (exit $LASTEXITCODE): $($out -join [Environment]::NewLine)"
