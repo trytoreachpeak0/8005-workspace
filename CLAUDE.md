@@ -245,13 +245,38 @@ own Hyper-V. As of 2026-09-02 there is one guest:
 
 | Alias | Guest | Address | Notes |
 | --- | --- | --- | --- |
-| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, pwsh 7.6.5, `agvops` local admin, 6 vCPU, dynamic 4/2/8 GB |
+| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, `agvops` local admin, 20 vCPU, 8 GB static, 1920x1080. pwsh 7.6.5, .NET SDK 8.0.424, git 2.55.0.5 |
 
 Key-only, via `ProxyJump factory01` — the guest sits on the Internal switch
 `AGV-Internal` (`192.168.200.0/24`) with NAT out, so there is no route to it
 from the enterprise network and the jump host is the only way in. Its key
 (`~/.ssh/agv_vm_ed25519`) is a third key, not the server's and not the
 onboard-HMI one. Host config copy: `remote-ops/factory-server/config/ssh_config.vm`.
+
+`win11-01` carries two roles as of 2026-09-02: the self-hosted GitHub Actions
+runner, and the golden WPF renderer that replaces the control machine's
+`gpt_win11`. Its specification is not scratch configuration — 1920x1080 comes
+from `Set-VMVideo -ResolutionType Single`, without which a guest with no
+vmconnect session attached reports 1024x768 and fails the renderer's
+environment gate; the 8 GB is static because dynamic memory had been assigning
+it 2.5 GB, which starves a restore/build/test cycle. Reproduce both with
+`remote-ops/factory-server/scripts/06-configure-golden-renderer-vm.ps1`.
+
+**The guest cannot reach `github.com` over HTTPS**, and neither can the factory
+server itself — verified 2026-09-02, `github.com:443` does not complete a TCP
+handshake from either. What does work: `github.com:22` (so git over SSH),
+`api.github.com`, `pipelines.actions.githubusercontent.com`,
+`results-receiver.actions.githubusercontent.com` and NuGet, all direct. A runner
+therefore registers and reports fine, but must check out over SSH rather than
+HTTPS. One-off installer downloads are staged from the control machine with
+`scp`, or routed through the control machine's proxy at `172.19.162.241:7890`
+when it is running — that address is the control machine's Wi-Fi interface and
+is DHCP-assigned, so never write it into anything that must keep working.
+
+Do not use `192.168.200.1` to mean the control machine from inside the guest:
+the control machine has an interface with that same address, and it is also the
+guest's own default gateway on the factory server.
+
 Operations, troubleshooting, and the antivirus exclusions are in section 8 of
 `remote-ops/factory-server/docs/USAGE.md`; the scripts that built it are
 `03-configure-hyper-v-host.ps1`, `04-create-win11-vm.ps1`,

@@ -352,13 +352,66 @@ ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VM | Select-Object N
 | 数据根 | `D:\zhengyushao\Hyper-V\{VirtualMachines,VirtualHardDisks}` |
 | 虚拟交换机 | `AGV-Internal`（Internal，**不绑定物理网卡**），宿主侧 `192.168.200.1/24` |
 | NAT | `AGV-NAT`，`192.168.200.0/24`。**不带 DHCP，客户机必须配静态地址** |
-| 虚拟机 | `win11-01`（Gen 2 / **6 vCPU** / 4 GB 静态 / VHDX 上限 80 GB / Secure Boot + vTPM） |
+| 虚拟机 | `win11-01`（Gen 2 / **20 vCPU** / **8 GB 静态** / 显示 **Single 1920x1080** / VHDX 上限 80 GB / Secure Boot + vTPM） |
 | 客户机 | `DESKTOP-F9HC40O`，Windows 11 专业版 `26200.9168`，已激活，pwsh 7.6.5，`agvops` 本地管理员 |
 | **进客户机** | **`ssh vm01`**（经 `factory01` 跳板，仅公钥，密钥 `~/.ssh/agv_vm_ed25519`） |
 | 安装介质 | `D:\zhengyushao\installer\Windows.iso` = Windows 11 24H2 build `10.0.26100.1` |
 
 **`em4` 上没有、也永远不要建 External 虚拟交换机**——它是唯一插了线的网卡，也是这条
 SSH 通道本身，理由见 README 决策六。
+
+### `win11-01` 是黄金渲染机加 CI runner，规格不是随手配的
+
+2026-09-02 起这台客户机接替控制端的 `gpt_win11` 当黄金渲染机，同时跑 self-hosted
+GitHub Actions runner。三项配置是这两个角色要求的，不要"顺手"改回去：
+
+| 配置 | 为什么 |
+| --- | --- |
+| 显示 `Single 1920x1080` | `ResolutionType` 是 `Default` 时，客户机在没有 vmconnect 会话连着的情况下报 1024x768，直接过不了渲染机的环境门禁。改成 `Single` 后即使无人登录也稳定报 1920x1080 |
+| 8 GB **静态** | 原来是动态 4/2/8 GB，实际只分到 2.5 GB，restore/build/test 会被内存拖垮。渲染机也需要可预测的机器 |
+| 20 vCPU | 宿主有 36 个逻辑核且长期负载 1%，给足以后挂钟类测试才不会假失败 |
+
+重配用 `../scripts/06-configure-golden-renderer-vm.ps1`（幂等，已符合规格时不重启）。
+改 vCPU、内存和分辨率都必须关机，脚本会优雅关机并在完成后开回来；它**不会**强制断电。
+
+### 客户机到 GitHub 的网络约束
+
+**`github.com:443` 不通**——不是客户机的问题，**这台服务器自己也不通**，2026-09-02
+两边都实测过。DNS 解析正常（`20.205.243.166`，不是投毒），TCP 握手直接不成。
+
+| 端点 | 状态 | 用途 |
+| --- | --- | --- |
+| `github.com:22` | ✅ 直连 | git over SSH，**checkout 必须走这条** |
+| `api.github.com` | ✅ 直连 | runner 注册与心跳 |
+| `pipelines.actions.githubusercontent.com` | ✅ 直连 | 作业队列 |
+| `results-receiver.actions.githubusercontent.com` | ✅ 直连 | 日志与结果上传 |
+| `api.nuget.org` | ✅ 直连 | restore |
+| `github.com:443` | ❌ | 网页、HTTPS clone、release 下载 |
+| `vstsagentpackage.azureedge.net` | ❌ | runner 自动更新包 |
+
+所以 runner 能注册、能领作业、能回传日志，但**必须配成 SSH checkout**。
+
+一次性的安装包（Git、runner 包）有两条路：
+
+1. **控制端 `scp` 中转**，最可靠，不依赖任何常驻服务。安装脚本都接受
+   `-InstallerPath` 参数直接用暂存好的包，跳过下载：
+
+   ```bash
+   curl -sL -o Git-2.55.0.5-64-bit.exe https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe
+   scp Git-2.55.0.5-64-bit.exe vm01:C:/agv-ops/downloads/
+   ssh vm01 "pwsh -NoProfile -File C:/agv-ops/08-install-git-guest.ps1 -InstallerPath C:/agv-ops/downloads/Git-2.55.0.5-64-bit.exe"
+   ```
+
+2. **经控制端的代理** `172.19.162.241:7890`，需要控制端开着、Clash 开着且勾了
+   "允许局域网连接"。实测经它访问 `github.com` 返回 200。**这个地址是控制端 Wi-Fi
+   的 DHCP 地址，会变**，不要写进任何需要长期有效的配置。
+
+⚠️ **不要在客户机里用 `192.168.200.1` 指代控制端。**控制端自己有一块
+`vEthernet (Huawei)` 恰好也是这个地址，而它同时又是客户机在本服务器上的默认网关，
+两者会撞。要找控制端只能用它的企业网地址。
+
+⚠️ **客户机的 dotnet 输出是中文**（"已通过!"而不是 "Passed!"）。写 CI 脚本或
+workflow 时不要靠英文字符串判断结果，用退出码或 `--logger trx`。
 
 ### 日常查看
 
