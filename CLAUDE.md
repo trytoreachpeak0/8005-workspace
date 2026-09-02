@@ -144,8 +144,13 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
    台机器上执行任意代码，而它经跳板能碰到 factory-server 上的生产服务。
    `8005-agv-protocol` 已于 2026-09-02 从 public 转为 private，正是为此。不要把
    任何仓库改回 public。
-2. **同一台机器上只注册一个 runner 实例。**单并发天然满足黄金渲染机契约的
-   "Never run two desktop suites in parallel"；多开就破坏了这个保证。
+2. **`trytoreachpeak0` 是个人账号不是组织，一个 runner 只能绑一个仓库。**要给
+   多个仓做 CI，就必须在同一台机器上装多个 runner 实例（不同目录、不同服务名），
+   而它们会各自并行领作业。所以**不要指望"一台机器一个 runner"去保证黄金渲染机
+   契约的 "Never run two desktop suites in parallel"**——跨仓库的桌面独占
+   GitHub 的 `concurrency` 表达不了（它只在单个仓库内生效），那仍然是
+   `8005-mes-ingest` 里 desktop mutex 的职责。只给需要金机的 runner 打
+   `golden-renderer` 标签，别的 runner 不要带。
 3. **黄金渲染机的 Validation 阶段只能 `workflow_dispatch` 手动触发。**它会产生
    候选基线，那必须是用户点头之后的动作，见 `8005-mes-ingest/CLAUDE.md`。
 
