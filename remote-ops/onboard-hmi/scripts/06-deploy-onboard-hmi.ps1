@@ -399,6 +399,24 @@ Move-Item -LiteralPath `$incoming -Destination `$root
 [Environment]::SetEnvironmentVariable('CONTROL_SERVER_OPERATOR_ID', '$($plain['OperatorId'])', 'Machine')
 'credentials set (machine scope)'
 
+# On the public desktop rather than one user's: whoever starts this is the
+# operator logged in at the vehicle, not necessarily the account that deployed
+# it. Recreated every deployment so the target follows the install root.
+`$exe = Join-Path `$root 'SQCD.Agv.Wpf.exe'
+if (Test-Path -LiteralPath `$exe) {
+    `$lnkPath = 'C:\Users\Public\Desktop\8005 AGV 车载端.lnk'
+    `$shell = New-Object -ComObject WScript.Shell
+    `$lnk = `$shell.CreateShortcut(`$lnkPath)
+    `$lnk.TargetPath = `$exe
+    `$lnk.WorkingDirectory = `$root
+    `$lnk.Description = '8005 AGV 车载上位机（WIRE_TO_GATE）'
+    `$lnk.Save()
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject(`$shell)
+    "shortcut: `$lnkPath"
+} else {
+    "shortcut skipped: `$exe not found"
+}
+
 # Read the body, do not trust a handshake. This is the check that decides
 # whether the client will leave RecoveryRequired, and it can only be made from
 # the vehicle.

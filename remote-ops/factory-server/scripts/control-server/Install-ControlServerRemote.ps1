@@ -63,6 +63,9 @@ Set-StrictMode -Version 3.0
 
 $previousRoot = "$PackageRoot.previous"
 $resultRoot = 'D:\zhengyushao\control-server-ops\results'
+# Matches Install-ControlServerLocal.ps1's -DataRoot default; the log directory
+# under it is where the service's Serilog file sink writes.
+$script:dataRoot = 'C:\ProgramData\8005\ControlServer'
 
 function Write-Step {
     param([string] $Message)
@@ -246,6 +249,40 @@ try {
     if ($live.StatusCode -ne 200) { throw "health/live returned $($live.StatusCode)." }
     Write-Step "health/live 200: $($live.Content)"
 
+    # ------------------------------------------------------------ shortcuts ---
+
+    # ControlServer is a Windows service built on Microsoft.NET.Sdk.Web with
+    # UseWindowsService -- it has no window and nothing to double-click. A
+    # shortcut to ControlServer.Host.exe would start a *second* instance that
+    # fights the service for port 58005 and for the same SQLite file, so the
+    # desktop gets the two things an operator actually needs instead: the logs,
+    # and a readiness page they can refresh.
+    $desktop = 'C:\Users\Public\Desktop'
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $logDirectory = Join-Path $script:dataRoot 'logs'
+        if (-not (Test-Path -LiteralPath $logDirectory)) {
+            New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+        }
+        $lnk = $shell.CreateShortcut((Join-Path $desktop '8005 ControlServer 日志.lnk'))
+        $lnk.TargetPath = $logDirectory
+        $lnk.Description = '8005 AGV ControlServer 运行日志（NDJSON，按天滚动）'
+        $lnk.Save()
+        Write-Step "Desktop shortcut: 8005 ControlServer 日志 -> $logDirectory"
+    } finally {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    }
+
+    # A .url rather than a .lnk: this one opens in a browser, and the readiness
+    # body is the thing worth reading -- a handshake proves nothing here.
+    $readyUrl = "http://${probeHost}:$($script:healthPort)/health/ready"
+    $urlPath = Join-Path $desktop '8005 ControlServer 健康检查.url'
+    @(
+        '[InternetShortcut]'
+        "URL=$readyUrl"
+    ) | Set-Content -LiteralPath $urlPath -Encoding ascii
+    Write-Step "Desktop shortcut: 8005 ControlServer 健康检查 -> $readyUrl"
+
     # ---------------------------------------------------- generation swap ---
 
     if (Test-Path -LiteralPath $previousRoot) { Remove-Item -LiteralPath $previousRoot -Recurse -Force }
@@ -255,8 +292,30 @@ try {
 
     Write-Step 'Deployment complete.'
     Write-Output "RESULT_PATH=$resultPath"
-    Write-Output "ONBOARD_ENDPOINT=$($result.onboardTransportEndpoint)"
-    Write-Output "HEALTH_ENDPOINT=$($result.httpEndpoint)"
+
+    # The two product scripts do not write the same result schema. A first
+    # install reports onboardTransportEndpoint and httpEndpoint; an upgrade
+    # reports healthEndpoint and neither of the others, because it keeps the
+    # existing appsettings.Production.json and therefore does not decide the
+    # bindings at all. Reading a field only one of them writes crashed the
+    # first upgrade that followed a successful install.
+    foreach ($pair in @(
+        @{ Label = 'ONBOARD_ENDPOINT'; Fields = @('onboardTransportEndpoint') }
+        @{ Label = 'HEALTH_ENDPOINT';  Fields = @('httpEndpoint', 'healthEndpoint') }
+    )) {
+        $value = $null
+        foreach ($field in $pair.Fields) {
+            if ($result.PSObject.Properties.Name -contains $field) {
+                $value = $result.$field
+                break
+            }
+        }
+        if ($value) {
+            Write-Output "$($pair.Label)=$value"
+        } else {
+            Write-Output "$($pair.Label)=(unchanged; the upgrade kept the existing binding)"
+        }
+    }
 
 } finally {
     # The config held three plaintext secrets for the length of one install.
