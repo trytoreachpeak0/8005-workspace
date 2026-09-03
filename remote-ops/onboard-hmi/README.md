@@ -348,17 +348,22 @@ Win32-OpenSSH 所有 release 都带 `Preview`/`Beta` 后缀但 `prerelease=False
 
    **部署本身还没做。**`config/site-agv02.json` 里四个值仍是 `REPLACE_*`。
 
-   **3 号车通道已配好，等上位机装 sshd**（2026-09-03）。CPE `172.19.162.70`，转发
-   22022 → `192.168.71.180:22`（与另两台车同一个 LAN 地址，各在自己 CPE 的 NAT 后面，
-   不冲突）。实测该 CPE 上 22 是它自己的 dropbear、80 是 Web UI、22022 被拒——转发在，
-   后面没人监听。缺的是 `docs/USAGE.md` 第 7 节的第 2–3 步。别名 `agv03` 与
-   `config/site-agv03.json` 都已就位。
+   **3 号车通道同样已就绪**（2026-09-03）。`ssh agv03` → `agvops@DESKTOP-94OA6CK`，
+   CPE `172.19.162.70:22022`，转发到 `192.168.71.180:22`。加固、校时、UTF-8 profile
+   三项都做完，与另两台车配置一致。部署本身同样还没做，`config/site-agv03.json` 里
+   的值仍是 `REPLACE_*`。
 
-3. **两台车是同一个镜像克隆的，克隆后没个性化。** COMPUTERNAME 都是
+3. **三台车都是同一个镜像克隆的，克隆后没个性化。** COMPUTERNAME 都是
    `DESKTOP-94OA6CK`，MachineGuid 都是 `6910ff68-24ae-4fcb-8e16-b6bbd5924490`，
    SMBIOS UUID 与 InstallDate 也相同，以太网 5 的 IP 都是 `192.168.71.180`（各在自己
-   CPE 的 NAT 后面，不冲突）。**SSH 别名是从控制端区分两台车的唯一依据**，不要从机器
-   本身推导身份。物理上确实是两台：MAC、SSH host key、启动时间都不同。
+   CPE 的 NAT 后面，不冲突）。**SSH 别名是从控制端区分三台车的唯一依据**，不要从机器
+   本身推导身份。物理上确实是三台，各自不同的 MAC 与 SSH host key：
+
+   | 别名 | MAC | ED25519 host key |
+   | --- | --- | --- |
+   | `agv01` | `68-ED-A4-9B-B5-5A` | `SHA256:kZR9F72fdrzs7kIvqEcWMAi8w9aRlosCS7orWCGWRCI` |
+   | `agv02` | `68-ED-A4-9B-B5-CE` | `SHA256:7irq9yWgCqEkMIKZF7v5wvGasUFx+Dmd3g1vnIflduY` |
+   | `agv03` | `68-ED-A4-9B-B5-D2` | `SHA256:/q4BBoyU4/DqU8DP9jhmn1kuuOd2hfKoHJu6vhHddNQ` |
 
 4. **agv02 的以太网 6 配了 `192.168.71.221`，与以太网 5 的 `192.168.71.180` 同网段。**
    该口当前 `Disconnected`（触控屏自带的第二个网口，未接线），所以暂时无害；一旦接上

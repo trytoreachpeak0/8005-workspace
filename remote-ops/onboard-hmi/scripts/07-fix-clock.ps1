@@ -88,8 +88,28 @@ Set-Service w32time -StartupType Automatic
 Restart-Service w32time
 Start-Sleep -Seconds 3
 
-$resync = w32tm /resync /force 2>&1
-Write-Step ("resync: {0}" -f ($resync -join ' '))
+# The first resync right after a coarse jump can fail while w32time is still
+# settling. Measured on agv03 2026-09-03: attempt 1 came back "no time data
+# available", attempt 2 a few seconds later succeeded. Retry on the exit code
+# rather than on the message, which is localized.
+#
+# This used to run once and then judge the outcome by /query /source alone --
+# but the /config call above has ALREADY set that string, so a failed resync
+# produced no warning and looked exactly like success.
+$synced = $false
+foreach ($attempt in 1..5) {
+    $resync = w32tm /resync /force 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Step ("resync succeeded on attempt {0}" -f $attempt)
+        $synced = $true
+        break
+    }
+    Write-Step ("resync attempt {0} failed: {1}" -f $attempt, ($resync -join ' '))
+    if ($attempt -lt 5) { Start-Sleep -Seconds 3 }
+}
+if (-not $synced) {
+    Write-Warning 'w32tm /resync never succeeded in 5 attempts. The coarse jump above is in place, but nothing is holding the clock there -- it will drift again.'
+}
 
 $source = w32tm /query /source 2>&1
 Write-Step ("Source now: {0}" -f ($source -join ' '))

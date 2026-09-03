@@ -50,10 +50,9 @@ Host agv02
 # LAN address is the same as cars 1 and 2: all three are clones of one image and
 # each sits behind its own CPE's NAT, so the collision is confined and harmless.
 #
-# Probed 2026-09-03 from the control host over the direct Wi-Fi subnet: 22 is the
-# CPE's own dropbear, 80 its web UI, and 22022 is REFUSED -- the forward exists
-# but the HMI has no sshd yet. Same state agv02 was in before docs/USAGE.md
-# section 7 steps 2-3 were run on it over VNC.
+# Verified 2026-09-03: agvops@DESKTOP-94OA6CK, pwsh 7.6.5. Third distinct
+# machine (MAC 68-ED-A4-9B-B5-D2, its own host key) and the third clone of the
+# same image -- same COMPUTERNAME and MachineGuid as cars 1 and 2.
 Host agv03
     HostName 172.19.162.70
     Port 22022
