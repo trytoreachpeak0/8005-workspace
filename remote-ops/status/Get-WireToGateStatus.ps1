@@ -268,10 +268,18 @@ function Get-VehicleSafety {
     }
 }
 
+# Stage 'link'    -- both ends are connected and the handshake is complete. These
+#                    can all be green with the journey gates shut.
+# Stage 'journey' -- a journey is actually in flight. These CANNOT be green while
+#                    JourneyRuntime is disabled, by design: readiness reaches Ready
+#                    only after the server sends PreDepartureSafetyCheck and the
+#                    vehicle answers, and JourneyRuntimeEngine is the only sender.
+#                    Reading them as failures with the gates shut is a mistake.
 function New-Gate {
-    param([string] $Name, [object] $Pass, [string] $Detail)
+    param([string] $Name, [object] $Pass, [string] $Detail, [string] $Stage = 'link')
     [pscustomobject]@{
         name    = $Name
+        stage   = $Stage
         verdict = ($null -eq $Pass) ? 'UNKNOWN' : ($Pass ? 'PASS' : 'FAIL')
         detail  = $Detail
     }
@@ -336,9 +344,11 @@ function Get-Snapshot {
             (($null -eq $live.status) ? $null : ($live.status -eq 200)) `
             ($live.error ?? "HTTP $($live.status)")
 
+        # /health/ready requires some vehicle to be Ready, so it too waits on a journey.
         New-Gate 'server-ready' `
             (($null -eq $ready.status) ? $null : ($ready.status -eq 200)) `
-            ($ready.error ?? "HTTP $($ready.status) $(($ready.body.reason ?? $ready.body.status) ?? '')")
+            ($ready.error ?? "HTTP $($ready.status) $(($ready.body.reason ?? $ready.body.status) ?? '')") `
+            'journey'
 
         New-Gate 'onboard-process-running' `
             ($onboard.reachable ? ($null -ne $onboard.processId) : $null) `
@@ -350,9 +360,20 @@ function Get-Snapshot {
             (($sessions.status -eq 200) ? ($null -ne $session) : $null) `
             (($null -ne $session) ? "generation $($session.sessionGeneration), updated $($session.updatedAt)" : "no session for '$agvId'")
 
+        # GetRecoveryReason checks in a fixed order, so DEPARTURE_SAFETY_NOT_READY
+        # is positive evidence: CapabilityRevision, SafetyRevision, RecoveryReportId,
+        # the forced-recovery generation and pending-fact reconciliation all passed
+        # to get that far. It is the strongest signal available with no journey running.
+        New-Gate 'session-handshake-complete' `
+            (($null -eq $session) `
+                ? $null `
+                : ($session.readiness -eq 'Ready' -or $session.reasonCode -eq 'DEPARTURE_SAFETY_NOT_READY')) `
+            (($null -ne $session) ? "$($session.readiness) $($session.reasonCode)" : 'no session yet')
+
         New-Gate 'session-ready' `
             (($null -eq $session) ? $null : ($session.readiness -eq 'Ready')) `
-            (($null -ne $session) ? "$($session.readiness) $($session.reasonCode)" : 'no session yet')
+            (($null -ne $session) ? "$($session.readiness) $($session.reasonCode)" : 'no session yet') `
+            'journey'
 
         # Only meaningful when the client is pointed at the local simulator; with
         # a real Modbus module there is no local process to expect.
@@ -379,6 +400,7 @@ function Get-Snapshot {
         observedAt   = [DateTime]::UtcNow.ToString('o')
         agvId        = $agvId
         siteAlias    = $SiteAlias
+        linkComplete = -not @($gates | Where-Object { $_.stage -eq 'link' -and $_.verdict -ne 'PASS' })
         mvpComplete  = -not @($gates | Where-Object { $_.verdict -ne 'PASS' })
         gates        = $gates
         pairSkewMs   = $pairSkewMs
@@ -413,7 +435,8 @@ function Show-Snapshot {
     Write-Host ''
     Write-Host ('{0}  {1}  ({2})' -f [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'), $Snapshot.agvId, $Snapshot.siteAlias)
     foreach ($gate in $Snapshot.gates) {
-        Write-Host ('  {0} {1,-26} {2}' -f $mark[$gate.verdict], $gate.name, $gate.detail) -ForegroundColor $colour[$gate.verdict]
+        $suffix = ($gate.stage -eq 'journey') ? ' (needs a journey)' : ''
+        Write-Host ('  {0} {1,-28} {2}{3}' -f $mark[$gate.verdict], $gate.name, $gate.detail, $suffix) -ForegroundColor $colour[$gate.verdict]
     }
     if ($Snapshot.protocol) {
         Write-Host ('  protocol {0} / {1}' -f $Snapshot.protocol.protocolReleaseVersion, $Snapshot.protocol.profileId) -ForegroundColor DarkGray
@@ -422,7 +445,8 @@ function Show-Snapshot {
     if ($Snapshot.onboard.reachable -and -not $Snapshot.onboard.journalPath) {
         Write-Host '  onboard recovery journal absent -- the client has never completed a startup here' -ForegroundColor DarkGray
     }
-    Write-Host ('  MVP: {0}' -f ($Snapshot.mvpComplete ? 'COMPLETE' : 'not complete')) -ForegroundColor ($Snapshot.mvpComplete ? 'Green' : 'Yellow')
+    Write-Host ('  LINK: {0}' -f ($Snapshot.linkComplete ? 'COMPLETE -- both ends connected, handshake done' : 'not complete')) -ForegroundColor ($Snapshot.linkComplete ? 'Green' : 'Yellow')
+    Write-Host ('  MVP:  {0}' -f ($Snapshot.mvpComplete ? 'COMPLETE' : 'not complete -- needs a journey in flight')) -ForegroundColor ($Snapshot.mvpComplete ? 'Green' : 'Yellow')
     Write-Host ('  journal: {0}' -f $JournalFile) -ForegroundColor DarkGray
 }
 
