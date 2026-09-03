@@ -11,6 +11,14 @@
     the connection, and there is no DNS for a public pool -- so w32time reported
     "Free-running System Clock" and the drift was unbounded.
 
+    THIS IS A PROPERTY OF THE IMAGE, NOT A ONE-OFF. agv02, first reached the
+    same day, read 2027-02-08 as well -- the same 158 days, the same wrong
+    172.19.206.222 (one digit off the real server's 172.19.205.222), the same
+    "Local CMOS Clock" source. Expect it on every car and run this as part of
+    bringing one up, before anything reads a timestamp off it. The .222 pair
+    differing only in the third octet is what makes the misconfiguration survive
+    review.
+
     This is a safety-relevant fault, not a cosmetic one. The onboard
     vehicle-safety gate compares the server's observedAt against this machine's
     own clock inside a 5-second window:
