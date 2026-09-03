@@ -127,12 +127,24 @@ if ($wantRuntime) {
         $token = [System.Net.NetworkCredential]::new('', $store[$key]).Password
         $catalog = (Invoke-WebRequest -Uri "$MesIngestUrl/api/v2/externally-readable-demand-catalog" `
                 -Headers @{ Authorization = "Bearer $token" } -TimeoutSec $TimeoutSec -NoProxy).Content | ConvertFrom-Json
-        $w2g = @($catalog.items | Where-Object { $_.transportDemandKey.workType -eq 'WIRE_TO_GATE' } |
+        # Both filters, in the engine's own order. Work type alone is not the
+        # eligibility rule: JourneyRuntimeEngine also requires the MES area to
+        # start with 'N' (OUT_OF_SCOPE_AREA otherwise), and reporting the oldest
+        # WIRE_TO_GATE demand without that check named a sublot the engine would
+        # never touch. The remaining gates -- station resolution, package
+        # capacity, box count, onboard facts -- need server state this script does
+        # not have, so treat what is printed as an upper bound on what runs next.
+        $w2g = @($catalog.items |
+            Where-Object { $_.transportDemandKey.workType -eq 'WIRE_TO_GATE' -and
+                           $_.liveMesFields.area -clike 'N*' } |
             Sort-Object createdAt)
         $waiting = $w2g.Count
         if ($w2g.Count) {
             $first = $w2g[0]
             $oldest = "$($first.transportDemandKey.sublot) (demandId $($first.demandId), area $($first.liveMesFields.area), created $($first.createdAt))"
+        }
+        else {
+            $oldest = 'none in scope (work type WIRE_TO_GATE and area N*)'
         }
     }
     catch {
