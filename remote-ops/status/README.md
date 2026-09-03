@@ -14,7 +14,8 @@ pwsh remote-ops/status/Get-WireToGateStatus.ps1
   [FAIL] onboard-process-running    SQCD.Agv.Wpf not running
   [FAIL] session-present            no session for '老厂前线新多仓位1'
   [?]    session-ready              no session yet
-  [ok]   clock-onboard-vs-server    onboard is 157 ms ahead of server (window 5000 ms)
+  [ok]   vehicle-safety-stopped     STOPPED, key matches, no reasons, evidence 1498 ms old
+  [ok]   clock-onboard-vs-server    onboard is 116 ms ahead of server (window 5000 ms)
   MVP: not complete
 ```
 
@@ -35,9 +36,9 @@ pwsh remote-ops/status/Get-WireToGateStatus.ps1
 文件，一行一次完整观测，只追加不改写。**一条过去的观测在它记录的状态变化之后仍然成立**，
 所以永远不回头改行。
 
-## 七条判据
+## 八条判据
 
-`mvpComplete` 是七条全部 PASS。`UNKNOWN` 不算通过——连不上时是"不知道"，不是"失败"，
+`mvpComplete` 是八条全部 PASS。`UNKNOWN` 不算通过——连不上时是"不知道"，不是"失败"，
 这个区别在排错时很重要。
 
 | 判据 | 在问什么 | 不过时先看 |
@@ -48,7 +49,16 @@ pwsh remote-ops/status/Get-WireToGateStatus.ps1
 | `onboard-process-running` | 车上 `SQCD.Agv.Wpf` 进程在不在 | **这是人在车前的动作**，见下 |
 | `session-present` | 服务端见没见过这台车 | 车载端起来了但没这条，查两端版本与绑定地址 |
 | `session-ready` | 这台车的会话是不是 `Ready` | `reasonCode`：`DEPARTURE_SAFETY_NOT_READY` 是闸门在正常工作，只有 `HANDSHAKE_INCOMPLETE` 才去查五步握手 |
+| `vehicle-safety-stopped` | 安全闸门四项：`vehicleKey` 匹配、`STOPPED`、无 `reasonCodes`、证据够新 | RIoT 是否可读；`UNKNOWN` / `MOVING` 是闸门在工作不是 bug |
 | `clock-onboard-vs-server` | 车和服务器的时钟差在不在 5 秒窗口内 | `remote-ops/onboard-hmi/scripts/07-fix-clock.ps1` |
+
+`vehicle-safety-stopped` 是 RC 文档第 8 节要求在**启动车载端之前**验的那四项，用车载端同一把凭据
+只读调用。它是最可能把干净会话卡在 `RecoveryRequired` 的一条，而从车上看不出原因。凭据从
+`%LOCALAPPDATA%\AgvOpsSecrets\control-server-deployment.xml` 取，秘密不落盘也不打印；
+没有秘密库时这条降级成 `UNKNOWN`，`-SkipVehicleSafety` 可以整条关掉。
+
+证据年龄按**车载端的时钟**算，因为应用 `maximumEvidenceAgeMs` 的是车。拿控制端时钟算会得到
+负数——控制端慢几秒。
 
 `agvId` 从 `remote-ops/onboard-hmi/config/site-<别名>.json` 读，不硬编码——
 `/api/runtime/sessions` 按这个值索引，每台车不一样。没有站点文件时脚本直接拒绝，不猜。
@@ -98,7 +108,7 @@ Get-Content "$env:LOCALAPPDATA\AgvOpsStatus\w2g-status-20260903.jsonl" |
 
 ## 现在离 MVP 还差什么
 
-截至 2026-09-03，七条里过了三条。剩下四条全部挂在同一个动作上：**得有人到车前，用桌面
+截至 2026-09-03，八条里过了四条。剩下四条全部挂在同一个动作上：**得有人到车前，用桌面
 快捷方式启动车载端**。SSH 起的进程在 session 0 里没有窗口，而且启动它意味着一台会动的车
 进入待命，所以这一步不能远程做。
 

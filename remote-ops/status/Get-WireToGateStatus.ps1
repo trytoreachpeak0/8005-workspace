@@ -16,7 +16,7 @@
     This file carries nothing the product depends on: deleting it loses history
     and breaks nothing.
 
-    Four signal sources, all of which already existed:
+    Five signal sources, all of which already existed:
 
       1. ControlServer HTTP on 58007 -- /health/live, /health/ready, /version,
          /api/runtime/sessions. /health/ready answers 503 with a useful body, so
@@ -26,6 +26,10 @@
          the onboard recovery journal file.
       4. The site file -- the real agvId, which is what /api/runtime/sessions
          keys on. Never hardcode it; the value is per vehicle.
+      5. /api/onboard/v1/vehicle-safety, read with the onboard credential from
+         the DPAPI store -- the four-part safety predicate RELEASE-CANDIDATE.md
+         section 8 requires before the client is started. -SkipVehicleSafety
+         turns it off; a missing secret store degrades it to UNKNOWN.
 
     Clock skew is a first-class gate, not a nicety. The onboard vehicle-safety
     gate compares the server's observedAt against the vehicle's own clock inside
@@ -82,6 +86,10 @@ param(
     [int] $TimeoutSec = 10,
     [ValidateRange(100, 60000)]
     [int] $ClockWindowMs = 5000,
+    [ValidateRange(100, 60000)]
+    [int] $EvidenceMaxAgeMs = 5000,
+    [switch] $SkipVehicleSafety,
+    [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\control-server-deployment.xml'),
     [string] $JournalDirectory = (Join-Path $env:LOCALAPPDATA 'AgvOpsStatus'),
     [switch] $Quiet,
     [switch] $PassThru
@@ -198,6 +206,54 @@ function Invoke-ControlServerEndpoint {
     }
 }
 
+# The four-part predicate RELEASE-CANDIDATE.md section 8 requires to be checked
+# BEFORE the onboard client is started, read with the same onboard credential the
+# vehicle uses. It is the gate most likely to hold a clean session in
+# RecoveryRequired, and the reason is never visible from the onboard side.
+function Get-VehicleSafety {
+    param([int] $OnboardClockSkewMs)
+
+    if ($SkipVehicleSafety) {
+        return [pscustomobject]@{ skipped = $true; reason = '-SkipVehicleSafety' }
+    }
+    if (-not (Test-Path -LiteralPath $SecretPath)) {
+        return [pscustomobject]@{ skipped = $true; reason = "no secret store at $SecretPath" }
+    }
+
+    try {
+        $store = Import-Clixml -LiteralPath $SecretPath
+        $credential = [System.Net.NetworkCredential]::new('', $store['OnboardCredential']).Password
+        $response = Invoke-WebRequest -Uri "$BaseUrl/api/onboard/v1/vehicle-safety" `
+            -Headers @{ Authorization = "Bearer $credential" } `
+            -TimeoutSec $TimeoutSec -SkipHttpErrorCheck -NoProxy
+        $body = if ($response.StatusCode -eq 200) { $response.Content | ConvertFrom-Json } else { $null }
+
+        # Evidence age as the VEHICLE computes it -- the vehicle is the party that
+        # applies maximumEvidenceAgeMs. Measuring it against this control host's
+        # clock produced a negative age, because this host runs seconds behind.
+        $ageMs = $null
+        if ($body -and $null -ne $OnboardClockSkewMs) {
+            $ageMs = [int](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + $OnboardClockSkewMs) -
+                [DateTimeOffset]::Parse($body.observedAt).ToUnixTimeMilliseconds())
+        }
+
+        [pscustomobject]@{
+            skipped     = $false
+            status      = [int]$response.StatusCode
+            vehicleKey  = $body.vehicleKey
+            motionState = $body.motionState
+            observedAt  = $body.observedAt
+            source      = $body.source
+            reasonCodes = @($body.reasonCodes)
+            ageMs       = $ageMs
+            error       = $null
+        }
+    }
+    catch {
+        [pscustomobject]@{ skipped = $false; status = $null; error = $_.Exception.Message }
+    }
+}
+
 function New-Gate {
     param([string] $Name, [object] $Pass, [string] $Detail)
     [pscustomobject]@{
@@ -224,6 +280,37 @@ function Get-Snapshot {
     $pairSkewMs = $null
     if ($null -ne $server.clockSkewMs -and $null -ne $onboard.clockSkewMs) {
         $pairSkewMs = $onboard.clockSkewMs - $server.clockSkewMs
+    }
+
+    $safety = Get-VehicleSafety -OnboardClockSkewMs $onboard.clockSkewMs
+    $safetyPass = $null
+    $safetyDetail = ''
+    if ($safety.skipped) {
+        $safetyDetail = "skipped: $($safety.reason)"
+    }
+    elseif ($safety.error) {
+        $safetyDetail = $safety.error
+    }
+    elseif ($safety.status -ne 200) {
+        $safetyPass = $false
+        $safetyDetail = "HTTP $($safety.status)"
+    }
+    else {
+        # All four parts, in the order section 8 states them.
+        $keyMatches = $safety.vehicleKey -eq $site.vehicleSafety.expectedVehicleKey
+        $stopped = $safety.motionState -eq 'STOPPED'
+        $noReasons = @($safety.reasonCodes).Count -eq 0
+        $fresh = ($null -ne $safety.ageMs) -and ($safety.ageMs -lt $EvidenceMaxAgeMs)
+        $safetyPass = $keyMatches -and $stopped -and $noReasons -and $fresh
+        $failed = @(
+            if (-not $keyMatches) { 'vehicleKey mismatch' }
+            if (-not $stopped) { "motionState=$($safety.motionState)" }
+            if (-not $noReasons) { "reasonCodes=$($safety.reasonCodes -join ',')" }
+            if (-not $fresh) { "evidence $($safety.ageMs) ms old (max $EvidenceMaxAgeMs)" }
+        )
+        $safetyDetail = $safetyPass `
+            ? "STOPPED, key matches, no reasons, evidence $($safety.ageMs) ms old" `
+            : ($failed -join '; ')
     }
 
     $gates = @(
@@ -253,6 +340,8 @@ function Get-Snapshot {
             (($null -eq $session) ? $null : ($session.readiness -eq 'Ready')) `
             (($null -ne $session) ? "$($session.readiness) $($session.reasonCode)" : 'no session yet')
 
+        New-Gate 'vehicle-safety-stopped' $safetyPass $safetyDetail
+
         New-Gate 'clock-onboard-vs-server' `
             (($null -eq $pairSkewMs) ? $null : ([Math]::Abs($pairSkewMs) -lt $ClockWindowMs)) `
             (($null -eq $pairSkewMs) `
@@ -267,6 +356,7 @@ function Get-Snapshot {
         mvpComplete  = -not @($gates | Where-Object { $_.verdict -ne 'PASS' })
         gates        = $gates
         pairSkewMs   = $pairSkewMs
+        vehicleSafety = $safety
         server       = $server
         onboard      = $onboard
         protocol     = ($version.status -eq 200) ? $version.body : $null
