@@ -29,15 +29,11 @@ Host agv01
 # web UI on 80, measured 2026-09-03 from the control host over the direct Wi-Fi
 # subnet (Find-NetRoute said Wi-Fi, not Clash, so the probe is real).
 #
-# THE HMI BEHIND IT IS NOT REACHABLE YET. 22023 is not forwarded -- neither is
-# 22022 -- so `ssh agv02` gets a refused connection, not a login. What is still
-# missing is docs/USAGE.md section 7 steps 2-4: bootstrap sshd on the HMI over
-# VNC, then point a CPE forward at it.
-#
-# 22023 is the 22022 + 1 habit, not a constraint: on THIS CPE 22022 is free too.
-# Keeping the habit so the port says which car it is.
+# Also 22022, same as car 1. The two CPEs are separate devices reached by
+# separate addresses, so the external port never had to differ -- one number for
+# every car is easier to remember than a per-car increment.
 Host agv02
     HostName 172.19.162.179
-    Port 22023
+    Port 22022
 
 # Car 3: copy the block above as agv03 when its CPE gets an address.

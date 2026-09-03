@@ -1,6 +1,6 @@
 {
   "_comment": "Per-vehicle site values for 06-deploy-onboard-hmi.ps1. None of these are secrets -- vehicleKey is already in ControlServer appsettings.json; the credential and operator id come from the DPAPI store instead.",
-  "_status": "2 号车尚未上线。SSH 通道也还没通——CPE 172.19.162.179 上 22023 未转发，缺 docs/USAGE.md 第 7 节的第 2-4 步。所有 REPLACE_* 都是必填，06-deploy-onboard-hmi.ps1 见到它们会直接拒绝而不是猜一个值。",
+  "_status": "2 号车尚未上线。SSH 通道 172.19.162.179:22022 的转发已在 CPE 上配好，待验证。所有 REPLACE_* 都是必填，06-deploy-onboard-hmi.ps1 见到它们会直接拒绝而不是猜一个值。",
   "_agvId": "agvId 与 onboardInstanceId 必须是真实的现场身份。客户端把 AGV-8005-01 和 OBU-8005-01 这两个示例值本身当作占位符，Production 环境下启动即抛 InvalidDataException。1 号车用的是中文位号「老厂前线新多仓位1」，2 号车按现场实际位号填，不要沿用 1 号车的值——服务端把重复的身份当成同一台车。",
   "_onboardInstanceId": "wireToGate.onboardInstanceId 必须是 D 形式的 Guid（8-4-4-4-12），且跨部署稳定——服务端把新值当成另一台车。**不要复制 1 号车的那个 Guid**，两台车共用一个等于服务端只看得见一台。新生成一个：pwsh -c '[guid]::NewGuid().ToString()'。",
   "_vehicleKey": "expectedVehicleKey 必须与 ControlServer appsettings.json 里登记的这台车的 key 一致。1 号车的 BROKERX-0c20ff06... 是 1 号车的，2 号车要用它自己那把。",

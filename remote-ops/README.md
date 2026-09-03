@@ -69,7 +69,7 @@ Hyper-V 模块要加 `-SkipEditionCheck`**，否则拿到的是绑不上参数�
 | 别名 | 族 | 通道 | 状态 |
 | --- | --- | --- | --- |
 | `agv01` | `agv` | `onboard-hmi/` | 在线，`172.19.162.210:22022` |
-| `agv02` | `agv` | `onboard-hmi/` | CPE `172.19.162.179:22023`，**上位机那一跳还没通** |
+| `agv02` | `agv` | `onboard-hmi/` | CPE `172.19.162.179:22022`，转发已配，待验证 |
 | `factory01` | `factory` | `factory-server/` | 在线，`172.19.205.222:22` |
 | `vm01` | `vm` | `factory-server/` | 在线，`192.168.200.50:22`，经 `factory01` 跳板 |
 

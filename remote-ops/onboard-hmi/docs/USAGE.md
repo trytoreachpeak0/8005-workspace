@@ -252,9 +252,10 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
 
 前提：那台车的 CPE 有企业内网 IP，上位机装了 PowerShell 7。
 
-1. **查 CPE 已占用的转发端口**，挑一个没被用的（1 号车用的 22022，
-   建议 2 号车用 22023 依此类推，好记）。**每台 CPE 的占用情况不一样**，22023 只是
-   习惯，不是能直接用的事实——片段里给 agv02 写的就是这个值，实测被占就改掉。
+1. **查这台 CPE 已占用的转发端口。** 默认用 **22022**，1、2 号车都是它——每台 CPE 是
+   独立设备、有自己的地址，外部端口本来就不会互相撞，统一一个数比按车递增好记。
+   外部 22 不能用：CPE 自己的 dropbear 占着。
+   只有当这台 CPE 的 22022 已被别的用途占了，才另挑一个，并在片段的注释里写明原因。
 
 2. **本机启动分发服务**：
 
@@ -273,13 +274,13 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    那份文件由 `remote-ops/control-host/Build-SshConfig.ps1` 生成，手改会在下次装配时
    被覆盖，而且绕过了命名唯一性校验。
 
-   2 号车的块**已经填好了**（`172.19.162.179:22023`）。再往后的车（agv03……）照着
+   2 号车的块**已经填好了**（`172.19.162.179:22022`）。再往后的车（agv03……）照着
    复制一块，别名必须是 `agv` + 两位数字：
 
    ```
    Host agv03
        HostName <新CPE的IP>
-       Port 22024
+       Port 22022
    ```
 
    机器还没上线就先把 `HostName` 写成 `REPLACE_...` 占住名字，装配时会跳过它。然后：
