@@ -285,6 +285,13 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 那次的动机是「两个分支推同一个 commit，test 跑了两遍，取消一个省点机时」。省下的是
 2 分钟，代价是 4 小时。宁可让重复作业跑完。
 
+**这件事有一个自动版本，2026-09-03 已经堵上。**`cancel-in-progress: true` 会在同一分支
+连推两次时自动取消正在跑的作业，与手动取消同一条路径。当时
+`8005-agv-control-server/test.yml`、`riot-sdk/test.yml` 和 `8005-agv-protocol/g1.yml`
+三个 workflow 都是 `true`（`8005-mes-ingest` 的六个早就是 `false`），现已统一改为
+`false`。**新写 workflow 时不要再设成 `true`。**注意改为 `false` 后仍会取消**排队中**的
+作业——第三个到达时中间那个被顶掉——那不碰 runner 会话，是安全的。
+
 **这条曾被误记为「控制端笔记本一睡，CI 就停摆到它醒」，那个归因是错的**，不要据此去
 改 `NO_PROXY` 或电源设置。控制端设了永不睡眠（睡眠超时 AC/DC 都是 0），实测 7 天内
 零 `Kernel-Power` 42/107 事件，win11-01 同样没睡过。runner 日志里那段时间的报错是
