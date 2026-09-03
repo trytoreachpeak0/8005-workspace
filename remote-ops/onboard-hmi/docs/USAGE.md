@@ -253,7 +253,8 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
 前提：那台车的 CPE 有企业内网 IP，上位机装了 PowerShell 7。
 
 1. **查 CPE 已占用的转发端口**，挑一个没被用的（1 号车用的 22022，
-   建议 2 号车用 22023 依此类推，好记）。
+   建议 2 号车用 22023 依此类推，好记）。**每台 CPE 的占用情况不一样**，22023 只是
+   习惯，不是能直接用的事实——片段里给 agv02 写的就是这个值，实测被占就改掉。
 
 2. **本机启动分发服务**：
 
@@ -268,12 +269,32 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
 
 4. **CPE 配转发**：`外部端口/TCP → <上位机LAN IP>:22`
 
-5. **本机 `~/.ssh/config` 加一段**（同时更新 `config/ssh_config.agv` 副本）：
+5. **改 `config/ssh_config.agv`，然后重跑装配器。**不要直接编辑 `~/.ssh/config`——
+   那份文件由 `remote-ops/control-host/Build-SshConfig.ps1` 生成，手改会在下次装配时
+   被覆盖，而且绕过了命名唯一性校验。
+
+   2 号车的块**已经在片段里了**，`HostName` 是占位符，把它换成真实的 CPE 地址即可：
 
    ```
    Host agv02
        HostName <新CPE的IP>
        Port 22023
+   ```
+
+   再往后的车（agv03……）照着复制一块，别名必须是 `agv` + 两位数字。然后：
+
+   ```bash
+   pwsh ../../control-host/Build-SshConfig.ps1
+   ```
+
+   它会校验全部通道的命名（重名直接非零退出），把片段装到 `~/.ssh/conf.d/`，并且**不碰**
+   `factory01`、`vm01` 那些别的通道的别名。规则见
+   [`../../control-host/README.md`](../../control-host/README.md)。
+
+   连之前先确认解析对了，这一步不发起连接：
+
+   ```bash
+   ssh -G agv02 | grep -E '^(hostname|port|user|identityfile) '
    ```
 
 6. **验证** `ssh agv02`，通了再推 03 加固：
@@ -284,6 +305,11 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    ```
 
 7. **装 UTF-8 profile**（第 6 节）。
+
+8. **填 `config/site-<别名>.json`**——2 号车的 `site-agv02.json` 已经在了，里面全是
+   `REPLACE_*`。这一步跟部署走，不跟通道走，细节在第 8 节。注意 `onboardInstanceId`
+   和 `expectedVehicleKey` **不能抄 1 号车的**：服务端靠它们区分车辆，抄了等于两台车
+   在服务端是同一台。
 
 顺序不能颠倒：没验证通就加固会把 SSH 锁死（VNC 能救，但白跑一趟）。
 
@@ -300,7 +326,7 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
 
 这里只记与车相关的三件事：
 
-**先填站点文件。**一台车一个，`../config/site-<别名>.json`，从 `site-agv01.example.json` 复制。
+**先填站点文件。**一台车一个，`../config/site-<别名>.json`，从 `site.example.json` 复制。
 `wireToGate.onboardInstanceId` **必须跨部署稳定**——服务端把新值当成另一个车载实例。文件缺失或
 还留着 `REPLACE_*`，脚本直接拒绝，不猜。
 

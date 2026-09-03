@@ -16,7 +16,10 @@ remote-ops/onboard-hmi/
 │   ├── USAGE.md                       日常怎么用 ← 接手先读这个
 │   └── ASSETS.md                      本文件
 ├── config/
-│   ├── ssh_config.agv                 ~/.ssh/config 的副本（见第 2 节）
+│   ├── ssh_config.agv                 agv 族的 ssh 片段，也是别名注册表（见第 2 节）
+│   ├── site.example.json              现场值模板，不属于任何一台车
+│   ├── site-agv01.json                1 号车的现场值
+│   ├── site-agv02.json                2 号车，全是 REPLACE_*，未上线
 │   └── agv_ops_ed25519.pub            运维公钥（公开无妨）
 ├── scripts/
 │   ├── 01-probe.ps1                   只读环境探测，随时可跑
@@ -24,6 +27,10 @@ remote-ops/onboard-hmi/
 │   ├── 03-harden-sshd.ps1             关密码认证
 │   ├── 04-serve-payload.ps1           本机侧临时 HTTP 分发（在本机跑）
 │   ├── 05-setup-control-host.ps1      控制端重建（换机器时用）
+│   ├── 06-deploy-onboard-hmi.ps1      车载端最后一跳（搬完就停，不启动）
+│   ├── 07-fix-clock.ps1               校时
+│   ├── 08-deploy-slots-simulator.ps1  仓位模拟器
+│   ├── 09-switch-io-module.ps1        切 IO 模块
 │   └── agvops-profile.ps1             远程 $PROFILE，修 UTF-8 乱码
 ├── payload/                           ⛔ 不进 git
 │   └── OpenSSH-Win64.zip              OpenSSH 10.0.0.0p2 离线包
@@ -53,14 +60,27 @@ SHA256  23F50F3458C4C5D0B12217C6A5DDFDE0137210A30FA870E98B29827F7B43ABA5
 | --- | --- | --- |
 | `C:\Users\szy\.ssh\agv_ops_ed25519` | **私钥**，无 passphrase | ❌ 故意不放 |
 | `C:\Users\szy\.ssh\agv_ops_ed25519.pub` | 公钥 | ✅ `config/` 有副本 |
-| `C:\Users\szy\.ssh\config` | SSH 别名配置 | ✅ `config/ssh_config.agv` 有副本 |
+| `C:\Users\szy\.ssh\config` | 只有一个标记块，里面一行 `Include` | ⚙️ 由装配器生成，不是副本 |
+| `C:\Users\szy\.ssh\conf.d\remote-ops-agv.conf` | agv 族的生成产物 | ⚙️ 由 `config/ssh_config.agv` 生成 |
 | `C:\Users\szy\.ssh\known_hosts` | 上位机指纹记录 | ❌ 指纹值记在 USAGE.md 第 2 节 |
 
 **私钥为什么不放仓库**：它无 passphrase，进了仓库等于把所有上位机的管理员权限
 写进一个可能被同步、备份、共享的目录。它只应该待在控制端本机。
 
-**`config/ssh_config.agv` 是副本，不是活文件。** 改了 `~/.ssh/config` 记得同步过来，
-反之亦然。跑 `05-setup-control-host.ps1` 会把副本装到 `~/.ssh/config`。
+**`config/ssh_config.agv` 不再是「副本」，它是源。**（改于 2026-09-03。）以前它和
+`~/.ssh/config` 是两份互抄的东西，谁改了要记得同步另一边；现在方向是单向的：
+
+```
+remote-ops/*/config/ssh_config.<族>   ← 唯一的源，改这里
+        ↓  pwsh remote-ops/control-host/Build-SshConfig.ps1
+~/.ssh/conf.d/remote-ops-<族>.conf    ← 生成物，不要手改
+~/.ssh/config                          ← 只有一个标记块 + 一行 Include
+```
+
+**不要再直接编辑 `~/.ssh/config` 里的这些块。**改片段、跑装配器，它会校验命名唯一性并
+拒绝重名。`05-setup-control-host.ps1` 现在调用装配器，不再整文件覆盖——它以前那样做会
+把 `factory01` 和 `vm01` 一起抹掉。细节见
+[`../../control-host/README.md`](../../control-host/README.md)。
 
 ---
 

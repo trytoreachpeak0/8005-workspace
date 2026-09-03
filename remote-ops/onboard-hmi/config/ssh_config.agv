@@ -25,7 +25,18 @@ Host agv01
     HostName 172.19.162.210
     Port 22022
 
-# Cars 2 and 3 have no addresses assigned yet. Fill in when they do.
-# Host agv02
-#     HostName
-#     Port 22022
+# Car 2 -- the CPE has an enterprise-LAN address; the HMI behind it is not
+# reachable yet. The alias is declared anyway: this file is the name registry,
+# and a name is only unique if it is taken before somebody else needs one.
+#
+# A HostName of REPLACE_* means "reserved, not online". Build-SshConfig.ps1
+# reports it and omits the block, so `ssh agv02` fails as an unknown host
+# rather than resolving to a bogus address.
+#
+# 22023 follows the 22022 + 1 habit and is a GUESS until checked against this
+# CPE's own forwarding table -- each CPE has its own occupied ports.
+Host agv02
+    HostName REPLACE_WITH_CPE_IP
+    Port 22023
+
+# Car 3: copy the block above as agv03 when its CPE gets an address.

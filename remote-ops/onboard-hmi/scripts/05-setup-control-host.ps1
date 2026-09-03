@@ -33,7 +33,11 @@ param(
     [switch]$GenerateNewKey,
 
     # Skip the "can we actually reach the cars" step.
-    [switch]$SkipConnectivityTest
+    [switch]$SkipConnectivityTest,
+
+    # Forwarded to Build-SshConfig.ps1. Needed once, on a machine whose
+    # ~/.ssh/config still has the channel blocks pasted in inline.
+    [switch]$ReplaceExistingConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +46,7 @@ Set-StrictMode -Version Latest
 function Step($m) { Write-Host "`n[STEP] $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "  ok   $m"   -ForegroundColor Green }
 function Warn($m) { Write-Host "  WARN $m"   -ForegroundColor Yellow }
+function Info($m) { Write-Host "  ..   $m"   -ForegroundColor Gray }
 function Die($m)  { Write-Host "  FAIL $m"   -ForegroundColor Red; exit 1 }
 
 $repoRoot  = Split-Path -Parent $MyInvocation.MyCommand.Path | Split-Path -Parent
@@ -121,43 +126,41 @@ if ($derivedBody -eq $repoBody) {
 }
 
 # ------------------------------------------------------------------- config
-Step 'Installing the SSH config'
-$configDst = Join-Path $sshDir 'config'
-if (Test-Path $configDst) {
-    $existing = (Get-Content $configDst -Raw)
-    $incoming = (Get-Content $configSrc -Raw)
-    if ($existing -eq $incoming) {
-        Ok 'existing ~/.ssh/config is already identical'
-    } else {
-        $backup = "$configDst.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        Copy-Item $configDst $backup -Force
-        Warn "existing config differs; backed up to $backup"
-        Copy-Item $configSrc $configDst -Force
-        Ok "installed (previous version kept at $backup)"
-    }
-} else {
-    Copy-Item $configSrc $configDst -Force
-    Ok "installed to $configDst"
-}
+Step 'Building the SSH config from every remote-ops channel'
 
-# The config references an absolute IdentityFile path that was correct on the
-# machine it was written on. Fix it up for this machine.
-$cfgText = Get-Content $configDst -Raw
-if ($cfgText -match 'IdentityFile\s+(\S+)') {
-    $declared = $Matches[1]
-    if ($declared -ne $keyPath) {
-        $cfgText = $cfgText -replace [regex]::Escape($declared), $keyPath
-        [IO.File]::WriteAllText($configDst, $cfgText, (New-Object Text.UTF8Encoding($false)))
-        Ok "IdentityFile rewritten for this machine: $keyPath"
-    } else {
-        Ok "IdentityFile already correct: $keyPath"
-    }
+# This used to copy config\ssh_config.agv over ~/.ssh/config. There is only one
+# such file and the factory-server and lab-VM channels keep their aliases in it
+# too, so that copy silently deleted factory01 and vm01. Build-SshConfig.ps1
+# merges every channel's fragment into ~/.ssh/conf.d and refuses to write on a
+# name collision. See ..\..\control-host\README.md.
+$builder = Join-Path (Split-Path -Parent $repoRoot) 'control-host\Build-SshConfig.ps1'
+if (-not (Test-Path $builder)) { Die "missing: $builder" }
+
+$configDst = Join-Path $sshDir 'config'
+$builderArgs = @('-NoProfile', '-File', $builder)
+if ($ReplaceExistingConfig) { $builderArgs += '-ReplaceExisting' }
+
+& pwsh @builderArgs
+if ($LASTEXITCODE -ne 0) {
+    Die "Build-SshConfig.ps1 exited $LASTEXITCODE. Fix what it reported and re-run; nothing else here was changed."
 }
+Ok "SSH config built (managed block in $configDst, fragments in $sshDir\conf.d)"
 
 # ------------------------------------------------------------- connectivity
+# Read the fragment, not ~/.ssh/config: the built config reaches the aliases
+# through an Include, so they are not literally in that file any more.
+$fragLines = @(Get-Content $configSrc)
 $hosts = @()
-foreach ($line in Get-Content $configDst) {
-    if ($line -match '^\s*Host\s+(agv\d+)\s*$') { $hosts += $Matches[1] }
+for ($i = 0; $i -lt $fragLines.Count; $i++) {
+    if ($fragLines[$i] -notmatch '^\s*Host\s+(agv\d+)\s*$') { continue }
+    $alias = $Matches[1]
+    # A HostName of REPLACE_* means the name is reserved but the car is not
+    # online. Build-SshConfig.ps1 omits it, so there is nothing to test.
+    $reserved = $false
+    for ($j = $i + 1; $j -lt $fragLines.Count -and $fragLines[$j] -notmatch '^\s*Host\s'; $j++) {
+        if ($fragLines[$j] -match '^\s*HostName\s+REPLACE_') { $reserved = $true }
+    }
+    if ($reserved) { Info "$alias is reserved but not online yet -- skipping" } else { $hosts += $alias }
 }
 
 if ($SkipConnectivityTest) {

@@ -9,6 +9,14 @@
 
 两条通道现在都走 SSH、仅公钥认证、远程 shell 都是 pwsh 7.6.5，操作习惯一致。
 
+`onboard-hmi/` 和 `factory-server/` 是通道，`control-host/` 和 `status/` 不是——它们只在
+控制端跑，跨全部通道：
+
+| 目录 | 干什么 |
+| --- | --- |
+| `control-host/` | 把每条通道的 ssh 片段装配成控制端的 `~/.ssh/config`，并强制命名唯一。见下一节 |
+| `status/` | 一次读完两端，给出 WIRE_TO_GATE 七条判据的 PASS/FAIL |
+
 **跨两条通道的部署流程有两份文档**，都在 `factory-server/docs/` 下，因为出包那一侧在那边：
 
 | 文档 | 讲什么 |
@@ -39,12 +47,42 @@ External 虚拟交换机**（那是唯一插了线的网卡，也是 SSH 通道�
 Hyper-V 模块要加 `-SkipEditionCheck`**，否则拿到的是绑不上参数的 `Deserialized.*`
 对象。
 
+## 命名唯一性
+
+**通道会越来越多，名字只有一个空间。**别名、密钥、片段文件、现场值文件全都挤在控制端
+同一个 `~/.ssh/` 和同一份 `~/.ssh/config` 里，靠"记得住"是撑不住的。规则和执行它的脚本
+都在 [`control-host/README.md`](control-host/README.md)，这里只记住三件事：
+
+1. **别名 = `<族>` + 两位数字。**族名跨全部通道唯一，片段里不许出现别族的 `Host`。
+   已占用的族：`agv`（车载上位机）、`factory`（厂区服务器）、`vm`（实验虚拟机）。
+2. **片段就是注册表。**机器还没上线就先把别名写进
+   `<通道>/config/ssh_config.<族>`，`HostName` 填 `REPLACE_...` 占名。装配时它会被跳过，
+   `ssh <别名>` 报"不认识"，不会解析到假地址。
+3. **改完片段先跑校验，重名直接非零退出：**
+
+   ```bash
+   pwsh remote-ops/control-host/Build-SshConfig.ps1 -ValidateOnly
+   ```
+
+现有名字：
+
+| 别名 | 族 | 通道 | 状态 |
+| --- | --- | --- | --- |
+| `agv01` | `agv` | `onboard-hmi/` | 在线，`172.19.162.210:22022` |
+| `agv02` | `agv` | `onboard-hmi/` | **已占名，未上线**——CPE 的 IP 待填 |
+| `factory01` | `factory` | `factory-server/` | 在线，`172.19.205.222:22` |
+| `vm01` | `vm` | `factory-server/` | 在线，`192.168.200.50:22`，经 `factory01` 跳板 |
+
+**任何直接改 `~/.ssh/config` 里这些块的做法都是错的**，改片段然后重跑装配器。装配器只接管
+自己那个标记块，标记块以外你手写的内容原样保留。
+
 ## 两条通道共同的约束
 
 - **能连上机器不等于能改代码。** 通过这里够到一台机器，不会获得那台机器上运行的
   代码所属仓库的写权限。写权限只看根 `CLAUDE.md`。
-- **凭据不进仓库。** 两把运维私钥都在控制端 `~/.ssh/`（上位机
-  `agv_ops_ed25519`，服务器 `agv_srv_ed25519`，**互不通用**）；应急用的账户密码
+- **凭据不进仓库。** 三把运维私钥都在控制端 `~/.ssh/`（上位机
+  `agv_ops_ed25519`，服务器 `agv_srv_ed25519`，实验虚拟机 `agv_vm_ed25519`，
+  **互不通用，各自轮换**）；应急用的账户密码
   在控制端 `%LOCALAPPDATA%\AgvOpsSecrets\` 的 DPAPI 文件里。都不在这里，也不要
   复制进来。
 - **探测输出不进 git。** `probe-*.txt` 已 gitignore，内容是本机账户、管理员组、

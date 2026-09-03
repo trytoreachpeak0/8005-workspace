@@ -340,8 +340,11 @@ Win32-OpenSSH 所有 release 都带 `Preview`/`Beta` 后缀但 `prerelease=False
 
 1. **HMI 制品从哪来** —— 由本机 `dotnet publish` 现出，还是有既定的构建产物来源？
    这决定阶段 3 的制品流水线形态。
-2. **另两台车** —— 尚未分配 IP，等它们上线后再纳入。批量方案届时只需在
-   `~/.ssh/config` 加两个 Host 块。
+2. **另两台车** —— 2 号车的 CPE 已有企业内网 IP，上位机那一侧还没通；3 号车没有地址。
+   别名 `agv02` 已在 `config/ssh_config.agv` 里占名（`HostName` 是 `REPLACE_WITH_CPE_IP`），
+   现场值文件 `config/site-agv02.json` 也建好了，全是 `REPLACE_*`。地址下来之后按
+   `docs/USAGE.md` 第 7 节填两个值再跑
+   `../control-host/Build-SshConfig.ps1`。（更新于 2026-09-03。）
 
 已解答（2027-02）：
 
@@ -372,7 +375,10 @@ remote-ops/onboard-hmi/
 │   ├── USAGE.md                  日常怎么用（接手先读这个）
 │   └── ASSETS.md                 什么东西落在哪，含仓库外的资产
 ├── config/
-│   ├── ssh_config.agv            ~/.ssh/config 的副本
+│   ├── ssh_config.agv            agv 族的 ssh 片段，也是别名注册表
+│   ├── site.example.json         现场值模板
+│   ├── site-agv01.json           1 号车现场值
+│   ├── site-agv02.json           2 号车，未上线
 │   └── agv_ops_ed25519.pub       运维公钥（私钥不在仓库里）
 ├── scripts/
 │   ├── 01-probe.ps1              只读环境探测，随时可跑

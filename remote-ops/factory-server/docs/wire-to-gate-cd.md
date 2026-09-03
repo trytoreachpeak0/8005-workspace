@@ -135,7 +135,7 @@ pwsh -File remote-ops/factory-server/scripts/control-server/Set-ControlServerSec
 ControlServer 的 `appsettings.json` 里），所以进 git，一台车一个文件：
 
 ```bash
-cp remote-ops/onboard-hmi/config/site-agv01.example.json \
+cp remote-ops/onboard-hmi/config/site.example.json \
    remote-ops/onboard-hmi/config/site-agv01.json
 ```
 

@@ -115,7 +115,7 @@ Write-Step "OnboardHmi deployment to $SshAlias"
 if (-not (Test-Path -LiteralPath $SitePath)) {
     throw @"
 No site file at $SitePath.
-Copy config\site-agv01.example.json to that name and fill in the vehicle's
+Copy config\site.example.json to that name and fill in the vehicle's
 values. Refusing to guess: onboardInstanceId must stay stable across
 deployments, and the rule-gateway and IO-module addresses are wiring facts.
 "@
