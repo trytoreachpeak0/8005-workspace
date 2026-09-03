@@ -19,6 +19,16 @@
 WIRE_TO_GATE 那份跨了这里的两个子目录：服务端脚本是 `factory-server/scripts/15-*`，车载端是
 `onboard-hmi/scripts/06-*`，每台车的现场值在 `onboard-hmi/config/site-<别名>.json`。
 
+**想知道两端此刻在干什么，用 `status/`**：
+
+```powershell
+pwsh remote-ops/status/Get-WireToGateStatus.ps1
+```
+
+一次运行同时读服务端 HTTP、两台机器的 SSH，给出七条判据的 PASS/FAIL 和一句 MVP 结论，
+并把这次观测追加成 journal 的一行。只读，不启动也不停任何东西。用法和每条判据不过时先看
+哪里在 `status/README.md`。
+
 `factory-server/` 早先走的是 WinRM 5985 加 `codex-ops`/`codex-admin` 双账户，
 已于 2026-09-01 整个拆除——双账户模型从未真正生效、文档里的防火墙加固不成立、
 且它需要关闭远程 UAC 令牌过滤。原委见 `factory-server/README.md` 决策一。
@@ -60,6 +70,15 @@ Find-NetRoute -RemoteIPAddress <目标IP> | Select-Object -First 1 IPAddress,Int
 ```
 
 `InterfaceAlias` 显示 `Clash` 就说明探测结果不可信。
+
+**明细路由只解决路由层，HTTP 客户端是另一条路径。**`Invoke-WebRequest` 和
+`Invoke-RestMethod` 默认用系统代理设置，那跟路由表无关——即使 `Find-NetRoute` 显示
+直连，请求仍然交给控制端的 Clash 代理转发。表现是错误被伪装：2026-09-03 拿一个
+不存在的端口测厂区服务器，回来的是代理的 `HTTP 502`，看着像"服务在但坏了"，加
+`-NoProxy` 之后才是真相——`connection refused`，请求根本没到那台机器。
+
+**探厂区机器的 HTTP 一律带 `-NoProxy`。**判据是"目标在明细路由覆盖的网段里"，此时
+代理只会添乱。`curl.exe` 对应的是 `--noproxy '*'`。
 
 ## 脚本语言
 
