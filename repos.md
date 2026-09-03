@@ -1,9 +1,15 @@
 # Component repositories
 
-All seven are cloned in place under this workspace and tracked on their own
+All seven are cloned under `repos/` in this workspace and tracked on their own
 remotes. This repository never contains their content — `setup.ps1` restores
 them. Write authority is defined in `CLAUDE.md`; the "Owner" column below is
 why, not a second policy.
+
+The `Directory` column names the directory inside `repos/`, so
+`8005-agv-protocol` is at `repos/8005-agv-protocol` from the workspace root.
+They were moved there on 2026-09-04; before that they sat directly in the root.
+The move kept them siblings of one another, so relative paths **between**
+repositories are unchanged.
 
 | Directory | Remote (`github.com/trytoreachpeak0/`) | Working branch | Owner | Agent access |
 | --- | --- | --- | --- | --- |

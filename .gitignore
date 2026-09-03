@@ -1,12 +1,7 @@
-# The seven component repositories are cloned in place and tracked on their own
-# remotes. setup.ps1 restores them; this repository never contains their content.
-/8005-agv-program/
-/8005-mes-ingest/
-/riot-sdk/
-/8005-agv-control-server/
-/8005-agv-onboard-hmi/
-/8005-agv-protocol/
-/slots-simulator/
+# The seven component repositories are cloned under repos/ and tracked on their
+# own remotes. setup.ps1 restores them; this repository never contains their
+# content.
+/repos/
 
 # Release-candidate build output. The recipe under releases/ rebuilds and
 # verifies it; the binaries themselves stay out of git.

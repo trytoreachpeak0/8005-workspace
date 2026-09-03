@@ -361,16 +361,25 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 This repository tracks only workspace-level files; the seven component clones
 and the `w2g-rc-*` build output are gitignored.
 
+**The seven clones live under `repos/`** (moved there on 2026-09-04 to keep the
+root readable — previously they sat directly in it). They stay siblings of each
+other, so every cross-repository relative path is unchanged; what moved by one
+level is the path from the workspace root, e.g. `repos/8005-agv-protocol/integration-slices/index.json`.
+Everything else — `remote-ops/`, `releases/`, `file-naming-convention/`, the
+`w2g-rc-*` snapshot — stayed where it was.
+
 `8005---AGV` was split and renamed on 2026-09-02 — it is now `8005-agv-program`
 (requirements and decisions, no code), plus `8005-mes-ingest` and `riot-sdk`.
 Its history was rewritten to purge `.artifacts/`, so every commit hash changed
 and any old clone must be re-cloned. The pre-split mirror sits outside the
 workspace at `C:\Users\szy\8005-restructure-backup`. See `repos.md`.
 
+- `repos/` — the seven component clones, one directory per repository. Not
+  tracked here; each is its own clone on its own remote.
 - `repos.md` — the seven repositories, their working branches, and who owns each.
   It also records the 2026-09-02 split of `8005---AGV`.
-- `setup.ps1` — clones whatever is missing on a new machine. Never pulls or
-  resets an existing clone.
+- `setup.ps1` — clones whatever is missing into `repos/` on a new machine. Never
+  pulls or resets an existing clone.
 - `file-naming-convention/` — naming rules for this root and the four
   repositories owned here. Lowercase kebab-case; the document states the
   exceptions. It does not govern the three repositories owned by other people.

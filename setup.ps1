@@ -3,16 +3,18 @@
 <#
   setup.ps1 - Restore the workspace on a new machine.
 
-  Clones any of the five component repositories that are missing, at the
-  working branch listed in repos.md. Existing clones are left untouched — this
-  script never pulls, resets, or checks out over your work.
+  Clones any of the seven component repositories that are missing into repos/,
+  at the working branch listed in repos.md. Existing clones are left untouched —
+  this script never pulls, resets, or checks out over your work.
 
   Usage:  pwsh -File .\setup.ps1
 #>
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = Join-Path $PSScriptRoot 'repos'
 $base = 'https://github.com/trytoreachpeak0'
+
+if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Path $root | Out-Null }
 
 $repos = @(
     @{ Dir = '8005-agv-program';        Branch = 'main' }

@@ -27,8 +27,8 @@ know its answer — a stale assumption is what this skill exists to prevent.
 
 ```bash
 # Where the working tree stands, in every writable repo
-git -C 8005-agv-control-server status --short
-git -C 8005-agv-protocol status --short
+git -C repos/8005-agv-control-server status --short
+git -C repos/8005-agv-protocol status --short
 
 # The progress board: the issue labelled wayfinder:map
 gh issue list -R trytoreachpeak0/8005-agv-protocol --label wayfinder:map --json number,title
@@ -39,18 +39,19 @@ gh issue list -R trytoreachpeak0/8005-agv-control-server --state open
 gh issue list -R trytoreachpeak0/8005-agv-protocol --state open
 
 # Slice order and dependencies
-cat 8005-agv-protocol/integration-slices/index.json
+cat repos/8005-agv-protocol/integration-slices/index.json
 
 # Unfixed defects
-ls 8005-agv-control-server/docs/defects/
+ls repos/8005-agv-control-server/docs/defects/
 
 # Most recent gate evidence
-ls -t 8005-agv-control-server/evidence/g2 | head -3
-ls -t 8005-agv-control-server/evidence/g3 | head -3
-ls -t 8005-agv-control-server/evidence/rc | head -3
+ls -t repos/8005-agv-control-server/evidence/g2 | head -3
+ls -t repos/8005-agv-control-server/evidence/g3 | head -3
+ls -t repos/8005-agv-control-server/evidence/rc | head -3
 ```
 
-Paths are relative to the workspace root `C:\Users\szy\Desktop\8005-workspace`.
+Paths are relative to the workspace root `C:\Users\szy\Desktop\8005-workspace`;
+the seven component clones live under `repos/` there.
 
 ## 2. Apply the ladder
 

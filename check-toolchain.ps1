@@ -10,7 +10,7 @@
     Wang, which are read-only for agents and are reported but never fixed.
 
     Baseline rationale and the enforcement layers live in
-    8005-agv-program/docs/adr/cross/0056-dotnet-toolchain-baseline.md.
+    repos/8005-agv-program/docs/adr/cross/0056-dotnet-toolchain-baseline.md.
 
 .PARAMETER Quiet
     Print only deviations, not the per-repository summary.
@@ -55,7 +55,7 @@ $Repos = [ordered]@{
     'slots-simulator'         = 'read-only'
 }
 
-$root = $PSScriptRoot
+$root = Join-Path $PSScriptRoot 'repos'
 $findings = [System.Collections.Generic.List[pscustomobject]]::new()
 
 function Add-Finding {

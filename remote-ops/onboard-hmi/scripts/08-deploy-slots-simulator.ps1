@@ -42,7 +42,7 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string] $SshAlias = 'agv01',
-    [string] $SourceRepository = 'C:\Users\szy\Desktop\8005-workspace\slots-simulator',
+    [string] $SourceRepository = 'C:\Users\szy\Desktop\8005-workspace\repos\slots-simulator',
     [string] $PublishPath,
     [string] $InstallRoot = 'C:\8005\SlotsSimulator',
     [string] $SdkVersion = '8.0.424',
