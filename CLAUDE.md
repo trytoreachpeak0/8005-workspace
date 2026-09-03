@@ -97,7 +97,7 @@ else.
 
 What survives is narrower, and it is a freeze rather than an exception: the
 already-released MES ingest scripts under
-`8005-mes-ingest/.artifacts/releases/` keep their
+`repos/8005-mes-ingest/.artifacts/releases/` keep their
 `#Requires -Version 5.1` header. They were validated and shipped as 5.1
 artifacts. Never retrofit a released script in either direction — not to PS7,
 and not back to 5.1.
@@ -106,13 +106,13 @@ and not back to 5.1.
 
 项目由两个人推进：Kun Wang（GitHub `SocialKKKK`）负责 `8005-agv-onboard-hmi` 与
 `slots-simulator`；Zhengyu Shao 负责 `8005-agv-control-server`；`8005-agv-protocol`
-共同维护。**权威文档是 `8005-agv-program/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md`
+共同维护。**权威文档是 `repos/8005-agv-program/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md`
 里内联了 agent 必须遵守的部分。
 
 注意 `8005-workspace` 这个仓库**只有 Zhengyu Shao 有访问权**，Kun Wang 看不到。任何需要
 对方看到的东西不能只写在这里。
 
-协作单位是 `8005-agv-protocol/integration-slices/index.json` 里的 integration slice
+协作单位是 `repos/8005-agv-protocol/integration-slices/index.json` 里的 integration slice
 （`W2G-IS-00` 到 `W2G-IS-07`），每个切片的 `gates` 就是分工。跨仓库反馈必须带可复现的
 门禁证据。protocol 由 Zhengyu Shao 单独决定内容，但**每次推送都要开 issue @`SocialKKKK`
 通知**（见上面 Notify-after-change）。发布打 tag 仍需双人签名，AI 和 CI 不能批准。
@@ -142,7 +142,7 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 砍掉了 `Invoke-GoldenRendererValidation.ps1` 那 823 行"因为测试机在别处"才需要
 的编排——payload 部署、PowerShell Direct 会话、计划任务注册、证据回捞全部不再
 需要。**已于 2026-09-02 落地**：该脚本删除，其中真正有价值的打包发布门禁独立成
-`8005-mes-ingest/Invoke-PackagedReleaseGate.ps1`，视觉基线走
+`repos/8005-mes-ingest/Invoke-PackagedReleaseGate.ps1`，视觉基线走
 `.github/workflows/golden-renderer.yml`（`mode=verify` / `mode=candidates`，只能
 手动触发）。
 
@@ -196,7 +196,7 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
    GitHub 的 `concurrency` 表达不了（它只在单个仓库内生效）。
 
    **它现在由一个机器级命名互斥体承担：`Global\W2G-InteractiveDesktop`，唯一定义
-   处是 `8005-mes-ingest/Invoke-WithDesktopLock.ps1`**（2026-09-03 落地）。任何仓库
+   处是 `repos/8005-mes-ingest/Invoke-WithDesktopLock.ps1`**（2026-09-03 落地）。任何仓库
    的任何脚本，只要在动那台机器的交互式桌面（起 WPF 窗口、抓像素、驱动 UI
    Automation），都必须先拿到同一个名字的互斥体。各仓是独立克隆、没有共享包，所以
    第二个仓要用就自己拷一份 helper——**名字才是契约，代码不是**。
@@ -210,7 +210,7 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
 
    只给需要金机的 runner 打 `golden-renderer` 标签，别的 runner 不要带。
 3. **黄金渲染机的 Validation 阶段只能 `workflow_dispatch` 手动触发。**它会产生
-   候选基线，那必须是用户点头之后的动作，见 `8005-mes-ingest/CLAUDE.md`。
+   候选基线，那必须是用户点头之后的动作，见 `repos/8005-mes-ingest/CLAUDE.md`。
 
 那轮托管 CI 抓到过一个本地发现不了的真 bug（`.gitattributes` 的字节规则在拆分时
 丢失，导致查询文件摘要对不上）。**教训是：改动会影响构建的文件后，用干净
@@ -315,7 +315,7 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 
 **这件事有一个自动版本，2026-09-03 已经堵上。**`cancel-in-progress: true` 会在同一分支
 连推两次时自动取消正在跑的作业，与手动取消同一条路径。当时
-`8005-agv-control-server/test.yml`、`riot-sdk/test.yml` 和 `8005-agv-protocol/g1.yml`
+`8005-agv-control-server` 与 `riot-sdk` 的 `test.yml`、`8005-agv-protocol` 的 `g1.yml`
 三个 workflow 都是 `true`（`8005-mes-ingest` 的六个早就是 `false`），现已统一改为
 `false`。**新写 workflow 时不要再设成 `true`。**注意改为 `false` 后仍会取消**排队中**的
 作业——第三个到达时中间那个被顶掉——那不碰 runner 会话，是安全的。
@@ -336,7 +336,7 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 ## .NET 工具链基线
 
 四个可写 .NET 仓库统一到一套工具链，真相来源是
-`8005-agv-program/docs/adr/cross/0056-dotnet-toolchain-baseline.md`：
+`repos/8005-agv-program/docs/adr/cross/0056-dotnet-toolchain-baseline.md`：
 
 | 项 | 锁定值 |
 | --- | --- |
@@ -494,7 +494,7 @@ factory server took the role, and the baselines it rendered were promoted the
 same day — `8005-mes-ingest` commit `34a7399`, verified with 3 runs and 0
 received. `gpt_win11` now has no sanctioned use at all; the golden-renderer path
 runs through `.github/workflows/golden-renderer.yml` on the `golden-renderer`
-runner, and `8005-mes-ingest/docs/agents/golden-renderer.md` is the contract.
+runner, and `repos/8005-mes-ingest/docs/agents/golden-renderer.md` is the contract.
 
 Do not resurrect it as a second renderer. The baselines it produced on
 2026-08-28 carry `+00:00` timestamps, which is only possible on a machine whose
