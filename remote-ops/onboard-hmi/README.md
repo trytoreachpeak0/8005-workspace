@@ -340,11 +340,12 @@ Win32-OpenSSH 所有 release 都带 `Preview`/`Beta` 后缀但 `prerelease=False
 
 1. **HMI 制品从哪来** —— 由本机 `dotnet publish` 现出，还是有既定的构建产物来源？
    这决定阶段 3 的制品流水线形态。
-2. **另两台车** —— 2 号车的 CPE 已有企业内网 IP，上位机那一侧还没通；3 号车没有地址。
-   别名 `agv02` 已在 `config/ssh_config.agv` 里占名（`HostName` 是 `REPLACE_WITH_CPE_IP`），
-   现场值文件 `config/site-agv02.json` 也建好了，全是 `REPLACE_*`。地址下来之后按
-   `docs/USAGE.md` 第 7 节填两个值再跑
-   `../control-host/Build-SshConfig.ps1`。（更新于 2026-09-03。）
+2. **另两台车** —— 3 号车没有地址。2 号车的 CPE 是 `172.19.162.179`，别名 `agv02`
+   已配好并装进控制端，**但上位机那一跳还没通**：2026-09-03 实测该 CPE 上 22 是它自己的
+   dropbear、80 是 Web UI，22022 和 22023 都没转发，`ssh agv02` 拿到的是
+   `Connection refused`。缺的是 `docs/USAGE.md` 第 7 节的第 2–4 步——VNC 里在上位机
+   装 sshd，再在 CPE 上配一条转发到它的 22。现场值文件 `config/site-agv02.json` 已建，
+   四个值仍是 `REPLACE_*`。（更新于 2026-09-03。）
 
 已解答（2027-02）：
 

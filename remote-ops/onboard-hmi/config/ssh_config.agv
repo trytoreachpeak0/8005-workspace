@@ -25,18 +25,19 @@ Host agv01
     HostName 172.19.162.210
     Port 22022
 
-# Car 2 -- the CPE has an enterprise-LAN address; the HMI behind it is not
-# reachable yet. The alias is declared anyway: this file is the name registry,
-# and a name is only unique if it is taken before somebody else needs one.
+# Car 2 -- CPE at 172.19.162.179. Same model as car 1's: SSH-2.0-dropbear on 22,
+# web UI on 80, measured 2026-09-03 from the control host over the direct Wi-Fi
+# subnet (Find-NetRoute said Wi-Fi, not Clash, so the probe is real).
 #
-# A HostName of REPLACE_* means "reserved, not online". Build-SshConfig.ps1
-# reports it and omits the block, so `ssh agv02` fails as an unknown host
-# rather than resolving to a bogus address.
+# THE HMI BEHIND IT IS NOT REACHABLE YET. 22023 is not forwarded -- neither is
+# 22022 -- so `ssh agv02` gets a refused connection, not a login. What is still
+# missing is docs/USAGE.md section 7 steps 2-4: bootstrap sshd on the HMI over
+# VNC, then point a CPE forward at it.
 #
-# 22023 follows the 22022 + 1 habit and is a GUESS until checked against this
-# CPE's own forwarding table -- each CPE has its own occupied ports.
+# 22023 is the 22022 + 1 habit, not a constraint: on THIS CPE 22022 is free too.
+# Keeping the habit so the port says which car it is.
 Host agv02
-    HostName REPLACE_WITH_CPE_IP
+    HostName 172.19.162.179
     Port 22023
 
 # Car 3: copy the block above as agv03 when its CPE gets an address.

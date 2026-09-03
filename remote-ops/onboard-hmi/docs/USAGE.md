@@ -273,15 +273,16 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    那份文件由 `remote-ops/control-host/Build-SshConfig.ps1` 生成，手改会在下次装配时
    被覆盖，而且绕过了命名唯一性校验。
 
-   2 号车的块**已经在片段里了**，`HostName` 是占位符，把它换成真实的 CPE 地址即可：
+   2 号车的块**已经填好了**（`172.19.162.179:22023`）。再往后的车（agv03……）照着
+   复制一块，别名必须是 `agv` + 两位数字：
 
    ```
-   Host agv02
+   Host agv03
        HostName <新CPE的IP>
-       Port 22023
+       Port 22024
    ```
 
-   再往后的车（agv03……）照着复制一块，别名必须是 `agv` + 两位数字。然后：
+   机器还没上线就先把 `HostName` 写成 `REPLACE_...` 占住名字，装配时会跳过它。然后：
 
    ```bash
    pwsh ../../control-host/Build-SshConfig.ps1
