@@ -32,6 +32,16 @@ Host agv01
 # Also 22022, same as car 1. The two CPEs are separate devices reached by
 # separate addresses, so the external port never had to differ -- one number for
 # every car is easier to remember than a per-car increment.
+#
+# Verified 2026-09-03: agvops@DESKTOP-94OA6CK, pwsh 7.6.5, Windows 10 Pro.
+#
+# That COMPUTERNAME is car 1's too. The two are different physical machines
+# (different MAC, different SSH host key, different uptime) cloned from one
+# image with nothing re-personalized: same COMPUTERNAME, same MachineGuid
+# 6910ff68-24ae-4fcb-8e16-b6bbd5924490, same SMBIOS UUID, same InstallDate, and
+# the same 192.168.71.180 on their own NATed LANs. So the ALIAS is the only
+# thing that tells the cars apart from here -- never key anything off the
+# machine name or MachineGuid.
 Host agv02
     HostName 172.19.162.179
     Port 22022

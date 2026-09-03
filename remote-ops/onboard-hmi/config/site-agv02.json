@@ -1,8 +1,8 @@
 {
   "_comment": "Per-vehicle site values for 06-deploy-onboard-hmi.ps1. None of these are secrets -- vehicleKey is already in ControlServer appsettings.json; the credential and operator id come from the DPAPI store instead.",
-  "_status": "2 号车尚未上线。SSH 通道 172.19.162.179:22022 的转发已在 CPE 上配好，待验证。所有 REPLACE_* 都是必填，06-deploy-onboard-hmi.ps1 见到它们会直接拒绝而不是猜一个值。",
+  "_status": "SSH 通道 2026-09-03 已验证连通（ssh agv02）。部署本身还没做，所有 REPLACE_* 都是必填，06-deploy-onboard-hmi.ps1 见到它们会直接拒绝而不是猜一个值。",
   "_agvId": "agvId 与 onboardInstanceId 必须是真实的现场身份。客户端把 AGV-8005-01 和 OBU-8005-01 这两个示例值本身当作占位符，Production 环境下启动即抛 InvalidDataException。1 号车用的是中文位号「老厂前线新多仓位1」，2 号车按现场实际位号填，不要沿用 1 号车的值——服务端把重复的身份当成同一台车。",
-  "_onboardInstanceId": "wireToGate.onboardInstanceId 必须是 D 形式的 Guid（8-4-4-4-12），且跨部署稳定——服务端把新值当成另一台车。**不要复制 1 号车的那个 Guid**，两台车共用一个等于服务端只看得见一台。新生成一个：pwsh -c '[guid]::NewGuid().ToString()'。",
+  "_onboardInstanceId": "wireToGate.onboardInstanceId 必须是 D 形式的 Guid（8-4-4-4-12），且跨部署稳定——服务端把新值当成另一台车。**不要复制 1 号车的那个 Guid**，两台车共用一个等于服务端只看得见一台。新生成一个：pwsh -c '[guid]::NewGuid().ToString()'。这条不是理论风险：2026-09-03 实测两台车是同一个镜像克隆出来的、克隆后没做任何个性化——COMPUTERNAME 都是 DESKTOP-94OA6CK，MachineGuid 都是 6910ff68-24ae-4fcb-8e16-b6bbd5924490，SMBIOS UUID 和 InstallDate 也相同。任何从机器本身推导身份的做法都会把两台车当成一台，这个值必须人工给定。",
   "_vehicleKey": "expectedVehicleKey 必须与 ControlServer appsettings.json 里登记的这台车的 key 一致。1 号车的 BROKERX-0c20ff06... 是 1 号车的，2 号车要用它自己那把。",
   "_ruleGateway": "规则服务器只在 wireToGate.enabled=false 时才连（App.xaml.cs:41 用 DisabledRuleGateway 顶掉它）。Production 强制 wireToGate.enabled=true，所以这个地址在本部署里不会被使用，但配置校验仍要求它不是占位值。有真实地址就填真实的；没有就保留 127.0.0.1。",
   "_ioModule": "八仓 Modbus IO 模块。1 号车是 192.168.71.150；同网段的 192.168.71.50 是另一台车的模块，2 号车很可能就是它，但**要实测 502 通了再填**，不要按推测写。",
