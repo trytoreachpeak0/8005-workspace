@@ -254,9 +254,24 @@ ControlServer。
 进程环境块，所以远程脚本在同一会话里先写后调子进程是成立的。别改成命令行传参——那会让密钥
 进入进程命令行。
 
-**4. 服务器上没有 `curl.exe`。**Windows Server 2016 不带，它是从 Server 2019 才内置的。
-第 4.4 节要求"用带 `--noproxy` 的 curl 读 body 判定可达"，服务器这边用 PowerShell 7 的
-`Invoke-WebRequest -NoProxy` 达到同样效果。控制端和车上同理。
+**4. 服务器上没有 `curl.exe`，产品安装脚本原本硬依赖它。**Windows Server 2016 不带 curl，
+它是从 Server 2019 才内置的。首次部署就挂在这上面：
+
+```
+Install-ControlServerLocal.ps1:138
+The term 'C:\Windows\System32\curl.exe' is not recognized as a name of a cmdlet, function,
+script file, or executable program.
+```
+
+失败点在服务起来之后的健康检查，产品脚本的回滚逻辑生效，服务器上没留下半装的服务。
+四处调用（`Install-ControlServerLocal.ps1` 的 Live/Ready/Version，`Update-ControlServerLocal.ps1`
+的 `Invoke-JsonGet`）已改用 PowerShell 7 自带的客户端：`-NoProxy` 对应 `--noproxy`，
+`-TimeoutSec` 对应 `--max-time`，非 2xx 默认抛异常对应 `--fail`，而 `-SkipHttpErrorCheck`
+还原了 ready 检查那处**故意不带 `--fail`** 的语义——它必须能读到 `not-ready` 响应的 body。
+两个脚本同时加上了 `#Requires -Version 7`，因为这两个参数是 PS7 才有的。
+
+`RELEASE-CANDIDATE.md` 第 4.4 节那句"一律用带 `--noproxy` 的 `curl.exe` 读 body 判定"仍然
+成立，它讲的是**人**在控制端手工判断可达性，而控制端是 Windows 11，有 curl。
 
 ---
 
