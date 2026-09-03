@@ -27,12 +27,20 @@ wherever it sits on disk.
 
 ### Read-only
 
-No edits or generated files — source, tests, configuration, scripts,
-documentation, handoffs, or evidence. No branches, commits, tags, releases,
-issues, pull requests, comments, or pushes. Read-only inspection and fetches
+The **content** is read-only. No edits or generated files — source, tests,
+configuration, scripts, documentation, handoffs, or evidence. No commits, tags,
+releases, or pushes to the repository itself. Read-only inspection and fetches
 are fine. Run validation that would generate files from a disposable copy, or
 with outputs outside the protected repository, and leave its worktree
 unchanged.
+
+**Issues, pull requests and comments are allowed** (changed 2026-09-03; they
+were previously forbidden along with everything else). That is the sanctioned
+channel for reporting a defect in code this workspace cannot fix: diagnose it
+precisely, open an issue with reproducible evidence, and leave the fix to the
+repository's owner. Write them in Chinese like every other human-facing text.
+The content rule is unchanged — an issue proposes a change, it does not make
+one.
 
 ### Notify-after-change
 
