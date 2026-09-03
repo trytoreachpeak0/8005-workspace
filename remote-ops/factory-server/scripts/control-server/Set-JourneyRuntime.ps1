@@ -1,49 +1,70 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-    Turns the ControlServer JourneyRuntime on or off on the factory server. Runs
-    ON the control host and reaches the server over ssh.
+    Sets the ControlServer journey gates on the factory server. Runs ON the
+    control host and reaches the server over ssh.
 
 .DESCRIPTION
-    This switch is the moment a real vehicle starts working. There is no human
-    trigger downstream of it: JourneyRuntimeWorker polls every PollInterval (2 s)
-    the moment Enabled is true, and JourneyRuntimeEngine discovers demands from
-    the MesIngest catalog, accepts the oldest eligible one, reconciles a RIoT
-    order and dispatches movement -- with no further approval anywhere in that
-    path. So "enable it and watch what happens" is not available: enabling IS the
-    authorization, and RELEASE-CANDIDATE.md section 11 requires a per-occasion
+    There are TWO gates, not one, and they carry different authorizations:
+
+      JourneyRuntime.enabled     the engine runs at all -- polls the MesIngest
+                                 catalog, accepts the oldest eligible
+                                 WIRE_TO_GATE demand, resolves a route, applies
+                                 the admission policy, reconciles RIoT orders.
+      RiotCreateDispatch.enabled the engine may CREATE a RIoT order. This is the
+                                 one that moves a vehicle.
+
+    Hence three levels:
+
+      -Off       both closed. Nothing is accepted, nothing moves.
+      -Intake    runtime on, create gate closed. A real demand is accepted and
+                 the whole decision chain runs, but no RIoT order is created and
+                 no vehicle moves. This is the state issue 14's acceptance ran
+                 in: 23 PASS, RiotDispatchAuditEvents finished at 0, no vehicle
+                 moved. It is the honest rehearsal -- real data, real decisions,
+                 no motion.
+      -Dispatch  both open. A real vehicle will move.
+
+    -Intake is not a dry run in the sense of being reversible in the outside
+    world: accepting a demand writes an AcceptedDemands row, and a demand this
+    server has accepted is bound to its one journey permanently and is never a
+    candidate again. It just does not move anything.
+
+    -Dispatch is where RELEASE-CANDIDATE.md section 11 applies: a per-occasion
     authorization AND an on-site physical safety GO, both, every time, never
-    reusable.
+    reusable. There is no human trigger downstream -- JourneyRuntimeWorker polls
+    every PollInterval (2 s), so the vehicle starts within seconds of the
+    restart. The prompt prints which sublot the next iteration will pick up;
+    read it out loud at the vehicle before answering.
 
-    -Enable therefore prints what the next iteration will pick up -- how many
-    WIRE_TO_GATE demands are waiting and which one is oldest -- and refuses to
-    proceed without confirmation. Read that out loud at the vehicle before
-    answering.
-
-    Everything JourneyRuntime needs is already configured. appsettings.json
-    carries the real site values (mapId 25, gateStationRiotId 210, dispatchZone,
+    Everything else is already configured. appsettings.json carries the real site
+    values (mapId 25, gateStationRiotId 210, dispatchZone,
     admissionPolicyDeploymentId, ...) and the service's registry environment
-    already holds the RIoT, onboard and MesIngest secrets. Only the boolean in
-    appsettings.Production.json is false, which is why this is a configuration
+    holds the RIoT, onboard and MesIngest secrets. Only the two booleans in
+    appsettings.Production.json are false, which is why this is a configuration
     change and not a redeployment.
 
-.PARAMETER Disable
-    Stops the runtime taking on anything new. It does NOT stop a vehicle that is
-    already moving -- an in-flight journey is the vehicle's own business and the
-    physical stop is the physical stop. Use this to close the intake, then let
-    the current journey finish or handle it at the vehicle.
+.PARAMETER Off
+    Closes both gates. It does NOT stop a vehicle that is already moving -- an
+    in-flight journey is the vehicle's own business and the physical stop is the
+    physical stop. This closes intake; the current journey still finishes or is
+    handled at the vehicle.
 
 .PARAMETER Force
-    Skip the confirmation prompt. Do not use this for -Enable at a real vehicle:
-    the prompt is where the authorization is recorded.
+    Suppresses the confirmation prompt by lowering $ConfirmPreference. Do not use
+    it with -Dispatch at a real vehicle: the prompt is where the authorization is
+    recorded.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Enable')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Intake')]
 param(
-    [Parameter(ParameterSetName = 'Enable')]
-    [switch] $Enable,
+    [Parameter(ParameterSetName = 'Intake')]
+    [switch] $Intake,
 
-    [Parameter(ParameterSetName = 'Disable', Mandatory = $true)]
-    [switch] $Disable,
+    [Parameter(ParameterSetName = 'Dispatch', Mandatory = $true)]
+    [switch] $Dispatch,
+
+    [Parameter(ParameterSetName = 'Off', Mandatory = $true)]
+    [switch] $Off,
 
     [string] $ServerAlias = 'factory01',
     [string] $ServiceName = '8005 AGV ControlServer',
@@ -57,7 +78,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$targetState = -not $Disable
+
+$wantRuntime = -not $Off
+$wantDispatch = [bool]$Dispatch
+$levelName = $Off ? 'Off' : ($Dispatch ? 'Dispatch' : 'Intake')
 
 function Invoke-Server {
     param([string] $Script)
@@ -75,24 +99,26 @@ function Write-Step { param([string] $Message) Write-Host "  $Message" -Foregrou
 $current = Invoke-Server @"
 `$c = Get-Content -LiteralPath '$ConfigPath' -Raw | ConvertFrom-Json
 [pscustomobject]@{
-    enabled = `$c.JourneyRuntime.enabled
-    service = (Get-Service -Name '$($ServiceName -replace "'", "''")').Status.ToString()
+    runtime  = [bool]`$c.JourneyRuntime.enabled
+    dispatch = [bool]`$c.RiotCreateDispatch.enabled
+    service  = (Get-Service -Name '$($ServiceName -replace "'", "''")').Status.ToString()
 } | ConvertTo-Json -Compress
 "@ | ConvertFrom-Json
 
+$currentLevel = -not $current.runtime ? 'Off' : ($current.dispatch ? 'Dispatch' : 'Intake')
 Write-Host ''
-Write-Host "JourneyRuntime is currently $($current.enabled); service is $($current.service)."
+Write-Host "Journey gates are currently $currentLevel (runtime=$($current.runtime), createDispatch=$($current.dispatch)); service is $($current.service)."
 
-if ($current.enabled -eq $targetState) {
-    Write-Host "Already $targetState. Nothing to do." -ForegroundColor Yellow
+if ($current.runtime -eq $wantRuntime -and $current.dispatch -eq $wantDispatch) {
+    Write-Host "Already $levelName. Nothing to do." -ForegroundColor Yellow
     return
 }
 
-# ------------------------------------------------------- what enabling means ---
+# ------------------------------------------------------- what this will do ---
 
-if ($targetState) {
-    # Read the catalog the engine itself will read, so the prompt names the real
-    # sublot rather than a count. Same endpoint, same credential kind, read-only.
+if ($wantRuntime) {
+    # Read the catalog the engine itself reads, so the prompt names the real
+    # sublot rather than a count. Same endpoint, read-only.
     $waiting = 'unknown'
     $oldest = 'unknown'
     try {
@@ -114,15 +140,27 @@ if ($targetState) {
     }
 
     Write-Host ''
-    Write-Host 'Enabling JourneyRuntime starts real vehicle work within one poll interval.' -ForegroundColor Yellow
     Write-Host "  WIRE_TO_GATE demands waiting: $waiting"
     Write-Host "  the next iteration will accept: $oldest"
-    Write-Host '  RELEASE-CANDIDATE.md section 11: per-occasion authorization AND an on-site'
-    Write-Host '  physical safety GO are both required, every time, and neither is reusable.'
+    Write-Host ''
+    if ($wantDispatch) {
+        Write-Host '  DISPATCH: a real vehicle will start moving within seconds of the restart.' -ForegroundColor Red
+        Write-Host '  RELEASE-CANDIDATE.md section 11 requires a per-occasion authorization AND an' -ForegroundColor Red
+        Write-Host '  on-site physical safety GO. Both. Every time. Neither is reusable.' -ForegroundColor Red
+    }
+    else {
+        Write-Host '  INTAKE only: the demand is accepted and the decision chain runs, but the RIoT' -ForegroundColor Yellow
+        Write-Host '  create gate stays closed and no vehicle moves. Accepting is still permanent --' -ForegroundColor Yellow
+        Write-Host '  that demand is bound to its journey and never becomes a candidate again.' -ForegroundColor Yellow
+    }
     Write-Host ''
 }
 
-$action = $targetState ? 'Enable JourneyRuntime and start real vehicle work' : 'Disable JourneyRuntime intake'
+$action = switch ($levelName) {
+    'Dispatch' { 'Open both gates and start real vehicle movement' }
+    'Intake' { 'Open the runtime gate only; accept a real demand without moving' }
+    'Off' { 'Close both journey gates' }
+}
 # -Force suppresses the prompt by lowering ConfirmPreference, never by skipping
 # ShouldProcess -- skipping it would make -Force -WhatIf perform the change.
 if ($Force -and -not $PSBoundParameters.ContainsKey('Confirm')) {
@@ -144,32 +182,39 @@ $result = Invoke-Server @"
 Copy-Item -LiteralPath `$path -Destination `$backup
 `$before = Get-Content -LiteralPath `$path -Raw
 `$c = `$before | ConvertFrom-Json
-`$c.JourneyRuntime.enabled = `$$targetState
-`$after = `$c | ConvertTo-Json -Depth 12
-Set-Content -LiteralPath `$path -Value `$after -Encoding utf8NoBOM
+`$c.JourneyRuntime.enabled = `$$wantRuntime
+if (`$c.PSObject.Properties.Name -notcontains 'RiotCreateDispatch') {
+    `$c | Add-Member -NotePropertyName 'RiotCreateDispatch' -NotePropertyValue ([pscustomobject]@{ enabled = `$$wantDispatch })
+} else {
+    `$c.RiotCreateDispatch.enabled = `$$wantDispatch
+}
+Set-Content -LiteralPath `$path -Value (`$c | ConvertTo-Json -Depth 12) -Encoding utf8NoBOM
 
-# Confirm exactly one field moved.
-`$b = `$before | ConvertFrom-Json | ConvertTo-Json -Depth 12 -Compress
-`$a = (Get-Content -LiteralPath `$path -Raw | ConvertFrom-Json) | ConvertTo-Json -Depth 12 -Compress
-`$expected = (`$before | ConvertFrom-Json)
-`$expected.JourneyRuntime.enabled = `$$targetState
-`$drift = (`$expected | ConvertTo-Json -Depth 12 -Compress) -ne `$a
+`$expected = `$before | ConvertFrom-Json
+`$expected.JourneyRuntime.enabled = `$$wantRuntime
+if (`$expected.PSObject.Properties.Name -notcontains 'RiotCreateDispatch') {
+    `$expected | Add-Member -NotePropertyName 'RiotCreateDispatch' -NotePropertyValue ([pscustomobject]@{ enabled = `$$wantDispatch })
+} else {
+    `$expected.RiotCreateDispatch.enabled = `$$wantDispatch
+}
+`$actual = (Get-Content -LiteralPath `$path -Raw | ConvertFrom-Json) | ConvertTo-Json -Depth 12 -Compress
 
 Restart-Service -Name '$($ServiceName -replace "'", "''")' -Force
-`$svc = Get-Service -Name '$($ServiceName -replace "'", "''")'
+`$now = Get-Content -LiteralPath `$path -Raw | ConvertFrom-Json
 [pscustomobject]@{
-    backup       = `$backup
-    unexpectedDrift = `$drift
-    enabledNow   = (Get-Content -LiteralPath `$path -Raw | ConvertFrom-Json).JourneyRuntime.enabled
-    service      = `$svc.Status.ToString()
+    backup      = `$backup
+    drift       = (`$expected | ConvertTo-Json -Depth 12 -Compress) -ne `$actual
+    runtimeNow  = [bool]`$now.JourneyRuntime.enabled
+    dispatchNow = [bool]`$now.RiotCreateDispatch.enabled
+    service     = (Get-Service -Name '$($ServiceName -replace "'", "''")').Status.ToString()
 } | ConvertTo-Json -Compress
 "@ | ConvertFrom-Json
 
 Write-Step "Backup: $($result.backup)"
-if ($result.unexpectedDrift) {
-    throw "The configuration changed in more than the JourneyRuntime.enabled field. Restore $($result.backup) on $ServerAlias."
+if ($result.drift) {
+    throw "The configuration changed in more than the two gate fields. Restore $($result.backup) on $ServerAlias."
 }
-Write-Step "JourneyRuntime.enabled is now $($result.enabledNow); service $($result.service)"
+Write-Step "runtime=$($result.runtimeNow), createDispatch=$($result.dispatchNow); service $($result.service)"
 
 # ------------------------------------------------------------------- verify ---
 
@@ -182,16 +227,16 @@ do {
     catch { $null }
 } while ($live -ne 200 -and [DateTime]::UtcNow -lt $deadline)
 
-if ($live -ne 200) { throw "Service did not answer /health/live within 60 s after the restart." }
+if ($live -ne 200) { throw 'Service did not answer /health/live within 60 s after the restart.' }
 Write-Step '/health/live 200'
 
-# The disabled runtime logs one warning and then sleeps forever; the enabled one
-# logs an iteration failure per poll if anything fails closed. Either way the
-# first seconds of log after a restart say which.
+# A disabled runtime logs one warning and sleeps forever; an enabled one logs an
+# iteration failure per poll if anything fails closed. The first seconds of log
+# after a restart say which.
 $log = Invoke-Server @"
 `$f = Get-ChildItem 'C:\ProgramData\8005\ControlServer\logs' -Filter 'controlserver-*.ndjson' |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
-Get-Content -LiteralPath `$f.FullName -Tail 25 | Where-Object { `$_ -match 'ourney|unway|iteration|Runtime' }
+Get-Content -LiteralPath `$f.FullName -Tail 40 | Where-Object { `$_ -match 'ourney|iteration|Runtime|ispatch|emand' }
 "@
 Write-Host ''
 Write-Host 'Recent runtime log lines:' -ForegroundColor DarkGray
@@ -199,9 +244,8 @@ if ($log) { $log -split "`n" | Select-Object -Last 8 | ForEach-Object { Write-Ho
 else { Write-Host '  (none matched)' -ForegroundColor DarkGray }
 
 Write-Host ''
-if ($targetState) {
-    Write-Host 'JourneyRuntime is ENABLED. Watch the vehicle, and watch Get-WireToGateStatus.ps1 -Watch.' -ForegroundColor Yellow
-}
-else {
-    Write-Host 'JourneyRuntime is DISABLED. No new demand will be accepted.' -ForegroundColor Green
+switch ($levelName) {
+    'Dispatch' { Write-Host 'DISPATCH is OPEN. A vehicle may be moving. Watch it.' -ForegroundColor Red }
+    'Intake' { Write-Host 'INTAKE is open, create gate closed. A demand will be accepted; nothing moves.' -ForegroundColor Yellow }
+    'Off' { Write-Host 'Both gates closed. No new demand will be accepted.' -ForegroundColor Green }
 }

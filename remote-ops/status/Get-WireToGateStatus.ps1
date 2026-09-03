@@ -135,6 +135,16 @@ $proc = Get-Process -Name 'SQCD.Agv.Wpf' -ErrorAction SilentlyContinue | Select-
 $exe = Get-Item 'C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe' -ErrorAction SilentlyContinue
 $journal = Get-ChildItem 'C:\Users\*\AppData\Local\SQCD\8005AGV\onboard-journal.db' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+# Which IO the client is configured to talk to, and -- when that is the local
+# simulator -- whether the simulator is actually there. A simulator that is not
+# running presents as the client failing to reach IO, which reads like a wiring
+# fault rather than a missing process.
+$io = $null
+try {
+    $cfg = Get-Content 'C:\8005\OnboardHmi\appsettings.json' -Raw -ErrorAction Stop | ConvertFrom-Json
+    $io = $cfg.ioModule
+} catch { }
+$simProcess = Get-Process 'SQCD_8005AGV_Simulator' -ErrorAction SilentlyContinue | Select-Object -First 1
 [pscustomobject]@{
     utcNowUnixMs     = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     processId        = if ($proc) { $proc.Id } else { $null }
@@ -145,6 +155,10 @@ $journal = Get-ChildItem 'C:\Users\*\AppData\Local\SQCD\8005AGV\onboard-journal.
     journalPath      = if ($journal) { $journal.FullName } else { $null }
     journalBytes     = if ($journal) { $journal.Length } else { $null }
     journalWrittenAt = if ($journal) { $journal.LastWriteTimeUtc.ToString('o') } else { $null }
+    ioHost           = if ($io) { $io.host } else { $null }
+    ioPort           = if ($io) { $io.port } else { $null }
+    simulatorPid     = if ($simProcess) { $simProcess.Id } else { $null }
+    modbusListening  = [bool](Get-NetTCPConnection -State Listen -LocalPort 1502 -ErrorAction SilentlyContinue)
 } | ConvertTo-Json -Compress
 '@
 
@@ -339,6 +353,18 @@ function Get-Snapshot {
         New-Gate 'session-ready' `
             (($null -eq $session) ? $null : ($session.readiness -eq 'Ready')) `
             (($null -ne $session) ? "$($session.readiness) $($session.reasonCode)" : 'no session yet')
+
+        # Only meaningful when the client is pointed at the local simulator; with
+        # a real Modbus module there is no local process to expect.
+        New-Gate 'io-target-reachable' `
+            ($onboard.reachable `
+                ? (($onboard.ioHost -eq '127.0.0.1') ? ($onboard.modbusListening -and $null -ne $onboard.simulatorPid) : $null) `
+                : $null) `
+            ($onboard.reachable `
+                ? (($onboard.ioHost -eq '127.0.0.1') `
+                    ? ("simulator $($onboard.ioHost):$($onboard.ioPort), pid $($onboard.simulatorPid), 1502 listening=$($onboard.modbusListening)") `
+                    : "real module $($onboard.ioHost):$($onboard.ioPort), not gated here") `
+                : 'onboard unreachable')
 
         New-Gate 'vehicle-safety-stopped' $safetyPass $safetyDetail
 

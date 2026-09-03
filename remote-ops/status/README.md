@@ -36,9 +36,9 @@ pwsh remote-ops/status/Get-WireToGateStatus.ps1
 文件，一行一次完整观测，只追加不改写。**一条过去的观测在它记录的状态变化之后仍然成立**，
 所以永远不回头改行。
 
-## 八条判据
+## 九条判据
 
-`mvpComplete` 是八条全部 PASS。`UNKNOWN` 不算通过——连不上时是"不知道"，不是"失败"，
+`mvpComplete` 是九条全部 PASS。`UNKNOWN` 不算通过——连不上时是"不知道"，不是"失败"，
 这个区别在排错时很重要。
 
 | 判据 | 在问什么 | 不过时先看 |
@@ -49,6 +49,7 @@ pwsh remote-ops/status/Get-WireToGateStatus.ps1
 | `onboard-process-running` | 车上 `SQCD.Agv.Wpf` 进程在不在 | **这是人在车前的动作**，见下 |
 | `session-present` | 服务端见没见过这台车 | 车载端起来了但没这条，查两端版本与绑定地址 |
 | `session-ready` | 这台车的会话是不是 `Ready` | `reasonCode`：`DEPARTURE_SAFETY_NOT_READY` 是闸门在正常工作，只有 `HANDSHAKE_INCOMPLETE` 才去查五步握手 |
+| `io-target-reachable` | 车载端配的 IO 目标在不在 | 只在指向模拟器（`127.0.0.1`）时判，见下 |
 | `vehicle-safety-stopped` | 安全闸门四项：`vehicleKey` 匹配、`STOPPED`、无 `reasonCodes`、证据够新 | RIoT 是否可读；`UNKNOWN` / `MOVING` 是闸门在工作不是 bug |
 | `clock-onboard-vs-server` | 车和服务器的时钟差在不在 5 秒窗口内 | `remote-ops/onboard-hmi/scripts/07-fix-clock.ps1` |
 
@@ -59,6 +60,11 @@ pwsh remote-ops/status/Get-WireToGateStatus.ps1
 
 证据年龄按**车载端的时钟**算，因为应用 `maximumEvidenceAgeMs` 的是车。拿控制端时钟算会得到
 负数——控制端慢几秒。
+
+`io-target-reachable` 读车上 `appsettings.json` 的 `ioModule.host` 来决定判什么：指向
+`127.0.0.1` 就是模拟器模式，要求模拟器进程在跑且 1502 在监听；指向真实 Modbus 模块时这条
+不判（`UNKNOWN`），因为车上没有对应的本地进程可查。模拟器没起来的症状是车载端连不上 IO，
+看着像接线故障而不是少了个进程——这条就是为了不让人往那个方向查。
 
 `agvId` 从 `remote-ops/onboard-hmi/config/site-<别名>.json` 读，不硬编码——
 `/api/runtime/sessions` 按这个值索引，每台车不一样。没有站点文件时脚本直接拒绝，不猜。
@@ -108,11 +114,16 @@ Get-Content "$env:LOCALAPPDATA\AgvOpsStatus\w2g-status-20260903.jsonl" |
 
 ## 现在离 MVP 还差什么
 
-截至 2026-09-03，八条里过了四条。剩下四条全部挂在同一个动作上：**得有人到车前，用桌面
-快捷方式启动车载端**。SSH 起的进程在 session 0 里没有窗口，而且启动它意味着一台会动的车
-进入待命，所以这一步不能远程做。
+截至 2026-09-03，九条里过了四条。剩下的挂在**人在车前的两个动作**上，顺序不能反：
 
-`onboard-process-running` 一旦变绿，`session-present` → `session-ready` → `server-ready`
-会顺次跟上。`-Watch` 就是为这一刻准备的：人在车前操作，这边看着判据一条条翻。
+1. 先启动桌面上的「8005 仓位模拟器」，等它把 1502 听起来
+2. 再启动「8005 AGV 车载端」
+
+两个都是 WPF 程序，SSH 起的进程在 session 0 里没有窗口，所以只能在车的桌面会话里做。顺序
+要求来自 IO 连接：车载端启动时就去连 Modbus，模拟器还没监听的话它连不上。
+
+`io-target-reachable` 和 `onboard-process-running` 变绿之后，`session-present` →
+`session-ready` → `server-ready` 会顺次跟上。`-Watch` 就是为这一刻准备的：人在车前操作，
+这边看着判据一条条翻。
 
 判读标准的权威版本在 `remote-ops/factory-server/docs/wire-to-gate-cd.md` 第 7 节。
