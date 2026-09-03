@@ -1,0 +1,27 @@
+{
+  "_comment": "Per-vehicle site values for 06-deploy-onboard-hmi.ps1. None of these are secrets -- vehicleKey is already in ControlServer appsettings.json; the credential and operator id come from the DPAPI store instead.",
+  "_status": "3 号车尚未上线。CPE 172.19.162.70 的 22022 转发已配到 192.168.71.180:22，但上位机还没装 sshd，实测 22022 被拒。所有 REPLACE_* 都是必填，06-deploy-onboard-hmi.ps1 见到它们会直接拒绝而不是猜一个值。",
+  "_agvId": "agvId 与 onboardInstanceId 必须是真实的现场身份。客户端把 AGV-8005-01 和 OBU-8005-01 这两个示例值本身当作占位符，Production 环境下启动即抛 InvalidDataException。1 号车用的是中文位号「老厂前线新多仓位1」，3 号车按现场实际位号填。",
+  "_onboardInstanceId": "wireToGate.onboardInstanceId 必须是 D 形式的 Guid（8-4-4-4-12），且跨部署稳定——服务端把新值当成另一台车。**不要复制 1 号车或 2 号车的 Guid**。新生成一个：pwsh -c '[guid]::NewGuid().ToString()'。这条不是理论风险：2026-09-03 实测 1、2 号车是同一个镜像克隆出来的、克隆后没做任何个性化——COMPUTERNAME 都是 DESKTOP-94OA6CK，MachineGuid 都是 6910ff68-24ae-4fcb-8e16-b6bbd5924490，SMBIOS UUID 与 InstallDate 也相同，以太网 5 的 IP 都是 192.168.71.180。3 号车的 CPE 把 22022 转发到同一个 192.168.71.180，几乎可以肯定它也是同一个镜像。任何从机器本身推导身份的做法都会把三台车当成一台，这个值必须人工给定。",
+  "_vehicleKey": "expectedVehicleKey 必须与 ControlServer appsettings.json 里登记的这台车的 key 一致。1 号车的 BROKERX-0c20ff06... 是 1 号车的，3 号车要用它自己那把。",
+  "_ruleGateway": "规则服务器只在 wireToGate.enabled=false 时才连（App.xaml.cs:41 用 DisabledRuleGateway 顶掉它）。Production 强制 wireToGate.enabled=true，所以这个地址在本部署里不会被使用，但配置校验仍要求它不是占位值。有真实地址就填真实的；没有就保留 127.0.0.1。",
+  "_ioModule": "八仓 Modbus IO 模块。1 号车是 192.168.71.150，同网段还见过 192.168.71.50。**要实测 502 通了再填**，不要按推测写。",
+  "_clock": "上线后先跑 07-fix-clock.ps1。1、2 号车都是 2027-02-08、快 158 天，NTP 配的是 172.19.206.222（比真正的 172.19.205.222 差一位）——那是镜像的固有属性，不是偶发。在任何东西读这台机器的时间戳之前先修。",
+  "agvId": "REPLACE_WITH_REAL_AGV_ID",
+  "onboardInstanceId": "REPLACE_WITH_REAL_ONBOARD_INSTANCE_ID",
+  "wireToGate": {
+    "onboardInstanceId": "REPLACE_WITH_STABLE_UUID"
+  },
+  "vehicleSafety": {
+    "expectedVehicleKey": "REPLACE_WITH_AGV03_VEHICLE_KEY"
+  },
+  "ruleGateway": {
+    "host": "127.0.0.1"
+  },
+  "ioModule": {
+    "host": "REPLACE_IO_MODULE_IP"
+  },
+  "install": {
+    "root": "C:\\8005\\OnboardHmi"
+  }
+}

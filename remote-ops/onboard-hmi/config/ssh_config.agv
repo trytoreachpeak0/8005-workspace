@@ -46,4 +46,14 @@ Host agv02
     HostName 172.19.162.179
     Port 22022
 
-# Car 3: copy the block above as agv03 when its CPE gets an address.
+# Car 3 -- CPE at 172.19.162.70, forwarding 22022 to 192.168.71.180:22. That
+# LAN address is the same as cars 1 and 2: all three are clones of one image and
+# each sits behind its own CPE's NAT, so the collision is confined and harmless.
+#
+# Probed 2026-09-03 from the control host over the direct Wi-Fi subnet: 22 is the
+# CPE's own dropbear, 80 its web UI, and 22022 is REFUSED -- the forward exists
+# but the HMI has no sshd yet. Same state agv02 was in before docs/USAGE.md
+# section 7 steps 2-3 were run on it over VNC.
+Host agv03
+    HostName 172.19.162.70
+    Port 22022

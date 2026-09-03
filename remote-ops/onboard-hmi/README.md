@@ -348,7 +348,11 @@ Win32-OpenSSH 所有 release 都带 `Preview`/`Beta` 后缀但 `prerelease=False
 
    **部署本身还没做。**`config/site-agv02.json` 里四个值仍是 `REPLACE_*`。
 
-   3 号车没有地址。
+   **3 号车通道已配好，等上位机装 sshd**（2026-09-03）。CPE `172.19.162.70`，转发
+   22022 → `192.168.71.180:22`（与另两台车同一个 LAN 地址，各在自己 CPE 的 NAT 后面，
+   不冲突）。实测该 CPE 上 22 是它自己的 dropbear、80 是 Web UI、22022 被拒——转发在，
+   后面没人监听。缺的是 `docs/USAGE.md` 第 7 节的第 2–3 步。别名 `agv03` 与
+   `config/site-agv03.json` 都已就位。
 
 3. **两台车是同一个镜像克隆的，克隆后没个性化。** COMPUTERNAME 都是
    `DESKTOP-94OA6CK`，MachineGuid 都是 `6910ff68-24ae-4fcb-8e16-b6bbd5924490`，
@@ -393,7 +397,8 @@ remote-ops/onboard-hmi/
 │   ├── ssh_config.agv            agv 族的 ssh 片段，也是别名注册表
 │   ├── site.example.json         现场值模板
 │   ├── site-agv01.json           1 号车现场值
-│   ├── site-agv02.json           2 号车，未上线
+│   ├── site-agv02.json           2 号车，通道就绪，未部署
+│   ├── site-agv03.json           3 号车，等装 sshd
 │   └── agv_ops_ed25519.pub       运维公钥（私钥不在仓库里）
 ├── scripts/
 │   ├── 01-probe.ps1              只读环境探测，随时可跑
