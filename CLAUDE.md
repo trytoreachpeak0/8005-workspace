@@ -225,6 +225,59 @@ release.yml (workflow_dispatch, headless runner) → zip + sha256 → GitHub art
 模式而不是一个反斜杠；**失败要尽早**——密码复杂度原本等到下载 207 MB、建完库才被
 SQL Server 以 15118 拒绝，现在在输入时就检查。
 
+## CD：WIRE_TO_GATE 两端，一个包，控制端中转
+
+**服务端已落地（2026-09-03），车载端待现场值。**权威文档是
+`remote-ops/factory-server/docs/wire-to-gate-cd.md`。
+
+```
+8005-agv-control-server 的 release.yml (workflow_dispatch，输入车载端 commit)
+  → New-WireToGateReleaseCandidate.ps1 → zip + sha256 → GitHub artifact
+  → 控制端 gh run download → 验哈希 ─┬─→ scp → factory01 → ControlServer
+                                     └─→ scp → agv01    → OnboardHmi（搬完就停）
+```
+
+| 位置 | 内容 |
+| --- | --- |
+| `C:\Program Files\8005 AGV\ControlServer` | 服务安装根，Windows 服务 `8005 AGV ControlServer` |
+| `D:\zhengyushao\ControlServer` | 当前包，`.previous` 留一代，`-Rollback` 换回去 |
+| 绑定 | `tcp://172.19.205.222:58005`、`http://172.19.205.222:58007` |
+| `C:\8005\OnboardHmi` | 车上安装根，`.previous` 留一代 |
+
+**两端打进一个包**，因为明文期的两端没有协商也没有降级（`RELEASE-CANDIDATE.md`
+8.1），版本错配的表现是连接被拒而不是一条说明原因的错误。车载端仓库只读的约束不受
+影响：workflow 把它 checkout 成 scratch 镜像，`New-WireToGateReleaseCandidate.ps1`
+再从镜像的一次性克隆构建，从不写那个仓库。
+
+**车载端搬完就停，不启动。**上位机是会动的生产设备，`SQCD.Agv.Wpf` 是交互式 WPF
+程序不是服务，就绪判定要人看着车辆安全投影的返回。这不是谨慎，是第 11 节要求的
+逐次授权加现场安全 GO。车载端部署还需要 `remote-ops/onboard-hmi/config/site-<别名>.json`
+里的现场值（规则服务器 IP、IO 模块 IP、稳定 UUID），**没填之前脚本直接拒绝，不猜**。
+
+首跑打出来三个坑，都值得记住：
+
+1. **`curl.exe` 不是每台 Windows 都有。**它随 Windows 10 1803 / Server 2019 内置，
+   厂区服务器是 **Server 2016，没有**。`Install-ControlServerLocal.ps1` 和
+   `Update-ControlServerLocal.ps1` 内部有四处硬依赖它，部署就挂在那里。已改用 PS7
+   自带的客户端（`8005-agv-control-server` 的 `1c67367`）。注意 `Get-ReadyCheck`
+   那处**故意不带 `--fail`**——它必须读到 `not-ready` 响应的 body——所以不能与另外
+   三处一并处理，用 `-SkipHttpErrorCheck` 还原。
+2. **多仓库 checkout 要各占一个子目录。**镜像放在 `$GITHUB_WORKSPACE` 根就等于放进
+   了 ControlServer 的工作树，RC 脚本的「仓库必须干净」检查立刻失败。
+3. **默认绑具体网卡 IP 而不是 `0.0.0.0`。**后者会连带把服务暴露到 Hyper-V 的
+   `AGV-Internal`，而 CI runner 就住在那个网段上。
+
+**已知未修：win11-01 的 `NO_PROXY` 不含 GitHub/Actions 域名。**
+`pipelines.actions.githubusercontent.com` 等五个域名实测都能直连，但都不在机器级
+`NO_PROXY` 里，所以 runner 的长连接、日志和 artifact 上传全走控制端
+`172.19.162.241:7890` 的 Clash 代理——**控制端笔记本一睡，CI 就停摆到它醒**。实测
+一次作业因此排了 4 小时 16 分（job 本身只跑 1 分 57 秒）。这与本文件 Lab VMs 一节
+「这些域名直连」的记载不符：能直连是事实，配置从未体现。用户 2026-09-03 决定暂不
+改动。
+
+**CD 不跑门禁，不启用 `JourneyRuntime`，不碰 `SQAGV`。**门禁属于切 RC 的流程；
+产品安装脚本以 `JourneyRuntime.enabled=false` 部署，不建单不动车。
+
 ## .NET 工具链基线
 
 四个可写 .NET 仓库统一到一套工具链，真相来源是
