@@ -322,13 +322,24 @@ function Get-Snapshot {
         $keyMatches = $safety.vehicleKey -eq $site.vehicleSafety.expectedVehicleKey
         $stopped = $safety.motionState -eq 'STOPPED'
         $noReasons = @($safety.reasonCodes).Count -eq 0
-        $fresh = ($null -ne $safety.ageMs) -and ($safety.ageMs -lt $EvidenceMaxAgeMs)
+        # A NEGATIVE age is the failure that cost this deployment an afternoon.
+        # VehicleSafetySignal.IsFresh rejects outright when ObservedAt > now, and
+        # observedAt carries the SERVER's clock while the vehicle judges it with
+        # its own: a vehicle running even 100 ms slow sees every fresh piece of
+        # evidence as dated in the future, reports VEHICLE_STATE_UNKNOWN, and the
+        # session never leaves RecoveryRequired -- surfacing as "no demand is ever
+        # accepted", which points nowhere near a clock. Judge it the way the
+        # vehicle does, so the next drift is visible here instead of six layers down.
+        # See trytoreachpeak0/8005-agv-onboard-hmi#1.
+        $notFuture = ($null -ne $safety.ageMs) -and ($safety.ageMs -gt 0)
+        $fresh = $notFuture -and ($safety.ageMs -lt $EvidenceMaxAgeMs)
         $safetyPass = $keyMatches -and $stopped -and $noReasons -and $fresh
         $failed = @(
             if (-not $keyMatches) { 'vehicleKey mismatch' }
             if (-not $stopped) { "motionState=$($safety.motionState)" }
             if (-not $noReasons) { "reasonCodes=$($safety.reasonCodes -join ',')" }
-            if (-not $fresh) { "evidence $($safety.ageMs) ms old (max $EvidenceMaxAgeMs)" }
+            if (-not $notFuture) { "evidence is $([Math]::Abs($safety.ageMs)) ms in the FUTURE -- vehicle clock is behind the server; IsFresh rejects this" }
+            elseif (-not $fresh) { "evidence $($safety.ageMs) ms old (max $EvidenceMaxAgeMs)" }
         )
         $safetyDetail = $safetyPass `
             ? "STOPPED, key matches, no reasons, evidence $($safety.ageMs) ms old" `
