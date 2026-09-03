@@ -193,9 +193,22 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
    多个仓做 CI，就必须在同一台机器上装多个 runner 实例（不同目录、不同服务名），
    而它们会各自并行领作业。所以**不要指望"一台机器一个 runner"去保证黄金渲染机
    契约的 "Never run two desktop suites in parallel"**——跨仓库的桌面独占
-   GitHub 的 `concurrency` 表达不了（它只在单个仓库内生效），那仍然是
-   `8005-mes-ingest` 里 desktop mutex 的职责。只给需要金机的 runner 打
-   `golden-renderer` 标签，别的 runner 不要带。
+   GitHub 的 `concurrency` 表达不了（它只在单个仓库内生效）。
+
+   **它现在由一个机器级命名互斥体承担：`Global\W2G-InteractiveDesktop`，唯一定义
+   处是 `8005-mes-ingest/Invoke-WithDesktopLock.ps1`**（2026-09-03 落地）。任何仓库
+   的任何脚本，只要在动那台机器的交互式桌面（起 WPF 窗口、抓像素、驱动 UI
+   Automation），都必须先拿到同一个名字的互斥体。各仓是独立克隆、没有共享包，所以
+   第二个仓要用就自己拷一份 helper——**名字才是契约，代码不是**。
+
+   在那之前这句话只有一半是真的：`golden-renderer.yml` 用的名字是仓库作用域的
+   `Global\MesIngestWatchUiTests`（只能把那个脚本与自己串起来），而
+   `desktop-tests.yml` **一把锁都没有**，靠的是本仓共用的 `concurrency` 分组。
+
+   **现在的获取方式是快速失败（超时 0，exit 3）。第二个仓真要加进来，先把它改成带
+   超时的等待**——CI 作业该排队，不该因为撞上另一个仓的调度就变红。
+
+   只给需要金机的 runner 打 `golden-renderer` 标签，别的 runner 不要带。
 3. **黄金渲染机的 Validation 阶段只能 `workflow_dispatch` 手动触发。**它会产生
    候选基线，那必须是用户点头之后的动作，见 `8005-mes-ingest/CLAUDE.md`。
 
