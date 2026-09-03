@@ -146,18 +146,30 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 `.github/workflows/golden-renderer.yml`（`mode=verify` / `mode=candidates`，只能
 手动触发）。
 
-**已落地（2026-09-02）。**win11-01 上跑着三个 runner，用标签分工：
+**已落地（2026-09-02）。**win11-01 上跑着**五个** runner，用标签分工。以下是
+2026-09-03 从 `gh api repos/<仓>/actions/runners` 实读的结果，不是当初的计划——本表
+一度只记了下面前三行，漏掉了 control-server 与 protocol 那两个，而它们一直在跑：
 
 | runner | 模式 | 标签 | 归属仓 |
 | --- | --- | --- | --- |
-| `win11-01-riot-sdk` | 服务（session 0） | `headless` | riot-sdk |
-| `win11-01-mes-ingest` | 服务（session 0） | `headless` | 8005-mes-ingest |
+| `win11-01-riot-sdk` | 服务（session 0） | `dotnet8` `headless` | riot-sdk |
+| `win11-01-mes-ingest` | 服务（session 0） | `dotnet8` `headless` | 8005-mes-ingest |
 | `win11-01-mes-ingest-desktop` | 交互式（session 1） | `golden-renderer` | 8005-mes-ingest |
+| `win11-01-control-server` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-control-server |
+| `win11-01-protocol` | 服务（session 0） | `node24` `headless` | 8005-agv-protocol |
+
+五个都带 `self-hosted` `Windows` `X64` `win11-01`。注意
+`win11-01-mes-ingest-desktop` **不带** `headless`，也是唯一带 `golden-renderer` 的
+——这一条正是标签分工能成立的原因。
 
 交互式那个由登录触发的计划任务在桌面会话里拉起，依赖客户机的 autologon（用
 Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，`DefaultPassword`
 键不存在）。**workflow 的 `runs-on` 一定要带 `headless` 或 `golden-renderer`**，
 只写 `[self-hosted, win11-01]` 会被两种 runner 里任意一个领走，而其中一个画不了图。
+
+**加了 runner 就回来改这张表。**它漏记了两个 runner 至少一天，而这张表是判断
+「某个仓有没有 CI」的唯一依据——第一次挂 L2 到 CI 时，就是照着它得出「control-server
+没有 runner」的错误结论，实际上有。
 
 `8005-mes-ingest` 的测试按 `[Collection("WpfDesktop")]` 标记划成两半：`test.yml`
 在 headless 上跑其余全部，`desktop-tests.yml` 在交互式 runner 上跑这些。划分由
