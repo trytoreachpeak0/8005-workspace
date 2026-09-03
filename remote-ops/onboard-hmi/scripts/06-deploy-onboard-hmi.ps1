@@ -244,9 +244,81 @@ try {
         throw "The rendered configuration still contains placeholders: $($leftover -join ', ')"
     }
 
-    # Read the result back rather than trusting the substitution. Four checks,
-    # each one a startup failure the client would otherwise hit on the vehicle:
+    # Read the result back rather than trusting the substitution. Every check
+    # below is a startup failure the client would otherwise hit on the vehicle,
+    # with a person standing next to it. They mirror
+    # SQCD.Agv.Infrastructure/Configuration.cs -- when that file's rules change,
+    # these have to follow, or this script starts passing configurations the
+    # client rejects.
     $config = $rendered | ConvertFrom-Json
+
+    # The two top-level identities come from the site file, not from the
+    # template -- which ships them as AGV-8005-01 / OBU-8005-01. Apply them
+    # before validating, or every check below reads the template's sample values
+    # and no site file can ever pass.
+    $config.agvId = $site.agvId
+    $config.onboardInstanceId = $site.onboardInstanceId
+
+    # OnboardSettings.IsPlaceholderValue, reproduced exactly. Note that the two
+    # sample identities are themselves placeholders: a site file copied from the
+    # example and left with agvId AGV-8005-01 renders a configuration that looks
+    # complete, carries no REPLACE_ token, and still throws at startup with
+    # "Production环境必须配置真实且稳定的AgvId和OnboardInstanceId".
+    $placeholderExact = @('AGV-8005-01', 'OBU-8005-01')
+    $placeholderSubstrings = @('REPLACE', 'EXAMPLE', 'CHANGEME', 'YOUR_', 'YOUR-', 'TODO')
+    function Test-Placeholder([string]$Value) {
+        if ([string]::IsNullOrWhiteSpace($Value)) { return $true }
+        $trimmed = $Value.Trim()
+        if ($placeholderExact -contains $trimmed) { return $true }
+        foreach ($token in $placeholderSubstrings) {
+            if ($trimmed -like "*$token*") { return $true }
+        }
+        return $false
+    }
+
+    # WireToGateSettings.IsForbiddenProductionHost: a loopback address is a
+    # development leftover, and on the vehicle it would point the client at
+    # itself rather than at the server.
+    # Not $Host as the parameter name: that is an automatic variable in
+    # PowerShell, and shadowing it inside a function is a trap rather than a
+    # convenience.
+    function Test-ForbiddenHost([string]$Candidate) {
+        if (Test-Placeholder $Candidate) { return $true }
+        if ($Candidate -in @('localhost', '0.0.0.0', '::')) { return $true }
+        $address = [ipaddress]::Any
+        if ([ipaddress]::TryParse($Candidate, [ref]$address)) {
+            return [ipaddress]::IsLoopback($address)
+        }
+        return $false
+    }
+
+    foreach ($pair in @(
+        @{ Name = 'agvId';                       Value = $config.agvId }
+        @{ Name = 'onboardInstanceId';           Value = $config.onboardInstanceId }
+        @{ Name = 'ruleGateway.host';            Value = $config.ruleGateway.host }
+        @{ Name = 'ioModule.host';               Value = $config.ioModule.host }
+        @{ Name = 'vehicleSafety.expectedVehicleKey'; Value = $config.vehicleSafety.expectedVehicleKey }
+    )) {
+        if (Test-Placeholder $pair.Value) {
+            throw "$($pair.Name) is '$($pair.Value)', which the client treats as a placeholder and rejects in Production."
+        }
+    }
+
+    if (Test-ForbiddenHost $config.wireToGate.host) {
+        throw "wireToGate.host is '$($config.wireToGate.host)', which the client forbids in Production (loopback, wildcard or placeholder)."
+    }
+
+    # WireToGateSettings.Validate: the instance id must parse as a Guid in "D"
+    # form, and the build commit must be 40 hex digits that are not all zero.
+    $parsedGuid = [guid]::Empty
+    if (-not [guid]::TryParseExact($config.wireToGate.onboardInstanceId, 'D', [ref]$parsedGuid)) {
+        throw "wireToGate.onboardInstanceId '$($config.wireToGate.onboardInstanceId)' is not a Guid in 'D' form (8-4-4-4-12); the client rejects it."
+    }
+
+    # Production refuses to fall back to the legacy rule protocol.
+    if (-not $config.wireToGate.enabled) {
+        throw 'wireToGate.enabled must stay true; Production forbids falling back to the rule protocol alone.'
+    }
 
     #   the client hard-rejects the TLS-era keys by name, not by value, and
     #   throws WIRE_TO_GATE配置键<键名>已移除 at startup if either is present;
@@ -259,6 +331,12 @@ try {
     if ($config.vehicleSafety.endpoint -notmatch '^http://') {
         throw "vehicleSafety.endpoint must be a plaintext http URI, got: $($config.vehicleSafety.endpoint)"
     }
+    # Only now is the [uri] cast safe; the same forbidden-host rule applies to
+    # the projection endpoint as to the transport host.
+    $safetyHost = ([uri]$config.vehicleSafety.endpoint).Host
+    if (Test-ForbiddenHost $safetyHost) {
+        throw "vehicleSafety.endpoint points at '$safetyHost', which the client forbids in Production (loopback, wildcard or placeholder)."
+    }
     #   the safety gate is not optional;
     if (-not $config.vehicleSafety.enabled) {
         throw 'vehicleSafety.enabled must stay true.'
@@ -270,8 +348,6 @@ try {
         throw "wireToGate.onboardBuildCommit is $($config.wireToGate.onboardBuildCommit) but this package built $onboardCommit."
     }
 
-    $config.agvId = $site.agvId
-    $config.onboardInstanceId = $site.onboardInstanceId
     $renderedPath = Join-Path $localStage 'appsettings.json'
     $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $renderedPath -Encoding utf8NoBOM -WhatIf:$false
     Write-Step 'Configuration rendered and validated'

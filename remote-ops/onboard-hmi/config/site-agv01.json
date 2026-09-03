@@ -1,0 +1,24 @@
+{
+  "_comment": "Per-vehicle site values for 06-deploy-onboard-hmi.ps1. None of these are secrets -- vehicleKey is already in ControlServer appsettings.json; the credential and operator id come from the DPAPI store instead.",
+  "_agvId": "agvId 与 onboardInstanceId 必须是真实的现场身份。客户端把 AGV-8005-01 和 OBU-8005-01 这两个示例值本身当作占位符，Production 环境下启动即抛 InvalidDataException。",
+  "_onboardInstanceId": "wireToGate.onboardInstanceId 必须是 D 形式的 Guid（8-4-4-4-12），且跨部署稳定——服务端把新值当成另一台车。",
+  "_ruleGateway": "规则服务器只在 wireToGate.enabled=false 时才连（App.xaml.cs:41 用 DisabledRuleGateway 顶掉它）。Production 强制 wireToGate.enabled=true，所以这个地址在本部署里不会被使用，但配置校验仍要求它不是占位值。有真实地址就填真实的；没有就保留 127.0.0.1。",
+  "_ioModule": "八仓 Modbus IO 模块。192.168.71.150 来自车载端仓库 appsettings.json 里被注释掉的那行，实测 502 开放。注意同网段的 192.168.71.50 是另一台车的模块。",
+  "agvId": "REPLACE_WITH_REAL_AGV_ID",
+  "onboardInstanceId": "REPLACE_WITH_REAL_ONBOARD_INSTANCE_ID",
+  "wireToGate": {
+    "onboardInstanceId": "620ee2ce-cf8a-4429-8a0b-0c4098bcba7e"
+  },
+  "vehicleSafety": {
+    "expectedVehicleKey": "BROKERX-0c20ff0600d644869a6a80c186065d85"
+  },
+  "ruleGateway": {
+    "host": "127.0.0.1"
+  },
+  "ioModule": {
+    "host": "192.168.71.150"
+  },
+  "install": {
+    "root": "C:\\8005\\OnboardHmi"
+  }
+}
