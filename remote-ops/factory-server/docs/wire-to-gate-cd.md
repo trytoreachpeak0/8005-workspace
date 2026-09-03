@@ -235,7 +235,7 @@ ControlServer。
 
 ---
 
-## 6. 四个不显然的约束
+## 6. 五个不显然的约束
 
 **1. 安装编排脚本不进包，也不重写产品脚本。**包里自带
 `scripts\Install-ControlServerLocal.ps1` 和 `Update-ControlServerLocal.ps1`，备份、ACL、
@@ -272,6 +272,33 @@ script file, or executable program.
 
 `RELEASE-CANDIDATE.md` 第 4.4 节那句"一律用带 `--noproxy` 的 `curl.exe` 读 body 判定"仍然
 成立，它讲的是**人**在控制端手工判断可达性，而控制端是 Windows 11，有 curl。
+
+**5. 车上的时钟必须与服务端同步，这是安全闸门的隐含前提。**车载端的新鲜度判定拿
+**自己的本地时钟**跟服务端返回的 `observedAt` 比：
+
+```csharp
+return now - ObservedAt <= maxAge;      // VehicleSafetySignal.IsFresh，maxAge = 5 秒
+```
+
+首次部署时 agv01 的时钟是 `2027-02-08`，比厂区服务器**快 158 天**。它没有可用时间源——
+配置里的 NTP 服务器 `172.19.206.222` 只跑 RIoT、123 端口不应答，网关重置连接，也没有
+DNS 去够公共 NTP——于是 `w32time` 报 `Free-running System Clock`，漂移无上限。
+
+后果不是时间戳难看：**每一次投影在车载端看来都是 5 个月前的陈旧证据**，干净会话永远
+离不开 `RecoveryRequired / DEPARTURE_SAFETY_NOT_READY`。闸门以 fail-closed 的方式卡在
+一个与车辆本身无关的事实上——对闸门而言是正确行为，对现场而言毫无用处。
+
+已修：厂区服务器兼作 NTP 服务器（`scripts/16-enable-ntp-server.ps1`，`AnnounceFlags=5`
+让它在没有上游可同步时仍宣称自己可靠，否则客户端会忽略它），车上用
+`../../onboard-hmi/scripts/07-fix-clock.ps1` 先 `Set-Date` 粗调再交给 NTP——w32time 自己
+拒绝这么大的跳变（`MaxPosPhaseCorrection`）。修完实测偏差 **+0.0003 秒**，证据年龄从
+158 天变成 **188 毫秒**。
+
+**新车上线前先对表**，这一条比任何配置项都容易被忽略：
+
+```bash
+ssh agv01 "(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')"
+```
 
 ---
 
