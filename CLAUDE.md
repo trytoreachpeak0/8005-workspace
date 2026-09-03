@@ -267,13 +267,25 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 3. **默认绑具体网卡 IP 而不是 `0.0.0.0`。**后者会连带把服务暴露到 Hyper-V 的
    `AGV-Internal`，而 CI runner 就住在那个网段上。
 
-**已知未修：win11-01 的 `NO_PROXY` 不含 GitHub/Actions 域名。**
-`pipelines.actions.githubusercontent.com` 等五个域名实测都能直连，但都不在机器级
-`NO_PROXY` 里，所以 runner 的长连接、日志和 artifact 上传全走控制端
-`172.19.162.241:7890` 的 Clash 代理——**控制端笔记本一睡，CI 就停摆到它醒**。实测
-一次作业因此排了 4 小时 16 分（job 本身只跑 1 分 57 秒）。这与本文件 Lab VMs 一节
-「这些域名直连」的记载不符：能直连是事实，配置从未体现。用户 2026-09-03 决定暂不
-改动。
+**绝不要取消 self-hosted runner 上正在跑的 job。**2026-09-03 实测：取消一个 job 会
+把 runner 的 broker 长轮询连接一起取消，退避重试（日志里的
+`Back off 9.921 seconds before next retry. 4 attempt left.`）耗尽之后会话就卡住，
+不再领任何新作业。它没有自愈——直到 GitHub 主动推了一条 `RunnerRefreshConfigMessage`
+触发会话重启才恢复，**中间空转了 4 小时 14 分**。这些仓库每个只有一个 runner，一个
+会话卡死就是整个仓库的 CI 停摆。
+
+那次的动机是「两个分支推同一个 commit，test 跑了两遍，取消一个省点机时」。省下的是
+2 分钟，代价是 4 小时。宁可让重复作业跑完。
+
+**这条曾被误记为「控制端笔记本一睡，CI 就停摆到它醒」，那个归因是错的**，不要据此去
+改 `NO_PROXY` 或电源设置。控制端设了永不睡眠（睡眠超时 AC/DC 都是 0），实测 7 天内
+零 `Kernel-Power` 42/107 事件，win11-01 同样没睡过。runner 日志里那段时间的报错是
+`TaskCanceledException` 与 `SocketException(995)`——本地取消，不是代理拒绝也不是断网。
+
+`NO_PROXY` 的事实部分仍然成立、也仍未改：`pipelines.actions.githubusercontent.com`
+等五个域名实测都能直连，但都不在机器级 `NO_PROXY` 里，所以 runner 的流量确实绕行
+控制端 `172.19.162.241:7890` 的 Clash 代理。这与 Lab VMs 一节「这些域名直连」的记载
+不符——能直连是事实，配置从未体现。用户 2026-09-03 决定暂不改动。
 
 **CD 不跑门禁，不启用 `JourneyRuntime`，不碰 `SQAGV`。**门禁属于切 RC 的流程；
 产品安装脚本以 `JourneyRuntime.enabled=false` 部署，不建单不动车。
