@@ -19,8 +19,8 @@ remote-ops/onboard-hmi/
 │   ├── ssh_config.agv                 agv 族的 ssh 片段，也是别名注册表（见第 2 节）
 │   ├── site.example.json              现场值模板，不属于任何一台车
 │   ├── site-agv01.json                1 号车的现场值
-│   ├── site-agv02.json                2 号车，通道就绪，值仍是 REPLACE_*
-│   ├── site-agv03.json                3 号车，等装 sshd，值仍是 REPLACE_*
+│   ├── site-agv02.json                2 号车（填写状态见 ../../fleet.md）
+│   ├── site-agv03.json                3 号车（同上）
 │   └── agv_ops_ed25519.pub            运维公钥（公开无妨）
 ├── scripts/
 │   ├── 01-probe.ps1                   只读环境探测，随时可跑

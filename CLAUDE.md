@@ -242,8 +242,11 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 8005-agv-control-server 的 release.yml (workflow_dispatch，输入车载端 commit)
   → New-WireToGateReleaseCandidate.ps1 → zip + sha256 → GitHub artifact
   → 控制端 gh run download → 验哈希 ─┬─→ scp → factory01 → ControlServer
-                                     └─→ scp → agv01    → OnboardHmi（搬完就停）
+                                     └─→ scp → agv0N    → OnboardHmi（搬完就停）
 ```
+
+`agv0N` 是三台车里的某一台，**别名是区分它们的唯一依据**，车队登记册见
+`remote-ops/fleet.md`。目前只有 `agv01` 部署过车载端。
 
 | 位置 | 内容 |
 | --- | --- |
@@ -351,8 +354,21 @@ workspace at `C:\Users\szy\8005-restructure-backup`. See `repos.md`.
 - `remote-ops/` — every channel for reaching a machine in the plant. Writable;
   reaching a machine through it never grants write access to the repository
   whose code runs there. Two channels, one subdirectory each:
-  - `onboard-hmi/` — SSH (`ssh agv01`, one alias per car) to the AGV onboard HMI
-    machines: probe, bootstrap, and hardening scripts, the control-host SSH
+  - `fleet.md` — the fleet register. **The project has exactly three cars**, and
+    each car is an AGV plus the onboard HMI machine bolted to it. This file is
+    the single source of truth for **how those two halves map onto each other**,
+    across five identity coordinates: the SSH alias (`agv01`/`agv02`/`agv03`),
+    the CPE address, the RIoT `deviceKey`, the RIoT `id`, and the
+    `deviceName`/`agvId`. Given any one of them, read the table there to get the
+    other four; **only `deviceKey` and `id` are durable**, so long-lived
+    references belong on those. Read it before touching a car or writing
+    anything that names one. Two load-bearing facts: the three HMI machines are
+    clones of one image with nothing re-personalized (same COMPUTERNAME, same
+    MachineGuid, same LAN address), and on the RIoT side the three cars share a
+    `physicsId` and their serial numbers do not run in car order — so **never
+    derive a car's identity from the machine itself or from a serial**.
+  - `onboard-hmi/` — SSH to the AGV onboard HMI machines: probe, bootstrap, and
+    hardening scripts, the control-host SSH
     config, and the design record. Read its `docs/USAGE.md` before touching a
     machine. Two things stay out of git:
     probe output (`probe-*.txt`), which inventories local accounts, the

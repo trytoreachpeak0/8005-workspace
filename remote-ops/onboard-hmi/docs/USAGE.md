@@ -281,11 +281,12 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    那份文件由 `remote-ops/control-host/Build-SshConfig.ps1` 生成，手改会在下次装配时
    被覆盖，而且绕过了命名唯一性校验。
 
-   2 号车的块**已经填好了**（`172.19.162.179:22022`）。再往后的车（agv03……）照着
-   复制一块，别名必须是 `agv` + 两位数字：
+   **项目就 3 台车，`agv01`–`agv03` 的块都已经填好了**（地址见
+   [`../../fleet.md`](../../fleet.md)），本节因此是流程记录，不是待办。真要再接一台，
+   照着复制一块，别名必须是 `agv` + 两位数字：
 
    ```
-   Host agv03
+   Host agv0N
        HostName <新CPE的IP>
        Port 22022
    ```
@@ -303,22 +304,28 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    连之前先确认解析对了，这一步不发起连接：
 
    ```bash
-   ssh -G agv02 | grep -E '^(hostname|port|user|identityfile) '
+   ssh -G <别名> | grep -E '^(hostname|port|user|identityfile) '
    ```
 
-6. **验证** `ssh agv02`，通了再推 03 加固：
+6. **验证** `ssh <别名>`，通了再推 03 加固：
 
    ```bash
-   scp scripts/03-harden-sshd.ps1 agv02:C:/temp/agv/ && \
-   ssh agv02 "pwsh -ExecutionPolicy Bypass -File C:\temp\agv\03-harden-sshd.ps1 -Force"
+   scp scripts/03-harden-sshd.ps1 <别名>:C:/temp/agv/ && \
+   ssh <别名> "pwsh -ExecutionPolicy Bypass -File C:\temp\agv\03-harden-sshd.ps1 -Force"
    ```
 
 7. **装 UTF-8 profile**（第 6 节）。
 
-8. **填 `config/site-<别名>.json`**——2 号车的 `site-agv02.json` 已经在了，里面全是
+8. **校时**（`scripts/07-fix-clock.ps1`）。镜像自带时钟快 158 天且 NTP 配错，三台车都
+   中了，**要在任何东西读这台机器的时间戳之前修**。原因见
+   [`../../fleet.md`](../../fleet.md) 的硬约束 2。
+
+9. **填 `config/site-<别名>.json`**——照 `site.example.json` 建一个，里面全是
    `REPLACE_*`。这一步跟部署走，不跟通道走，细节在第 8 节。注意 `onboardInstanceId`
-   和 `expectedVehicleKey` **不能抄 1 号车的**：服务端靠它们区分车辆，抄了等于两台车
+   和 `expectedVehicleKey` **不能抄别的车的**：服务端靠它们区分车辆，抄了等于两台车
    在服务端是同一台。
+
+10. **在 [`../../fleet.md`](../../fleet.md) 里加一行**，否则下一个人不知道这台车存在。
 
 顺序不能颠倒：没验证通就加固会把 SSH 锁死（VNC 能救，但白跑一趟）。
 

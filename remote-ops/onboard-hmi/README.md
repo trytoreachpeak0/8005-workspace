@@ -12,6 +12,7 @@
 
 | 你要做什么 | 读哪个 |
 | --- | --- |
+| **知道有几台车、哪台是哪台、各自什么状态** | [../fleet.md](../fleet.md) |
 | **日常运维已接入的车** | [docs/USAGE.md](docs/USAGE.md) |
 | **找某个文件、凭据、配置在哪** | [docs/ASSETS.md](docs/ASSETS.md) |
 | 理解为什么这么设计 | 本文件第 2 节「架构决策」 |
@@ -25,8 +26,9 @@
 > **不在本目录里**（故意的，见 ASSETS.md 第 2 节）。没有它连不上任何车。
 > 换机器前先把它拷出来。
 
-当前状态：**阶段 1 完成**，1 号车 `ssh agv01` 可用，仅公钥认证。
-`agv02`/`agv03` 尚未分配 IP。
+当前状态：三台车 `ssh agv01` / `agv02` / `agv03` 通道全部就绪，仅公钥认证；车载端只有
+1 号车部署了。**每台车的地址、指纹、现场身份与部署状态见
+[../fleet.md](../fleet.md)**——那是车队身份的唯一真相来源，本文件不重复它。
 
 ---
 
@@ -47,6 +49,9 @@
 baseline 全文：`evidence/probe-LAB-WIN-01-20260901-172941.txt`
 
 ### 上位机 1 号（实验机，已探明）
+
+下表是 **2027-02 首次探测时的快照**，不是现状——例如「HMI 应用」那行此后已经变了。
+当前状态看 [../fleet.md](../fleet.md)。
 
 | 项 | 值 |
 | --- | --- |
@@ -100,7 +105,10 @@ baseline 全文：`evidence/probe-LAB-WIN-01-20260901-172941.txt`
   避开了工业协议密集的低端口区、又低于 Windows 动态端口范围（49152+）不会被临时端口抢。
 
 - ARP 表里另有 `172.19.162.248`（MAC `a0-62-60-73-0b-bb`，与 .210 的
-  `a0-62-60-74-50-82` 同一 OUI），疑似另一台车的 CPE，但那两台车尚未分配 IP。
+  `a0-62-60-74-50-82` 同一 OUI），当时疑似另一台车的 CPE。**已查明**：RIoT 上
+  `172.19.162.248:5001` 是「老厂电镀AGV」，别人的车，不属于本项目。2、3 号车的 CPE 是
+  `172.19.162.179` 与 `172.19.162.70`。企业内网里这样的 AGV 有二十多台，见
+  [../fleet.md](../fleet.md)。
 
 ---
 
@@ -340,35 +348,11 @@ Win32-OpenSSH 所有 release 都带 `Preview`/`Beta` 后缀但 `prerelease=False
 
 1. **HMI 制品从哪来** —— 由本机 `dotnet publish` 现出，还是有既定的构建产物来源？
    这决定阶段 3 的制品流水线形态。
-2. **2 号车通道已就绪**（2026-09-03）。`ssh agv02` → `agvops@DESKTOP-94OA6CK`，
-   CPE `172.19.162.179:22022`。第 7 节全流程已走完：sshd 已装、已加固（密码认证关闭，
-   四项配置与 agv01 一致，实测强制走密码返回 `Permission denied (publickey)`）、
-   已校时（原本 2027-02-08，快 158 天；现与 `172.19.205.222` 偏移 +0.0007s，
-   w32time 自动启动）、UTF-8 profile 已装。
+2. **agv02 的以太网 6 被配了 `192.168.71.221`，与以太网 5 同网段。**接线前要先决定拆掉
+   哪一个，细节见 [../fleet.md](../fleet.md) 的 agv02 一节。
 
-   **部署本身还没做。**`config/site-agv02.json` 里四个值仍是 `REPLACE_*`。
-
-   **3 号车通道同样已就绪**（2026-09-03）。`ssh agv03` → `agvops@DESKTOP-94OA6CK`，
-   CPE `172.19.162.70:22022`，转发到 `192.168.71.180:22`。加固、校时、UTF-8 profile
-   三项都做完，与另两台车配置一致。部署本身同样还没做，`config/site-agv03.json` 里
-   的值仍是 `REPLACE_*`。
-
-3. **三台车都是同一个镜像克隆的，克隆后没个性化。** COMPUTERNAME 都是
-   `DESKTOP-94OA6CK`，MachineGuid 都是 `6910ff68-24ae-4fcb-8e16-b6bbd5924490`，
-   SMBIOS UUID 与 InstallDate 也相同，以太网 5 的 IP 都是 `192.168.71.180`（各在自己
-   CPE 的 NAT 后面，不冲突）。**SSH 别名是从控制端区分三台车的唯一依据**，不要从机器
-   本身推导身份。物理上确实是三台，各自不同的 MAC 与 SSH host key：
-
-   | 别名 | MAC | ED25519 host key |
-   | --- | --- | --- |
-   | `agv01` | `68-ED-A4-9B-B5-5A` | `SHA256:kZR9F72fdrzs7kIvqEcWMAi8w9aRlosCS7orWCGWRCI` |
-   | `agv02` | `68-ED-A4-9B-B5-CE` | `SHA256:7irq9yWgCqEkMIKZF7v5wvGasUFx+Dmd3g1vnIflduY` |
-   | `agv03` | `68-ED-A4-9B-B5-D2` | `SHA256:/q4BBoyU4/DqU8DP9jhmn1kuuOd2hfKoHJu6vhHddNQ` |
-
-4. **agv02 的以太网 6 配了 `192.168.71.221`，与以太网 5 的 `192.168.71.180` 同网段。**
-   该口当前 `Disconnected`（触控屏自带的第二个网口，未接线），所以暂时无害；一旦接上
-   线就是双网卡同网段、出向路由不确定。agv01 上这个口是 `169.254.x`，没被配过——所以
-   是 agv02 单独被人改的。未处理，接线前要先决定拆掉哪一个。
+每台车的状态、地址、指纹、现场身份与已知隐患都在 [../fleet.md](../fleet.md)，
+包括「三台车是同镜像克隆、别名是区分它们的唯一依据」这条陷阱。本文件不重复。
 
 已解答（2027-02）：
 
@@ -401,9 +385,9 @@ remote-ops/onboard-hmi/
 ├── config/
 │   ├── ssh_config.agv            agv 族的 ssh 片段，也是别名注册表
 │   ├── site.example.json         现场值模板
-│   ├── site-agv01.json           1 号车现场值
-│   ├── site-agv02.json           2 号车，通道就绪，未部署
-│   ├── site-agv03.json           3 号车，等装 sshd
+│   ├── site-agv01.json           1 号车现场值（状态见 ../fleet.md）
+│   ├── site-agv02.json           2 号车
+│   ├── site-agv03.json           3 号车
 │   └── agv_ops_ed25519.pub       运维公钥（私钥不在仓库里）
 ├── scripts/
 │   ├── 01-probe.ps1              只读环境探测，随时可跑
