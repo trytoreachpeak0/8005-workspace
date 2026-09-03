@@ -138,6 +138,22 @@ try {
 Ok "listening on http://+:$Port/"
 
 $zipName  = ($files.Keys | Where-Object { $_ -like 'OpenSSH-Win64*.zip' } | Select-Object -First 1)
+if (-not $zipName) {
+    $listener.Stop()
+    if ($ruleAdded) { Remove-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue }
+    Die @"
+No OpenSSH-Win64*.zip under $payloadDir
+
+payload\ is gitignored, so it lives only in the checkout it was staged into: a
+git worktree gets scripts\ but no payload\. Run this from the main checkout, or
+re-fetch the package as docs\ASSETS.md describes.
+
+Without the zip this script does not stop on its own -- scripts\ alone is enough
+to pass the "nothing to serve" check -- and the one-liner it prints would carry
+an empty filename and an empty hash, failing on the HMI in a way that does not
+name this cause.
+"@
+}
 $zipHash  = if ($zipName) { (Get-FileHash $files[$zipName] -Algorithm SHA256).Hash } else { $null }
 $baseUrl  = "http://${BindAddress}:$Port"
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)

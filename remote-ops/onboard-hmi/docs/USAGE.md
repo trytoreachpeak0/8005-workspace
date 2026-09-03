@@ -257,13 +257,20 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    外部 22 不能用：CPE 自己的 dropbear 占着。
    只有当这台 CPE 的 22022 已被别的用途占了，才另挑一个，并在片段的注释里写明原因。
 
-2. **本机启动分发服务**：
+2. **本机启动分发服务**，**要管理员权限**（`HttpListener` 绑非回环地址需要，脚本还会临时
+   开一条入站防火墙规则，退出时自己删掉）：
 
    ```bash
    pwsh -ExecutionPolicy Bypass -File scripts/04-serve-payload.ps1 -TargetHost <新CPE的IP>
    ```
 
-   `-TargetHost` 让它算出到那台车该用哪个源地址。核对打印出的箭头指向企业内网地址。
+   `-TargetHost` 让它算出到那台车该用哪个源地址。核对打印出的箭头指向企业内网地址——
+   控制端有 Hyper-V 交换机和 Clash 隧道的地址排在真实地址前面，挑错了上位机够不着。
+
+   **必须在主检出里跑，不能在 git worktree 里跑。**`payload/` 是 gitignore 的，只存在于
+   当初把包放进去的那个检出；worktree 有 `scripts/` 但没有 `payload/`。脚本会在缺包时
+   直接拒绝（2026-09-03 加的守卫）——在那之前它不会停，只会打出一条文件名和哈希都是空的
+   命令，粘到上位机上以一个不指向真正原因的方式失败。
 
 3. **上位机 VNC 里粘它打印的那行命令**，会拉包、校验、跑 bootstrap。
    记下打印的 agvops 密码。
