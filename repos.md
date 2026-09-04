@@ -17,12 +17,18 @@ repositories are unchanged.
 | `8005-agv-control-server` | `8005-agv-control-server` | `ControlServer_MVP` | mine | writable |
 | `8005-mes-ingest` | `8005-mes-ingest` | `main` | mine | writable |
 | `riot-sdk` | `riot-sdk` | `main` | mine | writable |
-| `8005-agv-onboard-hmi` | `8005-agv-onboard-hmi` | `OnboardHmi_MVP` | colleague | read-only |
-| `slots-simulator` | `slots-simulator` | `main` | colleague | read-only |
+| `8005-agv-onboard-hmi` | `8005-agv-onboard-hmi` | `OnboardHmi_MVP` | colleague | `w2g/*` branches only |
+| `slots-simulator` | `slots-simulator` | `main` | colleague | `w2g/*` branches only |
 | `8005-agv-protocol` | `8005-agv-protocol` | `main` | shared | writable, notify Kun Wang |
 
 The naming conventions in `file-naming-convention/` govern this workspace root
 and the four repositories marked "mine". The other three keep their own habits.
+
+"Owner" and "Agent access" stopped agreeing on 2026-09-04. The two repositories
+owned by the colleague are still his — he accepts or declines what lands in them
+— but the development work on both moved here. We commit on `w2g/*` branches and
+deliver by pull request; their working branches (`OnboardHmi_MVP`, `main`) stay
+untouched by us. `CLAUDE.md` has the exact rule.
 
 ## 2026-09-02 的拆分
 
