@@ -285,10 +285,21 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 影响：workflow 把它 checkout 成 scratch 镜像，`New-WireToGateReleaseCandidate.ps1`
 再从镜像的一次性克隆构建，从不写那个仓库。
 
-**车载端搬完就停，不启动。**上位机是会动的生产设备，`SQCD.Agv.Wpf` 是交互式 WPF
+**部署搬完就停，启动是单独一步。**上位机是会动的生产设备，`SQCD.Agv.Wpf` 是交互式 WPF
 程序不是服务，就绪判定要人看着车辆安全投影的返回。这不是谨慎，是第 11 节要求的
 逐次授权加现场安全 GO。车载端部署还需要 `remote-ops/onboard-hmi/config/site-<别名>.json`
 里的现场值（规则服务器 IP、IO 模块 IP、稳定 UUID），**没填之前脚本直接拒绝，不猜**。
+
+启动这一步 2026-09-04 之前只有一条路——走到车前双击。现在是
+`remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1`：模拟器先、客户端后，
+用交互会话里的计划任务拉起（sshd 给的是 session 0，在那里起窗口等于起在没人看的桌面上），
+起完即注销任务、不留残留。**改掉的是「必须站在哪栋楼里」，不是那道授权**——逐次授权现在由
+「有人刻意敲这条命令」表达，**没有任何东西会替你敲**：部署不会、登录触发不会。第 8 节那条
+没变，就绪判定仍然是人的。`-SimulatorOnly` 只起模拟器，不起任何会让车动的东西。
+
+**注意车上的 `wireToGate.recoveryResumeEnabled` 出厂是 `false`**，恢复入口因此不会出现，
+与会话是不是 `RecoveryRequired` 无关。要让操作员能在 HMI 上发起恢复，两端都得开：车载端这个
+开关，加服务端的恢复管理员凭据。
 
 首跑打出来三个坑，都值得记住：
 

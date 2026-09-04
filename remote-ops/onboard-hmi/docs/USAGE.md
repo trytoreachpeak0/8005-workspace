@@ -357,15 +357,38 @@ pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
 必须是 http scheme 且 enabled、`onboardBuildCommit` 必须等于包里那个 commit。去掉 `-WhatIf`
 才真的动车。
 
-**脚本搬完就停，不启动。**上位机是会动的生产设备，`SQCD.Agv.Wpf` 是交互式 WPF 程序不是服务，
-就绪判定要人看着车辆安全投影的返回。客户端正在跑时脚本会拒绝（除非 `-Force`），因为那意味着
-车可能在作业途中。启动要到车前，用它自己的桌面会话：
+**`06` 搬完就停，不启动**——启动是单独一步，见下。上一代留在 `C:\8005\OnboardHmi.previous`，
+要退回去人工换。
 
-```
-C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe
+### 启动与停止：`10-start-onboard-stack.ps1`
+
+**这条规则 2026-09-04 改过。**在那之前启动只有一条路：走到车前，在它自己的桌面上双击
+`C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe`。现在有脚本了：
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1 -SshAlias agv01
+pwsh -File remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1 -SshAlias agv01 -Stop
 ```
 
-上一代留在 `C:\8005\OnboardHmi.previous`，要退回去人工换。
+**改掉的是「必须站在哪栋楼里」，不是那道授权。**`RELEASE-CANDIDATE.md` 第 11 节要求的逐次
+授权仍然成立，只是现在由「有人刻意敲这条命令」来表达——**没有任何东西会替你敲它**：部署不会、
+登录触发不会、也不留下任何比这一次运行活得更久的计划任务。第 8 节那条也没变：干净会话只有在
+车辆安全投影返回 `motionState=STOPPED` 且证据新鲜时才到 `Ready`，**那个判定仍然是人的**。
+
+脚本替人做对了两件容易做错的事：
+
+- **顺序。**模拟器必须先在 1502 上监听，客户端才能开 Modbus 连接。反过来起，客户端启动时的 IO
+  快照就失败，会话再也离不开 `RecoveryRequired`——而那看起来像服务端的问题。
+- **等待。**两半各自确认起来了（模拟器看端口，客户端看进程）再往下走，失败因此报在真正失败的
+  那一半上。
+
+`SQCD.Agv.Wpf` 是交互式 WPF 程序不是服务，sshd 给的是 session 0，在那里起窗口等于起在没人看的
+桌面上。脚本改用**交互会话里的计划任务**把它拉起来（和 win11-01 上那个 golden-renderer runner
+同一手法），进程因此落在 session 1。这依赖上位机的自动登录；没有 Active 的 console 会话时脚本
+直接报错，而不是留下一个永远不触发的任务。
+
+客户端正在跑时脚本拒绝启动（除非 `-Force`），因为那意味着车可能在作业途中。**模拟器在跑不拦**
+——那是正常中间态，会原样留着。`-SimulatorOnly` 只起模拟器，不起任何会让车动的东西。
 
 ---
 

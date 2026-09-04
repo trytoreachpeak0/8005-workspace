@@ -18,17 +18,24 @@
         section 11 requires a per-occasion authorisation and an on-site safety
         GO for exactly that class of action;
       * SQCD.Agv.Wpf is an interactive WPF application, not a service. There is
-        no stop-swap-start; it needs a desktop session that a human is sitting
-        at;
+        no stop-swap-start; it needs a desktop session, and sshd gives us
+        session 0, where a window is owned by a desktop nobody is looking at;
       * the readiness gate belongs to a person. Section 8 says a clean session
         only reaches Ready when the vehicle-safety projection returns
         motionState=STOPPED with fresh evidence. Watching that is the point of
         having someone there.
 
-    What it does do is everything up to that line: verify the package, fill in
-    the site values, reject a configuration the client would refuse at startup,
-    place the binaries, set the credentials, and prove from the vehicle itself
-    that the server it was pointed at answers.
+    Deployment still never starts anything. Since 2026-09-04 starting is its own
+    step rather than a walk to the vehicle: 10-start-onboard-stack.ps1 brings up
+    the simulator and the client, in that order, in the interactive session. It
+    narrows the first two reasons above -- the authorisation is now expressed by
+    somebody deliberately invoking that script, and nothing invokes it as a side
+    effect of this one -- and changes nothing about the third.
+
+    What this script does do is everything up to that line: verify the package,
+    fill in the site values, reject a configuration the client would refuse at
+    startup, place the binaries, set the credentials, and prove from the vehicle
+    itself that the server it was pointed at answers.
 
 .PARAMETER RunId
     GitHub Actions run to deploy. Omit to take the most recent successful
