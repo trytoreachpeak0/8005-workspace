@@ -53,9 +53,16 @@ Two consequences worth knowing before they bite:
   repositories describe themselves is a different act from fixing their code;
   it belongs in a PR he actually asked for, not in passing.
 
-**Open, do not decide it alone:** the slice board assigns `ONBOARD_HMI_G2` to Kun
-Wang. Taking over development does not by itself move that gate to us. Ask before
-running it or filling in that column.
+**`ONBOARD_HMI_G2` moved to us on 2026-09-04.** It was deliberately left open when
+development transferred — taking over the code does not by itself move a gate —
+and the user then decided that it does move. We run that gate and fill in that
+column now; the board no longer waits on Kun Wang for it.
+
+**That does not change who signs a release.** `docs/release-governance.md` still
+requires two distinct product owners in the approval attestation, and G1 checks
+`size===2` for real. Kun Wang still owns both repositories and co-maintains the
+protocol, so he is still the second signature. Running both G2 gates ourselves is
+not a path to signing alone.
 
 ### Notify-after-change
 

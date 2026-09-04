@@ -75,11 +75,10 @@ that turns a decision back into a question.
    This is the normal answer. Advance it — implement, then run
    `CONTROL_SERVER_G2` for that slice.
 
-5. **Our G2 is green everywhere but the other side's `ONBOARD_HMI_G2` is not.**
-   This is not our work. Two things are worth doing, in this order: post the
-   current status on the board issue so Kun Wang sees where he is blocking, then
-   pick up work that does not depend on him — a later slice that is parallel by
-   `prerequisites`, technical debt, or the control-server UI.
+5. **`CONTROL_SERVER_G2` is green on a slice and `ONBOARD_HMI_G2` is not.**
+   Since 2026-09-04 this **is** our work — both gates are ours to run. Advance it:
+   work the onboard side on a `w2g/*` branch, then run `ONBOARD_HMI_G2` for that
+   slice. It is no longer a reason to go find something else to do.
 
 6. **Both sides' G2 are green on a slice and `G3` has not run.**
    Propose scheduling G3. It needs both people present and is the most expensive
@@ -103,10 +102,11 @@ Four parts, nothing else:
 
 ## Honesty rules
 
-- **`ONBOARD_HMI_G2` status is usually unknown to us.** Kun Wang's repository is
-  read-only and often carries no pass/fail evidence. When the board says `❓`,
-  say it is unknown and that confirming it means asking him — never assume green
-  and never assume red.
+- **`ONBOARD_HMI_G2` is ours to run since 2026-09-04**, so its status is knowable
+  — go read the evidence rather than reporting `❓`. What stays true is the rest
+  of the old caution: a board cell saying `❓` is not evidence of anything, and
+  historical evidence written before the gate moved was produced by someone else.
+  Never assume green and never assume red; open the evidence directory.
 - **Green in old evidence may be void.** A protocol release invalidates the
   affected G1/G2/G3 evidence on both sides. If the protocol moved after an
   evidence directory was written, treat that gate as not green and say why.
