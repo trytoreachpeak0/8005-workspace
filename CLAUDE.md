@@ -21,26 +21,41 @@ wherever it sits on disk.
 | `8005-agv-control-server` | Writable — WIRE_TO_GATE server |
 | `8005-mes-ingest` | Writable — MesIngest service and its Watch client |
 | `riot-sdk` | Writable — RIoT SDK, C# and Python |
-| `8005-agv-onboard-hmi` | **Read-only for agents** |
-| `slots-simulator` | **Read-only for agents** |
+| `8005-agv-onboard-hmi` | Writable **on `w2g/*` branches only** — never `OnboardHmi_MVP` |
+| `slots-simulator` | Writable **on `w2g/*` branches only** — never `main` |
 | `8005-agv-protocol` | Writable — **notify Kun Wang after every change** |
 
-### Read-only
+### Branch-scoped write
 
-The **content** is read-only. No edits or generated files — source, tests,
-configuration, scripts, documentation, handoffs, or evidence. No commits, tags,
-releases, or pushes to the repository itself. Read-only inspection and fetches
-are fine. Run validation that would generate files from a disposable copy, or
-with outputs outside the protected repository, and leave its worktree
-unchanged.
+`8005-agv-onboard-hmi` and `slots-simulator` were read-only for agents until
+2026-09-04. **The development work on both is now ours** — Kun Wang is no longer
+expected to carry them. What replaced the old rule is narrower than "writable":
 
-**Issues, pull requests and comments are allowed** (changed 2026-09-03; they
-were previously forbidden along with everything else). That is the sanctioned
-channel for reporting a defect in code this workspace cannot fix: diagnose it
-precisely, open an issue with reproducible evidence, and leave the fix to the
-repository's owner. Write them in Chinese like every other human-facing text.
-The content rule is unchanged — an issue proposes a change, it does not make
-one.
+- **Work only on `w2g/*` branches.** Create them, commit to them, push them.
+  The local worktree is now ours to edit, which it was not before.
+- **Never push to their working branch** — `OnboardHmi_MVP` for the onboard HMI,
+  `main` for the simulator. Never force-push anything there, never delete or
+  rewrite a branch that is not ours, never tag or release.
+- **Changes reach Kun Wang as a pull request** into that working branch, opened
+  when he wants them. **We do not merge it.** The repository is still his to
+  accept from, and a merged PR is a decision, not a delivery.
+- Issues, pull requests and comments stay allowed, as they have been since
+  2026-09-03.
+
+Two consequences worth knowing before they bite:
+
+- **A dirty worktree in either repository aborts an L2 run.**
+  `Get-L2PeerPublish` publishes both peers from a throwaway clone of the local
+  repository and refuses a dirty source rather than testing uncommitted state
+  behind your back. That check used to be free — nothing wrote there. Now it is
+  a thing to remember: commit to your `w2g/*` branch before running L2.
+- **Their `CLAUDE.md` and `docs/` are still their documents.** Changing how those
+  repositories describe themselves is a different act from fixing their code;
+  it belongs in a PR he actually asked for, not in passing.
+
+**Open, do not decide it alone:** the slice board assigns `ONBOARD_HMI_G2` to Kun
+Wang. Taking over development does not by itself move that gate to us. Ask before
+running it or filling in that column.
 
 ### Notify-after-change
 
@@ -104,10 +119,13 @@ and not back to 5.1.
 
 ## 协作与语言
 
-项目由两个人推进：Kun Wang（GitHub `SocialKKKK`）负责 `8005-agv-onboard-hmi` 与
-`slots-simulator`；Zhengyu Shao 负责 `8005-agv-control-server`；`8005-agv-protocol`
-共同维护。**权威文档是 `repos/8005-agv-program/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md`
-里内联了 agent 必须遵守的部分。
+项目由两个人推进。**分工在 2026-09-04 变了**：`8005-agv-onboard-hmi` 与
+`slots-simulator` 原本由 Kun Wang（GitHub `SocialKKKK`）负责，现在**开发工作在
+Zhengyu Shao 这边**——我们在那两个仓开自己的 `w2g/*` 分支改，改完以 PR 的形式交给他，
+由他决定合不合（见上面 Branch-scoped write）。`8005-agv-control-server` 一直是
+Zhengyu Shao 的；`8005-agv-protocol` 共同维护。**权威文档是
+`repos/8005-agv-program/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md` 里内联了
+agent 必须遵守的部分。
 
 注意 `8005-workspace` 这个仓库**只有 Zhengyu Shao 有访问权**，Kun Wang 看不到。任何需要
 对方看到的东西不能只写在这里。
