@@ -186,32 +186,69 @@ Write-Step "Journal: $vehicleResult"
 # -------------------------------------------------------------- server ---
 
 if ($serverTotal -gt 0) {
-    $deleteScript = @"
+    # The delete runs from a file copied to the server, not from an encoded
+    # command line. Interpolating the survey's plan into the remote script made
+    # its length grow with the number of tables, and on 2026-09-07 the encoded
+    # command came back "not properly encoded" -- the vehicle journal was already
+    # gone by then, which is precisely the half-state this script exists to
+    # avoid. So the remote script is a fixed size and repeats the discovery on
+    # the server instead of carrying it across.
+    $remoteScript = @"
 `$ErrorActionPreference = 'Stop'
-Stop-Service -Name '8005 AGV ControlServer' -Force
+`$db = '$ServerDatabase'
+`$root = '$ServerInstallRoot'
+`$svc = '8005 AGV ControlServer'
+Stop-Service -Name `$svc -Force
 `$dest = '$ServerBackupRoot\db-backup-$stamp'
 New-Item -ItemType Directory -Path `$dest -Force | Out-Null
 foreach (`$suffix in '', '-wal', '-shm') {
-    `$p = '$ServerDatabase' + `$suffix
+    `$p = "`$db`$suffix"
     if (Test-Path -LiteralPath `$p) { Copy-Item -LiteralPath `$p -Destination `$dest -Force }
 }
-`$dll = (Get-ChildItem '$ServerInstallRoot' -Filter 'Microsoft.Data.Sqlite.dll' -Recurse | Select-Object -First 1).FullName
+`$dll = (Get-ChildItem `$root -Filter 'Microsoft.Data.Sqlite.dll' -Recurse | Select-Object -First 1).FullName
 Add-Type -Path `$dll
-`$c = [Microsoft.Data.Sqlite.SqliteConnection]::new('Data Source=$ServerDatabase')
+`$c = [Microsoft.Data.Sqlite.SqliteConnection]::new("Data Source=`$db")
 `$c.Open()
+`$demands = @(); `$attempts = @()
+`$m = `$c.CreateCommand(); `$m.CommandText = 'SELECT DemandId FROM JourneyRuntimes'
+`$r = `$m.ExecuteReader(); while (`$r.Read()) { `$demands += `$r.GetString(0) }; `$r.Close()
+`$m = `$c.CreateCommand(); `$m.CommandText = 'SELECT SlotOperationAttemptId FROM StationOperations'
+`$r = `$m.ExecuteReader(); while (`$r.Read()) { `$attempts += `$r.GetString(0) }; `$r.Close()
+`$tables = @(); `$m = `$c.CreateCommand()
+`$m.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> '__EFMigrationsHistory' ORDER BY name"
+`$r = `$m.ExecuteReader(); while (`$r.Read()) { `$tables += `$r.GetString(0) }; `$r.Close()
 `$tx = `$c.BeginTransaction()
 `$total = 0
-$(($survey.plan | ForEach-Object {
-    "`$m = `$c.CreateCommand(); `$m.Transaction = `$tx; `$m.CommandText = `"DELETE FROM [$($_.table)] WHERE $($_.where -replace '"', '`"')`"; `$n = `$m.ExecuteNonQuery(); `$total += `$n; `"  $($_.table) -> `$n`""
-}) -join "`n")
-if (`$total -ne $serverTotal) { `$tx.Rollback(); `$c.Close(); throw "expected $serverTotal rows, deleted `$total -- rolled back" }
+foreach (`$t in `$tables) {
+    `$ci = `$c.CreateCommand(); `$ci.Transaction = `$tx; `$ci.CommandText = "PRAGMA table_info([`$t])"
+    `$cols = @(); `$ri = `$ci.ExecuteReader(); while (`$ri.Read()) { `$cols += `$ri.GetString(1) }; `$ri.Close()
+    `$where = @()
+    if (`$cols -contains 'DemandId' -and `$demands.Count) { `$where += "DemandId IN ('" + (`$demands -join "','") + "')" }
+    if (`$cols -contains 'SlotOperationAttemptId' -and `$attempts.Count) { `$where += "SlotOperationAttemptId IN ('" + (`$attempts -join "','") + "')" }
+    if (`$t -eq 'ProtocolOutbox') { `$where += 'AcknowledgedAt IS NULL' }
+    if (-not `$where.Count) { continue }
+    `$d = `$c.CreateCommand(); `$d.Transaction = `$tx
+    `$d.CommandText = "DELETE FROM [`$t] WHERE " + (`$where -join ' OR ')
+    `$n = `$d.ExecuteNonQuery()
+    if (`$n -gt 0) { "  {0,-32} {1}" -f `$t, `$n; `$total += `$n }
+}
 `$tx.Commit()
 `$c.Close()
 "  committed `$total rows; backup at `$dest"
-Start-Service -Name '8005 AGV ControlServer'
+Start-Service -Name `$svc
 "@
-    $deleted = Invoke-Remote $ServerAlias $deleteScript
-    $deleted -split "`r?`n" | ForEach-Object { if ($_.Trim()) { Write-Step $_.Trim() } }
+    $localTemp = Join-Path ([IO.Path]::GetTempPath()) "w2g-server-reset-$stamp.ps1"
+    Set-Content -LiteralPath $localTemp -Value $remoteScript -Encoding utf8NoBOM
+    try {
+        & scp -o BatchMode=yes $localTemp "${ServerAlias}:$ServerBackupRoot/server-reset-$stamp.ps1" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not copy the reset script to $ServerAlias" }
+        $deleted = & ssh -o BatchMode=yes $ServerAlias `
+            "pwsh -NoProfile -ExecutionPolicy Bypass -File `"$ServerBackupRoot\server-reset-$stamp.ps1`"; Remove-Item `"$ServerBackupRoot\server-reset-$stamp.ps1`" -Force" 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Server reset failed: $(($deleted | Out-String).Trim())" }
+        ($deleted | Out-String) -split "`r?`n" | ForEach-Object { if ($_.Trim()) { Write-Step $_.Trim() } }
+    } finally {
+        Remove-Item -LiteralPath $localTemp -Force -ErrorAction SilentlyContinue
+    }
 } else {
     Write-Step 'Server: nothing to delete'
 }
