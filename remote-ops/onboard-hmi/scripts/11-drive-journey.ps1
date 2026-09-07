@@ -6,13 +6,13 @@
 
 .DESCRIPTION
     The L2 rig already automates the operator, but only on one machine: both
-    halves are local to it, so it drives the WPF client through UI Automation
-    directly. In the production topology the client is on the vehicle and this
-    script is somewhere else, and UI Automation cannot see a window in another
-    machine's session. So the work is split three ways, and the middle part is
+    halves are local to it. In the production topology the client is on the
+    vehicle and this script is somewhere else, and both automation faces the
+    operator's part needs -- the client's and the slot simulator's -- bind
+    127.0.0.1 on purpose. So the work is split three ways, and the middle part is
     the reason it is three and not two:
 
-        1. vehicle   type the sublot, click submit          (UI Automation)
+        1. vehicle   submit the sublot                      (loopback HTTP)
         2. HERE      wait for the client to report WAITING_OPERATOR, and read
                      which slot it opened
         3. vehicle   put the cargo in that slot, close the door
@@ -27,13 +27,19 @@
     that.
 
     It is read from the server's ProtocolInbox because that is where the client's
-    OperationProgress lands, and because the onboard's own automation plane --
-    which would expose the phase locally -- hangs the client at startup when
-    enabled (8005-agv-onboard-hmi#14).
+    OperationProgress lands. The onboard face does expose currentOperationPhase
+    locally now that 8005-agv-onboard-hmi#14 is fixed, which would save the round
+    trip -- but only once it is confirmed to report the phase slot by slot in a
+    multi-slot operation.
 
-    The vehicle half runs in the interactive session, started by the same
-    scheduled-task mechanism 10-start-onboard-stack.ps1 uses, because that is the
-    only session where the client's window exists.
+    The vehicle half still runs in the interactive session, started by the same
+    scheduled-task mechanism 10-start-onboard-stack.ps1 uses. That used to be
+    load-bearing: the scan went through UI Automation, which can only see a
+    window in its own session. It is not load-bearing any more -- both phases are
+    loopback HTTP now and would run just as well over plain ssh in session 0.
+    Simplifying it is deliberately not bundled with the scan change: the operator
+    phase can only be proven by driving a real journey, and a broken driver costs
+    one to discover.
 
 .PARAMETER Sublot
     Submit this instead of what the server asked for. Only useful for negative
@@ -88,10 +94,11 @@ function ConvertFrom-RemoteJson {
 function Invoke-VehiclePhase {
     param([string] $PhaseName, [string] $Arguments, [string] $ResultPath)
 
-    # sshd hands us session 0, and UI Automation there cannot see the client's
-    # window. Same mechanism as 10-start-onboard-stack.ps1: a scheduled task with
-    # an Interactive principal runs in the logged-on user's session, and the task
-    # is unregistered immediately so nothing outlives this run.
+    # Same mechanism as 10-start-onboard-stack.ps1: a scheduled task with an
+    # Interactive principal runs in the logged-on user's session, and the task is
+    # unregistered immediately so nothing outlives this run. sshd hands us
+    # session 0, which used to be disqualifying -- see the note in .DESCRIPTION
+    # for why it no longer is, and why this stays anyway.
     $taskName = "W2G-Drive-$PhaseName-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $null = Invoke-Remote $SshAlias @"
 `$ErrorActionPreference = 'Stop'

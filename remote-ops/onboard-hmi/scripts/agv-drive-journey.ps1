@@ -6,13 +6,19 @@
     11-drive-journey.ps1 on the control host.
 
 .DESCRIPTION
-    Two things have to happen on the vehicle itself, and that is the whole reason
+    Both halves drive a loopback-only HTTP face, and that is the whole reason
     this file exists rather than being part of the control-host script:
 
-      * the scan goes through UI Automation, which can only see a window in its
-        own desktop session -- session 1 here, where the WPF client runs;
-      * the slot simulator's automation plane binds 127.0.0.1 on purpose, so the
-        cargo and door calls have to originate on this machine.
+      * the onboard client's automation face binds 127.0.0.1 on purpose, so the
+        sublot has to be submitted from this machine;
+      * the slot simulator's automation plane binds 127.0.0.1 for the same
+        reason, so the cargo and door calls have to originate here too.
+
+    The scan used to go through UI Automation instead, matching controls by name
+    (ScanTextBox, 手动提交) inside the client's own desktop session. That was a
+    detour around 8005-agv-onboard-hmi#14 -- turning the automation face on used
+    to stop the client dead at startup, with no window and not one line of log.
+    #14 is fixed, so the scan is one POST against a contract now.
 
     It runs in two phases because the thing that separates them can only be seen
     from the server:
@@ -32,9 +38,10 @@
 
     WAITING_OPERATOR is reported by the client, reaches the server as
     OperationProgress, and names the slot in activeUnlockSlots. So the control
-    host waits for it and passes the slot in. The onboard's own automation plane
-    would expose the phase locally, but enabling it hangs the client at startup
-    (8005-agv-onboard-hmi#14).
+    host waits for it and passes the slot in. The onboard face does expose
+    currentOperationPhase locally, which would save that round trip -- but only
+    once it is confirmed to report the phase slot by slot in a multi-slot
+    operation, so the split stays as it is.
 
     Driving only, never asserting. The one thing read back from the UI is whether
     input is accepted yet, which is a precondition for typing rather than a
@@ -66,9 +73,8 @@ param(
     [string] $CargoState = 'OCCUPIED',
     [Parameter(Mandatory)][string] $ResultPath,
     [int] $SimulatorPort = 58006,
-    [int] $TimeoutSeconds = 180,
-    [string] $ScanTextBoxAutomationId = 'ScanTextBox',
-    [string] $SubmitButtonName = '手动提交'
+    [int] $AutomationPort = 58007,
+    [int] $TimeoutSeconds = 180
 )
 
 $ErrorActionPreference = 'Stop'
@@ -122,6 +128,62 @@ function Invoke-SimulatorCommand {
     if ([int]$r.StatusCode -ge 400) { throw "$Method $Path -> HTTP $($r.StatusCode): $($r.Content)" }
 }
 
+$onboardBase = "http://127.0.0.1:$AutomationPort/api/v1"
+
+# The single most likely failure here is not a bug: 06-deploy-onboard-hmi.ps1
+# renders appsettings.json from the production template on every deployment, and
+# the template ships the face off. Say so rather than reporting a bare refused
+# connection.
+function Get-OnboardSnapshot {
+    try {
+        $r = Invoke-WebRequest -Uri "$onboardBase/snapshot" -TimeoutSec 20 -SkipHttpErrorCheck
+    } catch {
+        throw ("The onboard automation face at $onboardBase is not answering ($($_.Exception.Message)). " +
+            'It stays off until appsettings.json carries automation.enabled true AND a non-placeholder ' +
+            'automation.productionReviewReference -- and a deployment resets both.')
+    }
+    if ([int]$r.StatusCode -ge 400) { throw "GET /snapshot -> HTTP $($r.StatusCode): $($r.Content)" }
+    $r.Content | ConvertFrom-Json
+}
+
+# Same three-field envelope as the simulator, for the same reasons: runId is the
+# face's own, and expectedRevision is optimistic concurrency read fresh right
+# before the call.
+#
+# Unlike the simulator, this revision fingerprints the whole vehicle snapshot --
+# every slot's IO, the session, the worklist -- so it can move between the read
+# and the post even while nobody is doing anything. REVISION_CONFLICT is the
+# face telling us to read again, not a failure, so retry it. A new commandId per
+# attempt, because the cached fingerprint includes expectedRevision and reusing
+# the id would come back COMMAND_ID_CONFLICT. Retrying cannot double-submit: we
+# only retry on a response that says the submit was refused.
+function Invoke-OnboardSubmit {
+    param([string] $Sublot, [int] $Attempts = 4)
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $snapshot = Get-OnboardSnapshot
+        $body = @{
+            runId            = $snapshot.runId
+            commandId        = [guid]::NewGuid().ToString('D')
+            expectedRevision = $snapshot.revision
+            sublot           = $Sublot
+        }
+        $r = Invoke-WebRequest -Uri "$onboardBase/sublots/submit" -Method POST `
+            -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json' `
+            -TimeoutSec 30 -SkipHttpErrorCheck
+        $payload = $r.Content | ConvertFrom-Json
+
+        if ([int]$r.StatusCode -lt 400 -and $payload.accepted) { return $payload }
+
+        $reason = $payload.reasonCode ?? "HTTP $($r.StatusCode)"
+        if ($reason -eq 'REVISION_CONFLICT' -and $attempt -lt $Attempts) {
+            Add-Step 'revision-conflict' "attempt $attempt saw revision $($body.expectedRevision); re-reading"
+            continue
+        }
+        throw "POST /sublots/submit refused: $reason $($payload.message)".Trim()
+    }
+}
+
 function Wait-For {
     param([string] $Description, [scriptblock] $Probe)
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -136,70 +198,33 @@ function Wait-For {
 try {
     if ($Phase -eq 'Scan') {
         if (-not $Sublot) { throw 'Scan phase needs -Sublot.' }
-        Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 
-        $client = @(Get-Process -Name 'SQCD.Agv.Wpf' -ErrorAction SilentlyContinue)
-        if ($client.Count -ne 1) { throw "expected exactly one onboard client, found $($client.Count)" }
-        $processId = $client[0].Id
-        Add-Step 'attach' "client pid $processId"
+        $snapshot = Get-OnboardSnapshot
+        Add-Step 'attach' "automation face runId $($snapshot.runId), agvId $($snapshot.agvId)"
 
-        # Attaching to *a* top-level window is not enough: when startup fails the
-        # only window is a modal MessageBox, and adopting it would make every
-        # later wait time out on a criterion that says nothing about the real
-        # error. The main window is identified by the control this script needs.
-        $seen = [System.Collections.Generic.HashSet[string]]::new()
-        $null = Wait-For 'the client window carrying the scan box' {
-            $condition = [System.Windows.Automation.PropertyCondition]::new(
-                [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $processId)
-            $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
-                [System.Windows.Automation.TreeScope]::Children, $condition)
-            foreach ($w in $windows) {
-                $null = $seen.Add($w.Current.Name)
-                $box = $w.FindFirst(
-                    [System.Windows.Automation.TreeScope]::Descendants,
-                    [System.Windows.Automation.PropertyCondition]::new(
-                        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
-                        $ScanTextBoxAutomationId))
-                if ($box) { $script:window = $w; return $true }
-            }
-            return $false
+        # canSubmitSublot is WireToGateBusinessService.CanSubmitSublot -- the
+        # same fact the scan box's IsEnabled used to stand for, read from the
+        # source instead of from a control's visual state. So this still
+        # replaces "an operator noticed the prompt", and it no longer breaks if
+        # somebody renames a control.
+        $ready = Wait-For 'the server to ask for a sublot (canSubmitSublot)' {
+            $s = Get-OnboardSnapshot
+            $s.state.canSubmitSublot ? $s : $null
         }
-        $window = $script:window
-        Add-Step 'window' "title '$($window.Current.Name)' (seen: $($seen -join ' / '))"
+        # Recorded, not asserted: this file drives and never judges, and the
+        # caller already takes the sublot from the server's own request. A
+        # mismatch here is worth seeing in the evidence afterwards.
+        Add-Step 'can-submit' "expectedSublot=$($ready.state.expectedSublot ?? '(none)') typed=$Sublot"
 
-        function Get-Element {
-            param([string] $By, [string] $Value)
-            $property = $By -eq 'AutomationId' `
-                ? [System.Windows.Automation.AutomationElement]::AutomationIdProperty `
-                : [System.Windows.Automation.AutomationElement]::NameProperty
-            return $window.FindFirst(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                [System.Windows.Automation.PropertyCondition]::new($property, $Value))
+        $submit = Invoke-OnboardSubmit -Sublot $Sublot
+        Add-Step 'submitted' "messageId=$($submit.messageId) replayed=$($submit.replayed) revision=$($submit.revision)"
+
+        Write-Result 'OK' "Sublot $Sublot submitted." @{
+            sublot           = $Sublot
+            expectedSublot   = $ready.state.expectedSublot
+            messageId        = $submit.messageId
+            automationRunId  = $submit.runId
         }
-
-        # The text box is enabled exactly when WireToGateBusinessService.CanSubmitSublot
-        # is true, so this wait replaces "an operator noticed the prompt".
-        $null = Wait-For 'the server to ask for a sublot (scan box enabled)' {
-            $box = Get-Element 'AutomationId' $ScanTextBoxAutomationId
-            $box -and $box.Current.IsEnabled
-        }
-        Add-Step 'can-submit' 'scan box is enabled'
-
-        (Get-Element 'AutomationId' $ScanTextBoxAutomationId).GetCurrentPattern(
-            [System.Windows.Automation.ValuePattern]::Pattern).SetValue($Sublot)
-        Add-Step 'typed' $Sublot
-
-        # The button additionally requires non-empty text, which is why setting
-        # and invoking are separate steps with a wait between them.
-        $null = Wait-For 'the submit button to become enabled' {
-            $b = Get-Element 'Name' $SubmitButtonName
-            $b -and $b.Current.IsEnabled
-        }
-        (Get-Element 'Name' $SubmitButtonName).GetCurrentPattern(
-            [System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-        Add-Step 'submitted' "clicked $SubmitButtonName"
-
-        Write-Result 'OK' "Sublot $Sublot submitted." @{ sublot = $Sublot; clientPid = $processId }
     } else {
         if ($SlotNo -lt 1) { throw 'Operator phase needs -SlotNo.' }
 
