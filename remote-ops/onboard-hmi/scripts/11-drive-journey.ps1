@@ -56,6 +56,7 @@ param(
     [string] $Sublot,
     [ValidateSet('OCCUPIED', 'EMPTY')]
     [string] $CargoState = 'OCCUPIED',
+    [switch] $SkipScan,
     [string] $ServerDatabase = 'C:\ProgramData\8005\ControlServer\data\controlserver.db',
     [string] $ServerInstallRoot = 'C:\Program Files\8005 AGV\ControlServer',
     [string] $VehicleWorkRoot = 'C:\8005\automation',
@@ -129,7 +130,11 @@ Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Driving one operation on $SshAlias"
 
 # --- what does the server want scanned? -----------------------------------
 
-if (-not $Sublot) {
+# An unload has no scan: the server does not ask for a sublot at the gate, it
+# just opens the slots. Running the scan phase there waits out its whole timeout
+# on a box that will never be enabled -- and burns the client's operator window
+# while it does, which is how the first unload attempt was lost on 2026-09-07.
+if (-not $SkipScan -and -not $Sublot) {
     $expected = Invoke-Remote $ServerAlias @"
 `$dll = (Get-ChildItem '$ServerInstallRoot' -Filter 'Microsoft.Data.Sqlite.dll' -Recurse | Select-Object -First 1).FullName
 Add-Type -Path `$dll
@@ -144,9 +149,14 @@ if (`$p -match '"expectedSublot"\s*:\s*"([^"]+)"') { `$matches[1] } else { '' }
     if (-not $expected) { throw 'The server has no unanswered SublotEntryRequested; there is nothing to drive.' }
     $Sublot = $expected.Trim()
 }
-Write-Step "Sublot to submit: $Sublot"
+if ($SkipScan) {
+    Write-Step 'Skipping the scan (unload: the server opens the slots without asking for a sublot)'
+} else {
+    Write-Step "Sublot to submit: $Sublot"
+}
 
-if (-not $PSCmdlet.ShouldProcess($SshAlias, "Submit sublot $Sublot and play the operator's part (cargo=$CargoState)")) { return }
+$what = $SkipScan ? "play the operator's part (cargo=$CargoState)" : "submit sublot $Sublot and play the operator's part (cargo=$CargoState)"
+if (-not $PSCmdlet.ShouldProcess($SshAlias, $what)) { return }
 
 # --- deploy ---------------------------------------------------------------
 
@@ -160,11 +170,13 @@ Write-Step "Driver deployed to $VehicleWorkRoot"
 
 # --- 1. the scan ----------------------------------------------------------
 
-$scanResult = "$VehicleWorkRoot\scan-$runId.json"
-$null = Invoke-VehiclePhase 'Scan' `
-    ("-NoProfile -ExecutionPolicy Bypass -File `"$VehicleWorkRoot\agv-drive-journey.ps1`" " +
-     "-Phase Scan -Sublot `"$Sublot`" -ResultPath `"$scanResult`"") `
-    $scanResult
+if (-not $SkipScan) {
+    $scanResult = "$VehicleWorkRoot\scan-$runId.json"
+    $null = Invoke-VehiclePhase 'Scan' `
+        ("-NoProfile -ExecutionPolicy Bypass -File `"$VehicleWorkRoot\agv-drive-journey.ps1`" " +
+         "-Phase Scan -Sublot `"$Sublot`" -ResultPath `"$scanResult`"") `
+        $scanResult
+}
 
 # --- 2. wait for the client to say it is waiting --------------------------
 
