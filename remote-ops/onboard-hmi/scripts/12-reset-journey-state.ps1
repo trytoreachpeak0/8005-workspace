@@ -43,6 +43,12 @@
     Leave the onboard client and simulator stopped at the end. Useful when the
     next thing you do is a deployment.
 
+.PARAMETER Force
+    Suppress the confirmation prompt by lowering $ConfirmPreference, the same way
+    Set-JourneyRuntime.ps1 does. Needed to run this unattended: ConfirmImpact is
+    High, and ShouldProcess throws rather than prompting when there is no host UI
+    to prompt on.
+
 .PARAMETER WhatIf
     Report what would be deleted on both ends and stop.
 
@@ -62,10 +68,12 @@ param(
     [string] $VehicleJournal = 'C:\Users\HT\AppData\Local\SQCD\8005AGV\onboard-journal.db',
     [string] $VehicleBackupRoot = 'C:\8005\journal-backup',
     [switch] $KeepStackDown,
+    [switch] $Force,
     [int] $ReadyTimeoutSeconds = 120
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Force) { $ConfirmPreference = 'None' }
 
 function Write-Step { param([string] $Message) Write-Host "  $Message" -ForegroundColor Cyan }
 
@@ -146,9 +154,11 @@ if ($WhatIfPreference) {
     Write-Host '  WhatIf: nothing was changed on either end.' -ForegroundColor Yellow
     return
 }
-if (-not $PSCmdlet.ShouldProcess(
-        "$ServerAlias ($serverTotal rows) and ${SshAlias} (the onboard journal)",
-        'Delete journey state from both ends')) {
+# Both strings are built first: ShouldProcess throws a bare null-reference when
+# either argument is null, which says nothing about which one it was.
+$target = '{0} ({1} rows) and {2} (the onboard journal)' -f $ServerAlias, $serverTotal, $SshAlias
+$action = 'Delete journey state from both ends'
+if (-not $PSCmdlet.ShouldProcess($target, $action)) {
     return
 }
 
