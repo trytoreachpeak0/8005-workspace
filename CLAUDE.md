@@ -24,6 +24,7 @@ wherever it sits on disk.
 | `8005-agv-onboard-hmi` | Writable **on `w2g/*` branches only** — never `OnboardHmi_MVP` |
 | `slots-simulator` | Writable **on `w2g/*` branches only** — never `main` |
 | `8005-agv-protocol` | Writable — **notify Kun Wang after every change** |
+| `8005-test-lab` | Writable — agent-first multi-machine test lab; decisions only until its `wayfinder:map` issue clears |
 
 ### Branch-scoped write
 
@@ -240,6 +241,63 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
 那轮托管 CI 抓到过一个本地发现不了的真 bug（`.gitattributes` 的字节规则在拆分时
 丢失，导致查询文件摘要对不上）。**教训是：改动会影响构建的文件后，用干净
 checkout 验证一次**——例如临时克隆到别处再跑测试。
+
+### runner 到 GitHub 的网络：一半过代理一半直连，不要整体切
+
+**2026-09-08 落地**，起因是 release 连续五次失败（`8005-agv-control-server#7`）：
+构建每次都成功，五次全栽在与 GitHub 通信那一步。唯一定义处是
+`remote-ops/factory-server/scripts/09-configure-guest-proxy.ps1`（`-Mode Proxy`
+是默认，`-Mode Direct` 留给 github.com 哪天不再被挡的那一天），**改完必须重启
+runner 服务才生效**。
+
+| 目标 | 怎么走 | 实测（客户机上，45 秒超时） |
+| --- | --- | --- |
+| `github.com` HTTPS | **过控制端 Clash 代理** | 直连 0/8，过代理 12/12 |
+| `codeload.github.com` | **过代理** | 直连 0/3——action 下载会挂在这 |
+| `api.github.com` | 过代理 | |
+| `objects.githubusercontent.com`、`*.actions.githubusercontent.com` | **直连** | 12/12 |
+| `*.blob.core.windows.net`（artifact 字节） | **直连** | 15/15 |
+| `api.nuget.org` | 直连 | |
+| `github.com:22` | 直连 | 11/11，所有测量里唯一一次都没失败的端点 |
+
+六条别再重走的结论：
+
+1. **换代理节点不是解药。**把 Clash 的节点从日本切到美国之后，github.com 过代理
+   由 2/10 失败变成 10/10 成功，紧接着第五次 release 仍以完全相同的方式失败。坏的
+   那一跳是「客户机→代理」，不是代理的上游。
+2. **21 秒是 Windows 的 TCP connect 超时**，不是 GitHub 的超时。三种互不相干的客户
+   端（Node 的 upload-artifact、.NET 的 runner、git/curl）同一症状，说明问题在网络
+   不在客户端库。GitHub 报的 `ECONNRESET`/`ETIMEDOUT` 是二手信息，真错误在 runner
+   的 `_diag` 日志里，会指名 `172.19.162.241:7890`。
+3. **探测要用 45 秒超时。**这条路会成阵地停十几秒，短超时把停顿读成「不可达」——
+   同一批端点 4 秒超时测出 36% 成功、45 秒测出 100%。**判定成功的标准是 release
+   连续两次实跑出可下载的 artifact，不是「探测通了」**；上一轮就是靠短超时探测得
+   出了错误结论。本轮的验收证据是 run `34145513351` 与 `34146036477`，第二个的包
+   下载回来校验过 SHA-256。
+4. **runner 不读 `.proxy` / `.noproxy` 文件。**这个版本只认环境变量
+   （`http_proxy`/`https_proxy`/`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`），程序集里
+   连 `.proxy` 这个字面量都没有。`10-install-github-runner.ps1` 曾经写这两个文件，
+   已经删掉——一个看着像配置、实际什么都不做的文件，第一次出事就要吃掉一小时。
+5. **.NET 的 `NO_PROXY` 不做后缀匹配**（实测 `github.com` 能豁免 github.com，豁免
+   不了 api.github.com），而 curl、Node 的 toolkit 和 runner 会做。所以每个主机名都
+   要写全。**并且绝不要写裸的 `github.com`**——做后缀匹配的那些客户端会把
+   `codeload.github.com` 一起放去直连，而那条直连不通。
+6. **厂区到公网的 path MTU 是 1000，而且 PMTUD 是黑洞**（DF ping 972 通、1000 不通，
+   客户机与 factory-server 两台一致，没有 ICMP「需要分片」回来）。它**不是**这次
+   故障的原因——把客户机 MTU 降到 1000 之后 github.com 直连仍是 0/8，已改回 1500
+   ——但排查时会看到「TCP 连得上、TLS 握手超时」这种像 MTU 的现象，别被带偏。
+
+**artifact 上传本来就需要重试。**`CreateArtifact`/`FinalizeArtifact` 是这条链上仅
+剩的单次调用（checkout 自己 fetch 三次，restore 有自己的重试），而 upload-artifact
+不提供任何重试开关，`run:` 步骤又没法重新调用一个 action，所以只能在 workflow 里把
+三次尝试写开——`release.yml` 就是这么做的，中间隔 30 秒，后两次带 `overwrite`。
+`test.yml` 与 `l2.yml` 传的是诊断材料不是交付物，那两处用 `continue-on-error`：判定
+在上一步，别让一次网络抖动把绿的跑成红的。
+
+**CD 断线时的备用路是 `repos/8005-agv-control-server/scripts/Build-LocalRc.ps1`**，
+在控制端本地产出与 workflow 等价的一套东西（zip + `.sha256` + `release-manifest.json`
++ `SHA256SUMS.txt`），`15-deploy-control-server.ps1 -PackagePath` 直接能吃。它替代的
+只是 `gh run download`，别的一步没改。
 
 ## CD：MesIngest 部署到 factory-server，控制端中转
 
