@@ -37,6 +37,18 @@
     restart. The prompt prints which sublot the next iteration will pick up;
     read it out loud at the vehicle before answering.
 
+    CLOSING IS NOT INSTANT, AND AFTER A TRIP THAT MATTERS. Both booleans are read
+    once at startup (Program.cs binds IOptions, not IOptionsMonitor), so this
+    script has to restart the service for either to mean anything -- seconds, not
+    milliseconds. JourneyRuntimeWorker polls every 2 s, so a journey that reaches
+    Completed while a person is still walking to a keyboard is followed by an
+    accepted demand and a created RIoT order before -Off can land. Measured on
+    2026-09-07: Completed 13:52:14, next demand dispatched 13:52:16, -Off 13:53:23.
+    Nobody wins that by hand. 13-close-gates-when-idle.ps1 watches from the server
+    at 250 ms and stops the service the instant the journey completes, then calls
+    this script to write the booleans once nothing is racing. Use it for any trip
+    that is meant to be the last one.
+
     Everything else is already configured. appsettings.json carries the real site
     values (mapId 25, gateStationRiotId 210, dispatchZone,
     admissionPolicyDeploymentId, ...) and the service's registry environment
@@ -47,8 +59,16 @@
 .PARAMETER Off
     Closes both gates. It does NOT stop a vehicle that is already moving -- an
     in-flight journey is the vehicle's own business and the physical stop is the
-    physical stop. This closes intake; the current journey still finishes or is
-    handled at the vehicle.
+    physical stop. This closes intake; the current journey is handled at the
+    vehicle.
+
+    That sentence is about the VEHICLE, and it has been read as more than it says.
+    SERVER-SIDE, closing the runtime gate mid-journey does stop the journey: a
+    disabled JourneyRuntimeWorker logs one warning and sleeps forever, and every
+    remaining transition -- the gate worklist, the unload command, settling the
+    result -- is made by that loop. Close it after the load and the vehicle
+    reaches the gate with nothing opening. So -Off belongs after Completed, never
+    between the load and the unload.
 
 .PARAMETER Force
     Suppresses the confirmation prompt by lowering $ConfirmPreference. Do not use

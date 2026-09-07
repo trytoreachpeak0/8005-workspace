@@ -32,6 +32,17 @@
     trip -- but only once it is confirmed to report the phase slot by slot in a
     multi-slot operation.
 
+    THIS SCRIPT DOES NOT END THE TRIP, AND THE GAP AFTER IT IS A RACE. It returns
+    once the last slot of one station operation has been served; the journey is
+    still in flight, and after the unload leg it reaches Completed a second or two
+    later. JourneyRuntimeWorker polls every 2 s, so the next iteration after that
+    accepts the next demand and creates a real RIoT order -- on 2026-09-07,
+    Completed at 13:52:14 and a second unasked-for trip dispatched at 13:52:16,
+    while the operator's -Off landed at 13:53:23. Run
+    13-close-gates-when-idle.ps1 alongside a real trip: it watches from the server
+    and shuts both gates the instant the journey completes. Nothing here does it,
+    because from here the completion is not yet visible.
+
     The vehicle half still runs in the interactive session, started by the same
     scheduled-task mechanism 10-start-onboard-stack.ps1 uses. That used to be
     load-bearing: the scan went through UI Automation, which can only see a
@@ -263,3 +274,5 @@ Write-Host "  slot ${slotNo}: $($final.message)" -ForegroundColor Green
 
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Served $($handled.Count) slot(s): $(($handled | Sort-Object) -join ', ')" -ForegroundColor Green
 Write-Host '  The journey continues on the server; this script only played the operator.' -ForegroundColor Yellow
+Write-Host '  It reaches Completed on its own, and the runtime takes the next demand 2 s later.' -ForegroundColor Yellow
+Write-Host '  13-close-gates-when-idle.ps1 is what shuts the gates in time.' -ForegroundColor Yellow
