@@ -101,18 +101,17 @@ Write-Output ("使用安装包 {0}（{1} MB）。" -f (Split-Path $zip -Leaf), [
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Expand-Archive -LiteralPath $zip -DestinationPath $InstallDir -Force
 
-# The runner reads .proxy itself. The environment variables set by
-# 09-configure-guest-proxy.ps1 cover the job's own tooling; this covers the
-# runner's control-plane traffic, which starts before any job environment exists.
-$proxy = [Environment]::GetEnvironmentVariable('HTTPS_PROXY', 'Machine')
-if ($proxy) {
-    Set-Content -LiteralPath (Join-Path $InstallDir '.proxy') -Value $proxy -NoNewline -Encoding ascii
-    $noProxy = [Environment]::GetEnvironmentVariable('NO_PROXY', 'Machine')
-    if ($noProxy) {
-        Set-Content -LiteralPath (Join-Path $InstallDir '.noproxy') -Value $noProxy -NoNewline -Encoding ascii
-    }
-    Write-Output "已写入 .proxy（$proxy）。"
-}
+# No .proxy file is written here, deliberately. This used to write one, on the
+# belief that the runner reads it for its own control-plane traffic. It does
+# not: this runner version takes the proxy from http_proxy/https_proxy/
+# HTTP_PROXY/HTTPS_PROXY/NO_PROXY and nothing else — its own log says exactly
+# that when they are absent, and the string `.proxy` appears in none of its
+# assemblies (checked 2026-09-07 while chasing 8005-agv-control-server issue #7,
+# where a bypass list written into .noproxy looked applied and changed nothing).
+#
+# 09-configure-guest-proxy.ps1 sets those machine-level variables and deletes
+# any leftover files. Run it before the runner service starts, or restart the
+# service after.
 
 Write-Output ($Interactive ? '正在注册 runner（交互式）...' : '正在注册并安装为服务 ...')
 Push-Location $InstallDir

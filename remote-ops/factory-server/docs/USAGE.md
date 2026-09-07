@@ -377,19 +377,35 @@ GitHub Actions runner。三项配置是这两个角色要求的，不要"顺手"
 ### 客户机到 GitHub 的网络约束
 
 **`github.com:443` 不通**——不是客户机的问题，**这台服务器自己也不通**，2026-09-02
-两边都实测过。DNS 解析正常（`20.205.243.166`，不是投毒），TCP 握手直接不成。
+两边都实测过，2026-09-08 复测仍然如此。DNS 解析正常（`20.205.243.166`，不是投毒），
+TCP 有时能连上，但 TLS 握手过不去：45 秒超时下直连 0/8，过代理 12/12。
 
 | 端点 | 状态 | 用途 |
 | --- | --- | --- |
-| `github.com:22` | ✅ 直连 | git over SSH，**checkout 必须走这条** |
-| `api.github.com` | ✅ 直连 | runner 注册与心跳 |
+| `github.com:22` | ✅ 直连 11/11 | git over SSH。所有测量里唯一一次都没失败的 |
+| `api.github.com` | ⚠️ 走代理 | runner 注册与心跳。直连时好时坏，别指望 |
 | `pipelines.actions.githubusercontent.com` | ✅ 直连 | 作业队列 |
-| `results-receiver.actions.githubusercontent.com` | ✅ 直连 | 日志与结果上传 |
-| `api.nuget.org` | ✅ 直连 | restore |
-| `github.com:443` | ❌ | 网页、HTTPS clone、release 下载 |
+| `results-receiver.actions.githubusercontent.com` | ✅ 直连 12/12 | 日志、artifact 的 Create/Finalize |
+| `broker.actions.githubusercontent.com` | ✅ 直连 | 保活长轮询 |
+| `objects.githubusercontent.com` | ✅ 直连 | action 与 release 资产 |
+| `*.blob.core.windows.net` | ✅ 直连 15/15 | artifact 字节 |
+| `api.nuget.org` | ✅ 直连 | restore。会跳 `nuget.azure.cn`，那一跳自己也会抖 |
+| `github.com:443` | ❌ 直连 0/8 | 网页、HTTPS clone、release 下载 |
+| `codeload.github.com` | ❌ 直连 0/3 | action 的 tarball 下载 |
 | `vstsagentpackage.azureedge.net` | ❌ | runner 自动更新包 |
 
-所以 runner 能注册、能领作业、能回传日志，但**必须配成 SSH checkout**。
+所以现在的配置是**一半过代理一半直连**：`github.com`、`codeload.github.com`、
+`api.github.com` 走控制端的 Clash，其余全部直连。唯一定义处是
+`../scripts/09-configure-guest-proxy.ps1`，改完要重启 runner 服务；理由与实测数据在
+工作区 `CLAUDE.md` 的 CI 小节。**SSH checkout 仍然是更好的终局**（`github.com:22`
+从没失败过，且能把控制端那台笔记本彻底从 CI 里拿掉），但它要给每个仓各配一把
+deploy key，属于另一个决定。
+
+⚠️ **厂区到公网的 path MTU 是 1000，而且 PMTUD 是黑洞**：DF ping 972 字节通、
+1000 字节静默丢弃，没有 ICMP「需要分片」回来，客户机与本服务器两台一致
+（2026-09-08 实测）。排查时会看到「TCP 连得上、TLS 握手超时」这种像 MTU 的现象。
+把客户机 MTU 降到 1000 试过，`github.com` 直连仍然 0/8，**已改回 1500**——它不是
+故障原因，但知道它存在能少走弯路。
 
 一次性的安装包（Git、runner 包）有两条路：
 
