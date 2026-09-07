@@ -85,17 +85,52 @@ function Write-Result {
 }
 
 function Invoke-Simulator {
-    param([string] $Method, [string] $Path, $Body)
+    param([string] $Method, [string] $Path, [switch] $Mutating)
+
+    # Every mutating call carries three things the simulator refuses without, and
+    # it refuses them one at a time, so finding this out costs three round trips
+    # unless you send all three from the start: runId (its own, not ours),
+    # commandId, and expectedRevision. The revision is optimistic concurrency, so
+    # it is read fresh immediately before the call rather than cached.
+    $body = $null
+    if ($Mutating) {
+        $state = (Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1/snapshot" -TimeoutSec 20).Content |
+            ConvertFrom-Json
+        $body = @{
+            runId            = $state.runId
+            commandId        = [guid]::NewGuid().ToString('D')
+            expectedRevision = $state.revision
+        }
+    }
     $args = @{
         Uri                = "http://127.0.0.1:$SimulatorPort/api/v1$Path"
         Method             = $Method
         TimeoutSec         = 20
         SkipHttpErrorCheck = $true
     }
-    if ($Body) { $args.Body = ($Body | ConvertTo-Json -Compress); $args.ContentType = 'application/json' }
+    if ($body) { $args.Body = ($body | ConvertTo-Json -Compress); $args.ContentType = 'application/json' }
     $r = Invoke-WebRequest @args
     if ([int]$r.StatusCode -ge 400) { throw "$Method $Path -> HTTP $($r.StatusCode): $($r.Content)" }
     return $r.Content | ConvertFrom-Json
+}
+
+function Set-SlotCargo {
+    param([int] $SlotNo, [string] $CargoValue)
+    # NOT $state for the snapshot: PowerShell variable names are case-insensitive,
+    # so `$state = ...` overwrote the `$State` parameter and the whole snapshot
+    # object went out as the cargo state. The simulator said
+    # INVALID_CARGO_STATE and it was right.
+    $snapshot = (Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1/snapshot" -TimeoutSec 20).Content |
+        ConvertFrom-Json
+    $body = @{
+        runId            = $snapshot.runId
+        commandId        = [guid]::NewGuid().ToString('D')
+        expectedRevision = $snapshot.revision
+        state            = $CargoValue
+    } | ConvertTo-Json -Compress
+    $r = Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1/slots/$SlotNo/cargo" -Method PUT `
+        -Body $body -ContentType 'application/json' -TimeoutSec 20 -SkipHttpErrorCheck
+    if ([int]$r.StatusCode -ge 400) { throw "PUT /slots/$SlotNo/cargo -> HTTP $($r.StatusCode): $($r.Content)" }
 }
 
 function Wait-For {
@@ -187,17 +222,13 @@ try {
     Add-Step 'door-open' "slot $slotNo"
 
     if ($CargoState -eq 'OCCUPIED') {
-        $null = Invoke-Simulator PUT "/slots/$slotNo/cargo" @{
-            commandId = [guid]::NewGuid().ToString('D'); state = 'OCCUPIED'
-        }
+        Set-SlotCargo -SlotNo $slotNo -CargoValue 'OCCUPIED'
         Add-Step 'cargo' "placed in slot $slotNo"
     } else {
         Add-Step 'cargo' "left slot $slotNo empty on purpose"
     }
 
-    $null = Invoke-Simulator POST "/slots/$slotNo/close-door" @{
-        commandId = [guid]::NewGuid().ToString('D')
-    }
+    $null = Invoke-Simulator POST "/slots/$slotNo/close-door" -Mutating
     Add-Step 'door-closed' "slot $slotNo"
 
     # --- 3. let the client finish ----------------------------------------

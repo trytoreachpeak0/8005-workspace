@@ -148,7 +148,12 @@ while ($true) {
     Start-Sleep -Seconds 3
 }
 
-$result = $raw | ConvertFrom-Json
+# ssh writes its own banner to stderr and Invoke-Remote folds stderr in, so the
+# payload arrives with whatever the server had to say in front of it. Take the
+# JSON object and nothing else.
+$jsonStart = $raw.IndexOf('{')
+if ($jsonStart -lt 0) { throw "No JSON in the driver's result: $raw" }
+$result = $raw.Substring($jsonStart) | ConvertFrom-Json
 foreach ($s in $result.steps) {
     $line = "$($s.step): $($s.detail)"
     if ($line -ne $lastStep) { Write-Step $line; $lastStep = $line }
