@@ -104,12 +104,22 @@ function Read-Rows {
 }
 
 # Sampled at latch and again after the stop. The comparison across those two
-# points is the acceptance evidence: an AcceptedDemands set that grew means the
-# runtime slipped a demand through the window this script exists to close.
+# points is the acceptance evidence: a set that grew means the runtime slipped
+# something through the window this script exists to close.
+#
+# It is DEMAND-level on purpose. A journey creates its own movement legs as it
+# goes -- TO_PICKUP at intake, TO_GATE once the load is done -- so an OrderIntents
+# row that appears mid-trip is this journey's own second leg and says nothing.
+# Comparing leg ids made every real journey look like a lost race: the first real
+# run on 2026-09-08 latched with one leg, finished with two, and reported a
+# violation that had not happened. What must not appear is a leg belonging to
+# some OTHER demand, or another accepted demand at all. The leg count is carried
+# for the report, never asserted on.
 function Read-Ledger {
     [pscustomobject]@{
-        acceptedDemandIds = @(Read-Rows 'SELECT DemandId FROM AcceptedDemands ORDER BY DemandId' | ForEach-Object { $_[0] })
-        orderIntentLegIds = @(Read-Rows 'SELECT MovementLegId FROM OrderIntents ORDER BY MovementLegId' | ForEach-Object { $_[0] })
+        acceptedDemandIds    = @(Read-Rows 'SELECT DemandId FROM AcceptedDemands ORDER BY DemandId' | ForEach-Object { $_[0] })
+        orderIntentDemandIds = @(Read-Rows 'SELECT DISTINCT DemandId FROM OrderIntents ORDER BY DemandId' | ForEach-Object { $_[0] })
+        orderIntentLegCount  = @(Read-Rows 'SELECT MovementLegId FROM OrderIntents').Count
     }
 }
 
@@ -182,7 +192,7 @@ if (-not $latchedStage) {
 
 $latchedAt = [DateTimeOffset]::UtcNow
 $ledgerAtLatch = Read-Ledger
-Write-Heartbeat "Latched onto $DemandId at stage $latchedStage; AcceptedDemands=$($ledgerAtLatch.acceptedDemandIds.Count) OrderIntents=$($ledgerAtLatch.orderIntentLegIds.Count)"
+Write-Heartbeat "Latched onto $DemandId at stage $latchedStage; AcceptedDemands=$($ledgerAtLatch.acceptedDemandIds.Count) OrderIntent legs=$($ledgerAtLatch.orderIntentLegCount)"
 
 # -------------------------------------------------------------------- wait ---
 
@@ -287,9 +297,11 @@ Write-Result @{
     stopDurationMs           = [int]($stoppedAt - $stopRequestedAt).TotalMilliseconds
     serviceStatus            = $serviceStatus
     stopError                = $stopError
-    acceptedDemandIdsAtLatch = $ledgerAtLatch.acceptedDemandIds
-    orderIntentLegIdsAtLatch = $ledgerAtLatch.orderIntentLegIds
-    acceptedDemandIdsAfter   = $ledgerAfterStop.acceptedDemandIds
-    orderIntentLegIdsAfter   = $ledgerAfterStop.orderIntentLegIds
+    acceptedDemandIdsAtLatch    = $ledgerAtLatch.acceptedDemandIds
+    orderIntentDemandIdsAtLatch = $ledgerAtLatch.orderIntentDemandIds
+    orderIntentLegsAtLatch      = $ledgerAtLatch.orderIntentLegCount
+    acceptedDemandIdsAfter      = $ledgerAfterStop.acceptedDemandIds
+    orderIntentDemandIdsAfter   = $ledgerAfterStop.orderIntentDemandIds
+    orderIntentLegsAfter        = $ledgerAfterStop.orderIntentLegCount
     message                  = $stopError ? "Journey $DemandId completed but the service could not be stopped: $stopError" : "Journey $DemandId completed; service stopped."
 }

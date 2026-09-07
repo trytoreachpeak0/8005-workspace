@@ -126,8 +126,9 @@ function Get-ServerState {
     Invoke-Remote @"
 $sqlitePrelude
 `$state = [pscustomobject]@{
-    accepted = Read-Column 'SELECT DemandId FROM AcceptedDemands ORDER BY DemandId'
-    intents  = Read-Column 'SELECT MovementLegId FROM OrderIntents ORDER BY MovementLegId'
+    accepted      = Read-Column 'SELECT DemandId FROM AcceptedDemands ORDER BY DemandId'
+    intentDemands = Read-Column 'SELECT DISTINCT DemandId FROM OrderIntents ORDER BY DemandId'
+    intentLegs    = Read-Column 'SELECT MovementLegId FROM OrderIntents'
     journeys = Read-Column "SELECT DemandId || ' ' || Stage || ' ' || COALESCE(BlockReasonCode, '-') FROM JourneyRuntimes ORDER BY CreatedAt"
     runtime  = [bool](Get-Content -LiteralPath '$ServerConfigPath' -Raw | ConvertFrom-Json).JourneyRuntime.enabled
     dispatch = [bool](Get-Content -LiteralPath '$ServerConfigPath' -Raw | ConvertFrom-Json).RiotCreateDispatch.enabled
@@ -150,7 +151,7 @@ if (@($before.journeys).Count -eq 0) {
 else {
     foreach ($j in @($before.journeys)) { Write-Step "Journey: $j" }
 }
-Write-Step "AcceptedDemands=$(@($before.accepted).Count) OrderIntents=$(@($before.intents).Count)"
+Write-Step "AcceptedDemands=$(@($before.accepted).Count) OrderIntent legs=$(@($before.intentLegs).Count)"
 if (-not $before.runtime) {
     Write-Host '  NOTE: the runtime gate is already closed, so nothing can be accepted right now.' -ForegroundColor Yellow
     Write-Host '  The watch still runs; it will prove the close path rather than guard a real race.' -ForegroundColor Yellow
@@ -250,16 +251,22 @@ if ($problems.Count) {
 }
 Write-Step 'Verified on the server: runtime=False, createDispatch=False, service Running'
 
+# Demand-level, not leg-level. The journey being watched grows its own second
+# movement leg on the way -- TO_PICKUP at intake, TO_GATE after the load -- so a
+# rising leg count is this trip working, not the runtime taking another one. The
+# first real run on 2026-09-08 latched at one leg and finished at two, and a
+# leg-id comparison called that a lost race when nothing had been taken. What
+# must not appear is another accepted demand, or a movement leg for one.
 $acceptedAtLatch = @($result.acceptedDemandIdsAtLatch)
 $acceptedNow = @($after.accepted)
-$intentsAtLatch = @($result.orderIntentLegIdsAtLatch)
-$intentsNow = @($after.intents)
+$intentDemandsAtLatch = @($result.orderIntentDemandIdsAtLatch)
+$intentDemandsNow = @($after.intentDemands)
 $newDemands = @($acceptedNow | Where-Object { $_ -notin $acceptedAtLatch })
-$newIntents = @($intentsNow | Where-Object { $_ -notin $intentsAtLatch })
+$newIntentDemands = @($intentDemandsNow | Where-Object { $_ -notin $intentDemandsAtLatch })
 
 Write-Host ''
-Write-Host "AcceptedDemands $($acceptedAtLatch.Count) -> $($acceptedNow.Count); OrderIntents $($intentsAtLatch.Count) -> $($intentsNow.Count)" -ForegroundColor Green
-if ($newDemands.Count -or $newIntents.Count) {
-    throw "The gate shut, but not before the runtime took something: demands [$($newDemands -join ', ')]; order intents [$($newIntents -join ', ')]. The vehicle may be moving. Check it, then 12-reset-journey-state.ps1."
+Write-Host "AcceptedDemands $($acceptedAtLatch.Count) -> $($acceptedNow.Count); demands with a movement leg $($intentDemandsAtLatch.Count) -> $($intentDemandsNow.Count); legs $($result.orderIntentLegsAtLatch) -> $(@($after.intentLegs).Count) (this journey's own second leg is expected)" -ForegroundColor Green
+if ($newDemands.Count -or $newIntentDemands.Count) {
+    throw "The gate shut, but not before the runtime took another demand: accepted [$($newDemands -join ', ')]; dispatched [$($newIntentDemands -join ', ')]. The vehicle may be moving. Check it, then 12-reset-journey-state.ps1."
 }
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Both gates closed after journey $($result.demandId); nothing new was accepted." -ForegroundColor Green
