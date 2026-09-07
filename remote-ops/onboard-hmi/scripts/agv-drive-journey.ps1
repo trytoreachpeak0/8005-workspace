@@ -1,8 +1,8 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-    Plays the operator's part of one WIRE_TO_GATE station operation. Runs ON the
-    vehicle, inside the interactive desktop session. Deployed and launched by
+    One half of the operator's part of a WIRE_TO_GATE station operation. Runs ON
+    the vehicle, inside the interactive desktop session. Deployed and launched by
     11-drive-journey.ps1 on the control host.
 
 .DESCRIPTION
@@ -14,41 +14,59 @@
       * the slot simulator's automation plane binds 127.0.0.1 on purpose, so the
         cargo and door calls have to originate on this machine.
 
-    The onboard client also ships an automation HTTP plane that would make the
-    scan a one-line POST. It is NOT used: turning it on
-    (`automation.enabled = true`) hangs the client at startup -- the process
-    lives, no window is ever created and not one log line is written. Verified
-    on agv01, 2026-09-07. UI Automation is the route that works today.
+    It runs in two phases because the thing that separates them can only be seen
+    from the server:
 
-    The UIA driver is lifted from New-L2OnboardDriver in the ControlServer
-    repository's scripts/l2/L2.psm1. It is duplicated rather than shared because
-    the two repositories have no common package, and because the contract here is
-    the control names (`ScanTextBox`, 「手动提交」), not the code.
+      Scan      type the sublot and click submit
+      Operator  put the cargo in the named slot and close its door
+
+    WHY THE SPLIT, and it cost a real journey to learn. The first version did
+    both in one pass and triggered the second on the simulator reporting
+    `doorState = OPEN`. That is true the instant the unlock pulse lands, before
+    the client has watched the lock feedback settle and entered WAITING_OPERATOR.
+    On 2026-09-07 the whole IO trace landed inside 0.4 s and the server judged
+    the load LOAD_RESULT_REQUIRES_RECOVERY; the run before it, driven by hand,
+    had 23 s between unlock and cargo. L2's own scenario says this in as many
+    words -- "绝不能一看到 UNLOCKING 就动手" -- and the first version did exactly
+    that anyway.
+
+    WAITING_OPERATOR is reported by the client, reaches the server as
+    OperationProgress, and names the slot in activeUnlockSlots. So the control
+    host waits for it and passes the slot in. The onboard's own automation plane
+    would expose the phase locally, but enabling it hangs the client at startup
+    (8005-agv-onboard-hmi#14).
 
     Driving only, never asserting. The one thing read back from the UI is whether
     input is accepted yet, which is a precondition for typing rather than a
-    business fact. What the run proves is read from the server's database and the
-    simulator's snapshot, by the caller.
+    business fact.
+
+.PARAMETER Phase
+    Scan or Operator.
 
 .PARAMETER Sublot
-    What to type. The caller reads it from the server's own SublotEntryRequested
-    rather than having this script guess.
+    Scan phase. What to type; the caller reads it from the server's own
+    SublotEntryRequested rather than guessing.
+
+.PARAMETER SlotNo
+    Operator phase. Which slot the client actually opened, from the server's
+    OperationProgress.
 
 .PARAMETER CargoState
-    OCCUPIED completes the load. EMPTY closes the door on an empty slot, which is
-    the honest way to reproduce a failed load.
-
-.PARAMETER ResultPath
-    Where to write the machine-readable outcome. The caller polls this file.
+    Operator phase. OCCUPIED completes the load; EMPTY closes the door on an
+    empty slot, which is how a failed load is reproduced honestly. Use EMPTY for
+    an unload, where the operator takes the cargo out.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string] $Sublot,
+    [Parameter(Mandatory)][ValidateSet('Scan', 'Operator')]
+    [string] $Phase,
+    [string] $Sublot,
+    [int] $SlotNo,
     [ValidateSet('OCCUPIED', 'EMPTY')]
     [string] $CargoState = 'OCCUPIED',
     [Parameter(Mandatory)][string] $ResultPath,
     [int] $SimulatorPort = 58006,
-    [int] $TimeoutSeconds = 240,
+    [int] $TimeoutSeconds = 180,
     [string] $ScanTextBoxAutomationId = 'ScanTextBox',
     [string] $SubmitButtonName = '手动提交'
 )
@@ -59,21 +77,16 @@ $startedAt = [DateTimeOffset]::UtcNow
 
 function Add-Step {
     param([string] $Name, [string] $Detail)
-    $steps.Add([pscustomobject]@{
-        at     = [DateTimeOffset]::UtcNow.ToString('o')
-        step   = $Name
-        detail = $Detail
-    })
+    $steps.Add([pscustomobject]@{ at = [DateTimeOffset]::UtcNow.ToString('o'); step = $Name; detail = $Detail })
 }
 
 function Write-Result {
     param([string] $Status, [string] $Message, $Extra)
     $payload = [ordered]@{
         schemaVersion = 1
+        phase         = $Phase
         status        = $Status
         message       = $Message
-        sublot        = $Sublot
-        cargoState    = $CargoState
         startedAt     = $startedAt.ToString('o')
         finishedAt    = [DateTimeOffset]::UtcNow.ToString('o')
         steps         = $steps
@@ -84,53 +97,29 @@ function Write-Result {
     $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ResultPath -Encoding utf8NoBOM
 }
 
-function Invoke-Simulator {
-    param([string] $Method, [string] $Path, [switch] $Mutating)
-
-    # Every mutating call carries three things the simulator refuses without, and
-    # it refuses them one at a time, so finding this out costs three round trips
-    # unless you send all three from the start: runId (its own, not ours),
-    # commandId, and expectedRevision. The revision is optimistic concurrency, so
-    # it is read fresh immediately before the call rather than cached.
-    $body = $null
-    if ($Mutating) {
-        $state = (Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1/snapshot" -TimeoutSec 20).Content |
-            ConvertFrom-Json
-        $body = @{
-            runId            = $state.runId
-            commandId        = [guid]::NewGuid().ToString('D')
-            expectedRevision = $state.revision
-        }
-    }
-    $args = @{
-        Uri                = "http://127.0.0.1:$SimulatorPort/api/v1$Path"
-        Method             = $Method
-        TimeoutSec         = 20
-        SkipHttpErrorCheck = $true
-    }
-    if ($body) { $args.Body = ($body | ConvertTo-Json -Compress); $args.ContentType = 'application/json' }
-    $r = Invoke-WebRequest @args
-    if ([int]$r.StatusCode -ge 400) { throw "$Method $Path -> HTTP $($r.StatusCode): $($r.Content)" }
-    return $r.Content | ConvertFrom-Json
+function Get-SimulatorSnapshot {
+    (Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1/snapshot" -TimeoutSec 20).Content |
+        ConvertFrom-Json
 }
 
-function Set-SlotCargo {
-    param([int] $SlotNo, [string] $CargoValue)
-    # NOT $state for the snapshot: PowerShell variable names are case-insensitive,
-    # so `$state = ...` overwrote the `$State` parameter and the whole snapshot
-    # object went out as the cargo state. The simulator said
-    # INVALID_CARGO_STATE and it was right.
-    $snapshot = (Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1/snapshot" -TimeoutSec 20).Content |
-        ConvertFrom-Json
+# Every mutating call carries three things the simulator refuses without, and it
+# refuses them one at a time: runId (its own, not ours), commandId, and
+# expectedRevision. The revision is optimistic concurrency, so it is read fresh
+# immediately before the call rather than cached.
+function Invoke-SimulatorCommand {
+    param([string] $Method, [string] $Path, [hashtable] $Extra)
+
+    $snapshot = Get-SimulatorSnapshot
     $body = @{
         runId            = $snapshot.runId
         commandId        = [guid]::NewGuid().ToString('D')
         expectedRevision = $snapshot.revision
-        state            = $CargoValue
-    } | ConvertTo-Json -Compress
-    $r = Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1/slots/$SlotNo/cargo" -Method PUT `
-        -Body $body -ContentType 'application/json' -TimeoutSec 20 -SkipHttpErrorCheck
-    if ([int]$r.StatusCode -ge 400) { throw "PUT /slots/$SlotNo/cargo -> HTTP $($r.StatusCode): $($r.Content)" }
+    }
+    if ($Extra) { foreach ($k in $Extra.Keys) { $body[$k] = $Extra[$k] } }
+    $r = Invoke-WebRequest -Uri "http://127.0.0.1:$SimulatorPort/api/v1$Path" -Method $Method `
+        -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json' `
+        -TimeoutSec 20 -SkipHttpErrorCheck
+    if ([int]$r.StatusCode -ge 400) { throw "$Method $Path -> HTTP $($r.StatusCode): $($r.Content)" }
 }
 
 function Wait-For {
@@ -145,106 +134,129 @@ function Wait-For {
 }
 
 try {
-    # --- attach to the client's window -----------------------------------
-    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    if ($Phase -eq 'Scan') {
+        if (-not $Sublot) { throw 'Scan phase needs -Sublot.' }
+        Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 
-    $client = Get-Process -Name 'SQCD.Agv.Wpf' -ErrorAction SilentlyContinue
-    if (-not $client) { throw 'The onboard client is not running on this vehicle.' }
-    if ($client.Count -gt 1) { throw "More than one onboard client is running ($($client.Count))." }
-    $processId = $client.Id
-    Add-Step 'attach' "client pid $processId"
+        $client = @(Get-Process -Name 'SQCD.Agv.Wpf' -ErrorAction SilentlyContinue)
+        if ($client.Count -ne 1) { throw "expected exactly one onboard client, found $($client.Count)" }
+        $processId = $client[0].Id
+        Add-Step 'attach' "client pid $processId"
 
-    # Attaching to *a* top-level window is not enough: when startup fails the
-    # only window is a modal MessageBox, and adopting it would make every later
-    # wait time out on a criterion that says nothing about the real error. The
-    # main window is identified by the control this script needs.
-    $window = $null
-    $seen = [System.Collections.Generic.HashSet[string]]::new()
-    $null = Wait-For 'the client window carrying the scan box' {
-        $condition = [System.Windows.Automation.PropertyCondition]::new(
-            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $processId)
-        $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
-            [System.Windows.Automation.TreeScope]::Children, $condition)
-        foreach ($w in $windows) {
-            $null = $seen.Add($w.Current.Name)
-            $box = $w.FindFirst(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                [System.Windows.Automation.PropertyCondition]::new(
-                    [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
-                    $ScanTextBoxAutomationId))
-            if ($box) { $script:window = $w; return $true }
+        # Attaching to *a* top-level window is not enough: when startup fails the
+        # only window is a modal MessageBox, and adopting it would make every
+        # later wait time out on a criterion that says nothing about the real
+        # error. The main window is identified by the control this script needs.
+        $seen = [System.Collections.Generic.HashSet[string]]::new()
+        $null = Wait-For 'the client window carrying the scan box' {
+            $condition = [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $processId)
+            $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+                [System.Windows.Automation.TreeScope]::Children, $condition)
+            foreach ($w in $windows) {
+                $null = $seen.Add($w.Current.Name)
+                $box = $w.FindFirst(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.PropertyCondition]::new(
+                        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+                        $ScanTextBoxAutomationId))
+                if ($box) { $script:window = $w; return $true }
+            }
+            return $false
         }
-        return $false
-    }
-    $window = $script:window
-    Add-Step 'window' "title '$($window.Current.Name)' (seen: $($seen -join ' / '))"
+        $window = $script:window
+        Add-Step 'window' "title '$($window.Current.Name)' (seen: $($seen -join ' / '))"
 
-    function Get-Element {
-        param([string] $By, [string] $Value)
-        $property = $By -eq 'AutomationId' `
-            ? [System.Windows.Automation.AutomationElement]::AutomationIdProperty `
-            : [System.Windows.Automation.AutomationElement]::NameProperty
-        return $window.FindFirst(
-            [System.Windows.Automation.TreeScope]::Descendants,
-            [System.Windows.Automation.PropertyCondition]::new($property, $Value))
-    }
+        function Get-Element {
+            param([string] $By, [string] $Value)
+            $property = $By -eq 'AutomationId' `
+                ? [System.Windows.Automation.AutomationElement]::AutomationIdProperty `
+                : [System.Windows.Automation.AutomationElement]::NameProperty
+            return $window.FindFirst(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                [System.Windows.Automation.PropertyCondition]::new($property, $Value))
+        }
 
-    # --- 1. the scan ------------------------------------------------------
-    # The text box is enabled exactly when WireToGateBusinessService.CanSubmitSublot
-    # is true, so this wait is what replaces "an operator noticed the prompt".
-    $null = Wait-For 'the server to ask for a sublot (scan box enabled)' {
-        $box = Get-Element 'AutomationId' $ScanTextBoxAutomationId
-        $box -and $box.Current.IsEnabled
-    }
-    Add-Step 'can-submit' 'scan box is enabled'
+        # The text box is enabled exactly when WireToGateBusinessService.CanSubmitSublot
+        # is true, so this wait replaces "an operator noticed the prompt".
+        $null = Wait-For 'the server to ask for a sublot (scan box enabled)' {
+            $box = Get-Element 'AutomationId' $ScanTextBoxAutomationId
+            $box -and $box.Current.IsEnabled
+        }
+        Add-Step 'can-submit' 'scan box is enabled'
 
-    $box = Get-Element 'AutomationId' $ScanTextBoxAutomationId
-    $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($Sublot)
-    Add-Step 'typed' $Sublot
+        (Get-Element 'AutomationId' $ScanTextBoxAutomationId).GetCurrentPattern(
+            [System.Windows.Automation.ValuePattern]::Pattern).SetValue($Sublot)
+        Add-Step 'typed' $Sublot
 
-    # The button additionally requires non-empty text, which is why setting and
-    # invoking are separate steps with a wait between them.
-    $null = Wait-For 'the submit button to become enabled' {
-        $b = Get-Element 'Name' $SubmitButtonName
-        $b -and $b.Current.IsEnabled
-    }
-    (Get-Element 'Name' $SubmitButtonName).GetCurrentPattern(
-        [System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-    Add-Step 'submitted' "clicked $SubmitButtonName"
+        # The button additionally requires non-empty text, which is why setting
+        # and invoking are separate steps with a wait between them.
+        $null = Wait-For 'the submit button to become enabled' {
+            $b = Get-Element 'Name' $SubmitButtonName
+            $b -and $b.Current.IsEnabled
+        }
+        (Get-Element 'Name' $SubmitButtonName).GetCurrentPattern(
+            [System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Add-Step 'submitted' "clicked $SubmitButtonName"
 
-    # --- 2. the operator's hands -----------------------------------------
-    # Which slot? Ask the simulator: the door the client opened is the fact.
-    # Exactly one door opens per operation.
-    $slotNo = Wait-For 'the client to open a slot door' {
-        $open = @((Invoke-Simulator GET '/snapshot').slots | Where-Object { $_.doorState -eq 'OPEN' })
-        $open.Count -eq 1 ? [int]$open[0].slotNo : $null
-    }
-    Add-Step 'door-open' "slot $slotNo"
-
-    if ($CargoState -eq 'OCCUPIED') {
-        Set-SlotCargo -SlotNo $slotNo -CargoValue 'OCCUPIED'
-        Add-Step 'cargo' "placed in slot $slotNo"
+        Write-Result 'OK' "Sublot $Sublot submitted." @{ sublot = $Sublot; clientPid = $processId }
     } else {
-        Add-Step 'cargo' "left slot $slotNo empty on purpose"
-    }
+        if ($SlotNo -lt 1) { throw 'Operator phase needs -SlotNo.' }
 
-    $null = Invoke-Simulator POST "/slots/$slotNo/close-door" -Mutating
-    Add-Step 'door-closed' "slot $slotNo"
+        # The caller only gets here after the server reported WAITING_OPERATOR,
+        # so the client has already watched the door open and settle. Confirming
+        # the door is open is a sanity check, not the trigger.
+        $slot = Wait-For "slot $SlotNo to be open" {
+            $s = @((Get-SimulatorSnapshot).slots | Where-Object { [int]$_.slotNo -eq $SlotNo })[0]
+            $s -and $s.doorState -eq 'OPEN' ? $s : $null
+        }
+        Add-Step 'door-open' "slot $SlotNo (cargo=$($slot.cargoState))"
 
-    # --- 3. let the client finish ----------------------------------------
-    # A failed load is not reported until the client runs out its own operator
-    # timeout (workflow.operationTimeoutMs, 120 s on this deployment), so this
-    # wait is deliberately longer than the happy path needs.
-    $settled = Wait-For 'the slot to come to rest (door closed, lock reported)' {
-        $slot = @((Invoke-Simulator GET '/snapshot').slots | Where-Object { [int]$_.slotNo -eq $slotNo })[0]
-        $slot.doorState -eq 'CLOSED' ? $slot : $null
-    }
-    Add-Step 'settled' "door=$($settled.doorState) cargo=$($settled.cargoState)"
+        Invoke-SimulatorCommand PUT "/slots/$SlotNo/cargo" @{ state = $CargoState }
 
-    Write-Result 'OK' "Sublot $Sublot submitted; slot $slotNo closed with cargo=$($settled.cargoState)." @{
-        slotNo     = $slotNo
-        finalSlot  = $settled
-        clientPid  = $processId
+        # The client reads the raw light curtain, not the simulator's logical
+        # cargoState, and the simulator models the feedback delay between them.
+        # Closing the door before the curtain settles leaves cargoState=OCCUPIED
+        # with lightCurtainRaw=0 -- the slot the client sees is empty, and the
+        # load comes back LOAD_RESULT_REQUIRES_RECOVERY. The runs driven by hand
+        # never hit this because each step was its own ssh round trip; the script
+        # issues both calls inside one session and is fast enough to race it.
+        # Do NOT test the raw level against a hard-coded 1. ObstructedActiveLevel
+        # is per-slot configuration, so the polarity is not a contract -- the
+        # first attempt asserted lightCurtainRaw == 1 for OCCUPIED and waited out
+        # its whole timeout on a slot that was correctly obstructed at 0. What is
+        # polarity-independent is the simulator's own consistency check: it
+        # reports LIGHT_CURTAIN_MISMATCH while CargoPresent and IsObstructed
+        # disagree, so the absence of that fault with the feedback settled is
+        # exactly "the curtain now reflects the cargo".
+        $settledCargo = Wait-For "the light curtain to catch up with cargo=$CargoState" {
+            $s = @((Get-SimulatorSnapshot).slots | Where-Object { [int]$_.slotNo -eq $SlotNo })[0]
+            ($s.cargoState -eq $CargoState -and -not $s.lightCurtainFeedbackPending -and
+                $s.faults -notcontains 'LIGHT_CURTAIN_MISMATCH') ? $s : $null
+        }
+        Add-Step 'cargo' "slot $SlotNo set to $CargoState (lightCurtainRaw=$($settledCargo.lightCurtainRaw), settled)"
+
+        Invoke-SimulatorCommand POST "/slots/$SlotNo/close-door" $null
+        Add-Step 'door-closed' "slot $SlotNo"
+
+        # Closed AND locked, with both feedbacks settled: that is the state the
+        # server checks for (lockState LOCKED, unlockOutputState RESET), so
+        # returning before it is reached would report success too early.
+        # Same reasoning as the curtain: LockedActiveLevel is configuration, so
+        # the settled feedback and the absence of LOCK_FEEDBACK_MISMATCH are what
+        # can be asserted. unlockOutputRaw is a real 0/1 -- it is the output this
+        # side drives, not a configurable input level.
+        $settled = Wait-For 'the door to read closed with the lock feedback settled' {
+            $s = @((Get-SimulatorSnapshot).slots | Where-Object { [int]$_.slotNo -eq $SlotNo })[0]
+            ($s.doorState -eq 'CLOSED' -and -not $s.lockFeedbackPending -and
+                $s.faults -notcontains 'LOCK_FEEDBACK_MISMATCH' -and
+                [int]$s.unlockOutputRaw -eq 0) ? $s : $null
+        }
+        Add-Step 'settled' "door=$($settled.doorState) cargo=$($settled.cargoState)"
+
+        Write-Result 'OK' "Slot $SlotNo closed with cargo=$($settled.cargoState)." @{
+            slotNo = $SlotNo; finalSlot = $settled
+        }
     }
 } catch {
     Add-Step 'failed' $_.Exception.Message
