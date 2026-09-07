@@ -49,8 +49,10 @@
     Which vehicle. One alias per car; the site file is named after it.
 
 .PARAMETER Force
-    Proceed even though the onboard client is currently running. Refuses by
-    default: a running client means the vehicle may be mid-journey.
+    Stop the onboard client and deploy over it. Refuses by default: a running
+    client means the vehicle may be mid-journey. The stop happens after the
+    -WhatIf gate and before the payload is copied, so a dry run never touches
+    the vehicle and a client that will not die costs a second, not 80 MB.
 
 .PARAMETER WhatIf
     Stage, verify and render the configuration locally, then stop before the
@@ -165,11 +167,19 @@ Write-Step 'Secrets loaded from the DPAPI store'
 # A running client means the vehicle may be mid-journey. Replacing its binaries
 # underneath it is the one failure mode this whole script exists to avoid.
 $running = Invoke-Ssh -Quiet @("if (Get-Process SQCD.Agv.Wpf -ErrorAction SilentlyContinue) { 'RUNNING' } else { 'STOPPED' }")
+$stopBeforePlacing = $false
 if ($running -contains 'RUNNING') {
     if (-not $Force) {
         throw "SQCD.Agv.Wpf is running on $SshAlias. Stop it from the vehicle's own desktop session, then rerun. Use -Force only if you know the vehicle is idle."
     }
-    Write-Warning "SQCD.Agv.Wpf is running on $SshAlias and -Force was given."
+    # -Force used to skip this throw and nothing else, which was worse than
+    # refusing outright: the running client keeps handles on its own binaries,
+    # so the deployment ran all the way to `Move-Item $root $previous` and died
+    # there with "the process cannot access the file", leaving the payload in
+    # $root.incoming and no .previous. Stopping the client is what -Force has to
+    # mean if it is to mean anything.
+    $stopBeforePlacing = $true
+    Write-Warning "SQCD.Agv.Wpf is running on $SshAlias and -Force was given; it will be stopped before the payload is placed."
 }
 Write-Step "Onboard client state on ${SshAlias}: $($running -join ' ')"
 
@@ -363,6 +373,23 @@ try {
         Write-Step 'WhatIf: stopping before the vehicle is touched.'
         Write-Host (Get-Content -Raw -LiteralPath $renderedPath)
         return
+    }
+
+    # --------------------------------------------------------- vehicle stop ---
+
+    # Deliberately after the ShouldProcess gate: -WhatIf must not stop a client
+    # on a real vehicle. And deliberately before the payload copy, so a client
+    # that refuses to die costs a second rather than 80 MB.
+    #
+    # Client only -- the slot simulator is not this script's to touch. Same
+    # shape as 10-start-onboard-stack.ps1 -Stop, including its one weakness:
+    # CloseMainWindow needs MainWindowHandle, and a session-0 ssh session cannot
+    # see a window on the vehicle's session-1 desktop, so over this channel it
+    # always degenerates to the kill after the timeout.
+    if ($stopBeforePlacing) {
+        Write-Step "Stopping SQCD.Agv.Wpf on $SshAlias before it is replaced"
+        Invoke-Ssh -Quiet @("Get-Process -Name SQCD.Agv.Wpf -ErrorAction SilentlyContinue | ForEach-Object { `$_.CloseMainWindow() | Out-Null; if (-not `$_.WaitForExit(10000)) { `$_.Kill(); `$_.WaitForExit(10000) | Out-Null } }; if (Get-Process -Name SQCD.Agv.Wpf -ErrorAction SilentlyContinue) { throw 'SQCD.Agv.Wpf is still running on the vehicle.' }") | Out-Null
+        Write-Step 'Onboard client stopped'
     }
 
     # ------------------------------------------------------------ transfer ---
