@@ -115,11 +115,28 @@ function Read-Rows {
 # violation that had not happened. What must not appear is a leg belonging to
 # some OTHER demand, or another accepted demand at all. The leg count is carried
 # for the report, never asserted on.
+# ASSIGN, then iterate. Read-Rows ends in `return , $rows` so that `$row[0][0]`
+# works at the call sites below, and that same comma makes a PIPELINE see ONE
+# object -- the whole row set -- instead of one object per row. Written as
+# `Read-Rows ... | ForEach-Object { $_[0] }` the loop therefore ran once with
+# `$_` bound to the entire array, and `$_[0]` yielded the FIRST ROW rather than
+# the first column of each row. Every list here silently had exactly one element
+# no matter how many rows the table held.
+#
+# It only misreported once a table held more than one row, which is why it
+# survived two real journeys: with a single AcceptedDemands row the answer is
+# accidentally right. On 2026-09-08, with two demands on the server, the latch
+# ledger read 1 accepted / 1 leg against the true 2 and 3; the demand that fell
+# out of the set then looked like one the runtime had just taken, and a fully
+# successful journey was reported as a lost race and exited 1.
 function Read-Ledger {
+    $accepted = Read-Rows 'SELECT DemandId FROM AcceptedDemands ORDER BY DemandId'
+    $intentDemands = Read-Rows 'SELECT DISTINCT DemandId FROM OrderIntents ORDER BY DemandId'
+    $intentLegs = Read-Rows 'SELECT MovementLegId FROM OrderIntents'
     [pscustomobject]@{
-        acceptedDemandIds    = @(Read-Rows 'SELECT DemandId FROM AcceptedDemands ORDER BY DemandId' | ForEach-Object { $_[0] })
-        orderIntentDemandIds = @(Read-Rows 'SELECT DISTINCT DemandId FROM OrderIntents ORDER BY DemandId' | ForEach-Object { $_[0] })
-        orderIntentLegCount  = @(Read-Rows 'SELECT MovementLegId FROM OrderIntents').Count
+        acceptedDemandIds    = @($accepted | ForEach-Object { $_[0] })
+        orderIntentDemandIds = @($intentDemands | ForEach-Object { $_[0] })
+        orderIntentLegCount  = $intentLegs.Count
     }
 }
 
