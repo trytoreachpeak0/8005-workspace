@@ -20,12 +20,14 @@
 - **这台服务器上跑着一整套在用的 AGV 服务**（`AGV.Web` 8081、nginx 9093、Redis、
   SQL Server 1433，以及 `MesIngest` 与 `8005 AGV ControlServer`）。任何全局性
   改动——防火墙、重启、装角色——都会影响它们，动手前先确认。
-- **`AgvAmhs` 与 `RabbitMQ` 已于 2026-09-08 停止并设为 `Disabled`**（用户确认两者
-  不在生产状态）。停它们不是因为碍事：`AgvAmhs` 向 RabbitMQ 泄漏 AMQP 连接，六天
-  攒到 10330 条，吃掉本机 64% 的临时端口，把所有经 WinNAT 出去的客户机流量拖垮了
-  ——详见第 8 节与 `8005-agv-control-server#7`。要重新启用，脚本是
-  `../scripts/17-disable-amhs-stack.ps1 -Revert`，但**先让写 `AgvAmhs` 的人修掉那个
-  泄漏**，否则三四天后端口池又会见底，届时坏的不只是 CI。
+- **`AgvAmhs` 与 `RabbitMQ` 已于 2026-09-08 停止并设为 `Disabled`，不要恢复。**
+  `AgvAmhs` 是同事写的玩具程序，误留在这台服务器上一直没关，**从来不属于生产栈**。
+  它向 RabbitMQ 泄漏 AMQP 连接，六天攒到 10330 条，吃掉本机 64% 的临时端口，把所有
+  经 WinNAT 出去的客户机流量拖垮了——详见第 8 节与 `8005-agv-control-server#7`。
+  泄漏不用修，关掉就是终局。`RabbitMQ` 是跟着它一起停的；停完 `AGVWebApi`、
+  `MesIngest`、`8005 AGV ControlServer` 与 SQL Server 一切正常，说明没有别的东西在
+  用它。将来真有东西需要消息队列，**单独启 `RabbitMQ` 即可，别把 `AgvAmhs` 一起启
+  回来**。`../scripts/17-disable-amhs-stack.ps1 -Revert` 留着只是退路，不是计划。
 - `HistoryResetAcknowledgement` 和 `StoragePressurePause` 的恢复**不允许**通过这条
   通道执行，必须在服务器本地控制台做（README 第 6 节）。
 

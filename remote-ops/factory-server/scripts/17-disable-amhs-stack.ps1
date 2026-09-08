@@ -5,9 +5,10 @@
     server. Runs on the server.
 
 .DESCRIPTION
-    These two services are not in production use (confirmed by Zhengyu Shao,
-    2026-09-08) and AgvAmhs leaks AMQP connections into RabbitMQ badly enough to
-    break everything else on the host.
+    AgvAmhs is a colleague's toy program, left running on this server by accident
+    and never turned off (confirmed by Zhengyu Shao, 2026-09-08). It was never
+    part of the production stack, so the leak below is not a defect anyone will
+    fix — stopping it for good is the whole answer. RabbitMQ goes with it.
 
     Measured on 2026-09-08, after six days of uptime: AgvAmhs held 10330 open
     connections to RabbitMQ on port 5672 — one per leaked channel, none closed —
@@ -27,8 +28,10 @@
     and SQL Server all keep running; neither service being disabled here has any
     dependent services, so nothing is stopped by association.
 
-    -Revert puts both back to Automatic and starts them. Use it if these turn
-    out to be needed after all — but expect the leak to come back with them.
+    -Revert puts both back to Automatic and starts them. It is a way back, not a
+    plan: AgvAmhs stays off. Nothing on this host noticed RabbitMQ leaving, so if
+    something later does need a broker, start RabbitMQ on its own rather than
+    reverting both.
 
 .PARAMETER Revert
     Undo: set both services back to Automatic and start them.

@@ -263,11 +263,12 @@ CI 只是碰巧最先撞上：它过 NAT，比主机自己更早分不到端口�
 | ICMP（两边） | 100% | 100% |
 | 主机临时端口占用 | 10968 / 16384（67%） | 152 / 16384（1%） |
 
-`AgvAmhs` 与 `RabbitMQ` 已于 2026-09-08 **停止并设为 Disabled**（用户确认两者不在生产
-状态），脚本是 `remote-ops/factory-server/scripts/17-disable-amhs-stack.ps1`，带
-`-Revert`。`AGVWebApi`、`MesIngest`、`8005 AGV ControlServer`、SQL Server 都没动。
-**这个泄漏本身没修**，只是把漏水的服务关了；哪天要重新启用它，先让写它的人修连接泄漏，
-否则三四天后端口池又会见底，那时坏的就不只是 CI。
+`AgvAmhs` 与 `RabbitMQ` 已于 2026-09-08 **停止并设为 Disabled，不要恢复**。`AgvAmhs`
+是同事写的玩具程序，误留在这台服务器上一直没关，**从来不属于生产栈**——所以泄漏不用
+修，关掉就是终局。脚本是 `remote-ops/factory-server/scripts/17-disable-amhs-stack.ps1`，
+`-Revert` 留着只是退路。`RabbitMQ` 是跟着它一起停的；`AGVWebApi`、`MesIngest`、
+`8005 AGV ControlServer`、SQL Server 都没动，停完一切正常，说明没有别的东西在用那个
+消息队列。
 
 **修好之后代理就不需要了。**客户机现在跑 `-Mode Direct`，`HTTP_PROXY`/`NO_PROXY`/git 的
 system proxy 全部清空——**CI 与控制端笔记本再无关系**。唯一定义处是
