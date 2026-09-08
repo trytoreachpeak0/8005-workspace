@@ -162,7 +162,12 @@ if ($io -and $io.host -ne '127.0.0.1') {
     } catch {
         $ioReachable = $false
     } finally {
-        $client?.Dispose()
+        # NOT $client?.Dispose(): PowerShell allows ? in a variable name, so that
+        # parses as ${client?} -- an undefined variable -- and throws instead of
+        # disposing. The throw lands in stderr, which the caller folds into $raw
+        # and then filters for lines starting with {, so it was invisible while
+        # every real-module probe leaked a socket.
+        if ($client) { $client.Dispose() }
     }
 }
 [pscustomobject]@{
