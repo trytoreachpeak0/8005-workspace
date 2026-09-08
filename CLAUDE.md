@@ -66,11 +66,19 @@ development transferred — taking over the code does not by itself move a gate 
 and the user then decided that it does move. We run that gate and fill in that
 column now; the board no longer waits on Kun Wang for it.
 
-**That does not change who signs a release.** `docs/release-governance.md` still
-requires two distinct product owners in the approval attestation, and G1 checks
-`size===2` for real. Kun Wang still owns both repositories and co-maintains the
-protocol, so he is still the second signature. Running both G2 gates ourselves is
-not a path to signing alone.
+**Release signing moved too, on 2026-09-08.** It had not: this paragraph used to
+say that taking over both G2 gates was "not a path to signing alone", and that
+Kun Wang remained the mandatory second signature. The user then took over his
+project outright, which left the rule demanding a signature nobody could give —
+and a rule like that does not hold the line, it just gets worked around. So the
+rule changed rather than being bypassed: `docs/release-governance.md`, the
+attestation JSON Schema and `tools/g1-validate.mjs` (`size===2` → `size===1`)
+were all changed together, and `protocol-v0.2.0` was released under the new one.
+
+**Releases now carry exactly one product owner.** Two things did not move, and
+they are the point of the attestation: **AI and CI still cannot approve**, and it
+still records a named real person deciding at a stated time. "One signature"
+means the user signs — never that an agent may.
 
 ### Notify-after-change
 
@@ -85,10 +93,9 @@ state three things — what changed, which `W2G-IS-*` slices it touches, and
 whether his `ONBOARD_HMI_G2` evidence is now void. Do this in the same task as
 the push, not later.
 
-Formal releases are unchanged: `docs/release-governance.md` still requires two
-distinct product owners in the approval attestation before an immutable tag, and
-AI and CI still cannot approve. That governs tagging a `ProtocolRelease`, not
-ordinary commits.
+Formal releases need an approval attestation before an immutable tag — **one
+product owner since 2026-09-08**, two before that. **AI and CI still cannot
+approve.** That governs tagging a `ProtocolRelease`, not ordinary commits.
 
 ### Scope
 
@@ -148,7 +155,8 @@ agent 必须遵守的部分。
 协作单位是 `repos/8005-agv-protocol/integration-slices/index.json` 里的 integration slice
 （`W2G-IS-00` 到 `W2G-IS-07`），每个切片的 `gates` 就是分工。跨仓库反馈必须带可复现的
 门禁证据。protocol 由 Zhengyu Shao 单独决定内容，但**每次推送都要开 issue @`SocialKKKK`
-通知**（见上面 Notify-after-change）。发布打 tag 仍需双人签名，AI 和 CI 不能批准。
+通知**（见上面 Notify-after-change）。发布打 tag 需 **2026-09-08 起改为单人签名**（此前
+双人），**AI 和 CI 仍然不能批准**——「单人」指用户本人签，不是 agent 可以签。
 协议改动要攒批次——补丁发布会作废两边受影响的 G1/G2/G3 证据。
 
 **agent 指令文件用英文**（各仓 `CLAUDE.md`、`.claude/` 下的规则与 skill、
