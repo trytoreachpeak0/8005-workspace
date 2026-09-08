@@ -49,11 +49,27 @@
     moves the vehicle is started. Useful when the person at the vehicle wants
     to open the client themselves.
 
+.PARAMETER NoSimulator
+    Start only the client, for a vehicle whose IO points at the real Modbus
+    module (09-switch-io-module.ps1 -RealModule). The ORDER constraint above is
+    about the simulator being the client's IO plane; when it is not, starting it
+    is noise that still holds 1502 and 58006 and makes "which one is the real IO
+    source" a question during troubleshooting.
+
+    The two switches contradict each other and cannot be combined. Both are
+    checked against the deployed ioModule.host rather than trusted: -NoSimulator
+    against a loopback IO target would start a client with nothing to talk to,
+    which is the RecoveryRequired trap the ORDER note describes, so it is
+    refused rather than attempted.
+
 .EXAMPLE
     ./10-start-onboard-stack.ps1
 
 .EXAMPLE
     ./10-start-onboard-stack.ps1 -SimulatorOnly
+
+.EXAMPLE
+    ./10-start-onboard-stack.ps1 -NoSimulator
 
 .EXAMPLE
     ./10-start-onboard-stack.ps1 -Stop
@@ -64,12 +80,18 @@ param(
     [switch] $Stop,
     [switch] $Force,
     [switch] $SimulatorOnly,
+    [switch] $NoSimulator,
     [string] $OnboardExe = 'C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe',
     [string] $SimulatorExe = 'C:\8005\SlotsSimulator\SQCD_8005AGV_Simulator.exe',
+    [string] $ConfigPath = 'C:\8005\OnboardHmi\appsettings.json',
     [int] $TimeoutSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($SimulatorOnly -and $NoSimulator) {
+    throw '-SimulatorOnly and -NoSimulator ask for opposite halves of the stack. Pick one.'
+}
 
 function Write-Step { param([string] $Message) Write-Host "  $Message" -ForegroundColor Cyan }
 
@@ -95,6 +117,13 @@ function Get-StackState {
 foreach (`$p in 1502, 58006) {
     `$ports["`$p"] = [bool](Get-NetTCPConnection -State Listen -LocalPort `$p -ErrorAction SilentlyContinue)
 }
+# Read rather than assume which IO plane this deployment is pointed at. A
+# missing file is reported as an absent target instead of throwing: -Stop has
+# to work on a vehicle that was never deployed to.
+`$io = `$null
+if (Test-Path -LiteralPath '$ConfigPath') {
+    `$io = (Get-Content -LiteralPath '$ConfigPath' -Raw | ConvertFrom-Json).ioModule
+}
 # Project the ids through the pipeline, not with `@(`$procs.Id)`. On an empty
 # result that member access yields `$null and `@(`$null)` is a ONE-element array
 # holding it, so an idle vehicle reported one client and one simulator and the
@@ -103,6 +132,8 @@ foreach (`$p in 1502, 58006) {
     OnboardPids   = @(`$onboard | ForEach-Object { `$_.Id })
     SimulatorPids = @(`$simulator | ForEach-Object { `$_.Id })
     Ports         = `$ports
+    IoHost        = `$io.host
+    IoPort        = `$io.port
 } | ConvertTo-Json -Compress
 "@
     return $json | ConvertFrom-Json
@@ -186,10 +217,39 @@ if (-not $Force -and $state.OnboardPids.Count) {
         'That may mean the vehicle is mid-journey. Use -Stop, or -Force if you are certain.')
 }
 
-$what = if ($SimulatorOnly) { 'the slot simulator' } else { 'the slot simulator and the onboard client' }
+# Which IO plane the deployment is pointed at decides whether the simulator is
+# this client's IO source or an idle process holding two ports. The switch says
+# what the caller intends; this says what the vehicle is actually configured
+# for, and a disagreement is worth stopping on rather than starting into.
+$ioIsLoopback = $state.IoHost -eq '127.0.0.1'
+if ($null -eq $state.IoHost) {
+    Write-Step "No $ConfigPath on this vehicle; the IO target could not be read"
+} else {
+    Write-Step "Onboard IO target: $($state.IoHost):$($state.IoPort)$(if ($ioIsLoopback) { ' (simulator)' } else { ' (real module)' })"
+}
+
+if ($NoSimulator -and $ioIsLoopback) {
+    throw ("Onboard IO points at $($state.IoHost):$($state.IoPort), which is the simulator. " +
+        'Starting the client without it fails the startup IO snapshot and the session never leaves ' +
+        'RecoveryRequired. Run 09-switch-io-module.ps1 -RealModule first, or drop -NoSimulator.')
+}
+if (-not $NoSimulator -and -not $SimulatorOnly -and $null -ne $state.IoHost -and -not $ioIsLoopback) {
+    Write-Step 'IO is on the real module; the simulator would just hold 1502 and 58006. Consider -NoSimulator.'
+}
+
+$what = if ($SimulatorOnly) { 'the slot simulator' } elseif ($NoSimulator) { 'the onboard client' } else { 'the slot simulator and the onboard client' }
 if (-not $PSCmdlet.ShouldProcess($SshAlias, "Start $what in the interactive desktop session")) { return }
 
-if ($state.SimulatorPids.Count -eq 0) {
+if ($NoSimulator) {
+    Write-Step 'Skipping the simulator; the client talks to the real module'
+    # Not stopped here. Stopping something the caller did not ask about is how a
+    # script becomes unpredictable -- but a simulator still up while the client
+    # reads a different IO plane is worth saying out loud, because its snapshot
+    # will look plausible and mean nothing.
+    if ($state.SimulatorPids.Count) {
+        Write-Step "Note: the simulator is still running (PID $($state.SimulatorPids -join ', ')) and is NOT this client's IO source."
+    }
+} elseif ($state.SimulatorPids.Count -eq 0) {
     Write-Step 'Starting the slot IO simulator'
     Start-InInteractiveSession -Path $SimulatorExe -Label 'Simulator'
     Wait-For 'the simulator to listen on 1502 and 58006' {
@@ -212,6 +272,6 @@ Wait-For 'the onboard client process to appear' { (Get-StackState).OnboardPids.C
 
 $final = Get-StackState
 Write-Step "Onboard client PID(s): $($final.OnboardPids -join ', ')"
-Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Both up on $SshAlias." -ForegroundColor Green
+Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $(if ($NoSimulator) { 'Client up' } else { 'Both up' }) on $SshAlias." -ForegroundColor Green
 Write-Host '  The session is not Ready until the vehicle-safety projection returns' -ForegroundColor Yellow
 Write-Host '  motionState=STOPPED with fresh evidence. That judgement is still a person''s.' -ForegroundColor Yellow
