@@ -409,6 +409,12 @@ CI 小节，以及 `8005-agv-control-server#7`。
 HTTPS 请求加 45 秒超时——只测 TCP connect 会得出相反结论，因为 connect 包小，TLS 那
 几个大包才会撞上端口分配失败。
 
+**git 一律走 HTTPS，没有一处用 git over SSH。**八个克隆、工作区仓、`gh` 的
+`git_protocol`、所有 `actions/checkout` 全是 HTTPS，三台机器上都没有
+`url.*.insteadOf` 改写（2026-09-08 逐台核过）。表里 `github.com:22` 通只是一条网络
+事实，不是任何东西走的路——**保持这样**：SSH 检出要给每个仓各配一把 deploy key，
+而它唯一的好处（把控制端笔记本从 CI 里拿掉）现在已经由全直连实现了。
+
 配置的唯一定义处是 `../scripts/09-configure-guest-proxy.ps1`（默认 `-Mode Direct`，
 `-Mode Proxy` 留作后备），**改完必须重启 runner 服务才生效**。
 

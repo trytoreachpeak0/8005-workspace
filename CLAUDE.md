@@ -577,16 +577,30 @@ environment gate; the 8 GB is static because dynamic memory had been assigning
 it 2.5 GB, which starves a restore/build/test cycle. Reproduce both with
 `remote-ops/factory-server/scripts/06-configure-golden-renderer-vm.ps1`.
 
-**The guest cannot reach `github.com` over HTTPS**, and neither can the factory
-server itself — verified 2026-09-02, `github.com:443` does not complete a TCP
-handshake from either. What does work: `github.com:22` (so git over SSH),
-`api.github.com`, `pipelines.actions.githubusercontent.com`,
-`results-receiver.actions.githubusercontent.com` and NuGet, all direct. A runner
-therefore registers and reports fine, but must check out over SSH rather than
-HTTPS. One-off installer downloads are staged from the control machine with
-`scp`, or routed through the control machine's proxy at `172.19.162.241:7890`
-when it is running — that address is the control machine's Wi-Fi interface and
-is DHCP-assigned, so never write it into anything that must keep working.
+**The guest reaches GitHub directly over HTTPS**, `github.com` included —
+12/12 at a median 400 ms, measured 2026-09-08. So does the factory server. No
+proxy is configured anywhere in the CI path.
+
+**Everything here uses git over HTTPS. Nothing uses git over SSH** — all eight
+clones, the workspace repository, `gh`'s `git_protocol` and every
+`actions/checkout` are HTTPS, and there is no `url.*.insteadOf` rewrite on any
+of the three machines. `github.com:22` happens to be reachable; that is a fact
+about the network, not a path anything takes. Keep it that way: an SSH checkout
+would need a deploy key per repository, and it buys nothing now.
+
+This paragraph said the opposite until 2026-09-08, and the correction is worth
+keeping. It recorded `github.com:443` as unreachable from both machines and told
+you to check out over SSH. **The measurement was real; the conclusion was
+wrong.** What was actually failing is WinNAT on the factory server, starved of
+ephemeral ports by a connection leak in `AgvAmhs` — see the CI section above.
+Stopping that service made `github.com` directly reachable from both machines in
+the same instant, and the proxy came out of the CI path entirely.
+
+One-off installer downloads can still be staged from the control machine with
+`scp` when that is more convenient than a direct download. The control machine's
+proxy at `172.19.162.241:7890` is no longer in the CI path at all; if it is ever
+needed again, note that its address is **statically configured**, not
+DHCP-assigned as this file used to claim.
 
 Do not use `192.168.200.1` to mean the control machine from inside the guest:
 the control machine has an interface with that same address, and it is also the

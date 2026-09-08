@@ -8,18 +8,19 @@
     falls back to a REST tarball without it and git-dependent steps then fail in
     confusing ways.
 
-    **The guest cannot reach github.com.** Verified 2026-09-02 from both the
-    guest and the factory server itself: github.com:443 does not complete a TCP
-    handshake, while api.github.com:443 and github.com:22 do. So the release
-    download this script would otherwise perform hangs. Stage the installer from
-    the control machine instead and pass -InstallerPath:
+    The guest reaches github.com directly, so the download this script performs
+    works as written. That was not true between 2026-09-02 and 2026-09-08, and
+    this comment used to say so: github.com:443 appeared unreachable from both
+    the guest and the factory server. The cause turned out to be WinNAT on the
+    host running out of ephemeral ports, not anything about GitHub — see
+    8005-agv-control-server issue #7.
+
+    -InstallerPath is kept for a guest that really is offline. Stage it with:
 
         curl -sL -o Git-2.55.0.5-64-bit.exe \
           https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe
         scp Git-2.55.0.5-64-bit.exe vm01:C:/agv-ops/downloads/
         ssh vm01 "pwsh -NoProfile -File C:\agv-ops\08-install-git-guest.ps1 -InstallerPath C:\agv-ops\downloads\Git-2.55.0.5-64-bit.exe"
-
-    The direct-download path is kept for a future guest that does have reach.
 
     The version is pinned rather than "latest" so the CI machine and the control
     machine resolve the same git. CRLFOption is pinned for a sharper reason: the
