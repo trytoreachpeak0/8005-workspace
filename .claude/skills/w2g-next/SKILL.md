@@ -81,9 +81,12 @@ that turns a decision back into a question.
    slice. It is no longer a reason to go find something else to do.
 
 6. **Both sides' G2 are green on a slice and `G3` has not run.**
-   Propose scheduling G3. It needs both people present and is the most expensive
-   resource on the project — say so, and name the exact runner and evidence
-   directory.
+   Propose running G3. **One person runs it since 2026-09-08**: all three runners
+   are loopback and unattended, needing neither a real vehicle nor a second
+   machine — "both people present" was always governance, not a technical
+   constraint, and nobody was left to satisfy it. It is still the most expensive
+   gate on the project, so say what it costs, and name the exact runner and
+   evidence directory.
 
 7. **All eight slices are green across all four gates.**
    Cut a release candidate: `.\scripts\New-WireToGateReleaseCandidate.ps1`.
