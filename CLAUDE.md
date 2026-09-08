@@ -86,12 +86,18 @@ means the user signs — never that an agent may.
 Wang's approval is **not** required in advance (changed 2026-09-02; the earlier
 dual-approval gate no longer applies).
 
-What replaces it: **every pushed change must be announced to Kun Wang**, because
-the protocol is the contract his side builds against and a release invalidates
-his gate evidence. Open an issue in `8005-agv-protocol` that `@SocialKKKK`, and
-state three things — what changed, which `W2G-IS-*` slices it touches, and
-whether his `ONBOARD_HMI_G2` evidence is now void. Do this in the same task as
-the push, not later.
+**There is no notify-after-change duty any more, as of 2026-09-08.** Until then
+every pushed change had to be announced to Kun Wang in an issue that
+`@SocialKKKK`, because the protocol was the contract his side built against and a
+release voided his gate evidence. The user took over his project outright, so
+neither premise holds: no other side builds against this contract, and there is
+no gate evidence of his left to void. Do not open announcement issues, and do not
+`@SocialKKKK` anything.
+
+What did not change is why that rule existed. **A protocol push still voids gate
+evidence — ours.** Say which `W2G-IS-*` slices a change touches and which evidence
+it invalidates, in the commit message and in the slice board. The audience moved;
+the accounting did not.
 
 Formal releases need an approval attestation before an immutable tag — **one
 product owner since 2026-09-08**, two before that. **AI and CI still cannot
@@ -154,10 +160,11 @@ agent 必须遵守的部分。
 
 协作单位是 `repos/8005-agv-protocol/integration-slices/index.json` 里的 integration slice
 （`W2G-IS-00` 到 `W2G-IS-07`），每个切片的 `gates` 就是分工。跨仓库反馈必须带可复现的
-门禁证据。protocol 由 Zhengyu Shao 单独决定内容，但**每次推送都要开 issue @`SocialKKKK`
-通知**（见上面 Notify-after-change）。发布打 tag 需 **2026-09-08 起改为单人签名**（此前
-双人），**AI 和 CI 仍然不能批准**——「单人」指用户本人签，不是 agent 可以签。
-协议改动要攒批次——补丁发布会作废两边受影响的 G1/G2/G3 证据。
+门禁证据。protocol 由 Zhengyu Shao 单独决定内容，**推送后不再需要通知任何人**
+（2026-09-08 起，此前每次推送都要开 issue @`SocialKKKK`，见上面 Notify-after-change）。
+发布打 tag 同日起**改为单人签名**（此前双人），**AI 和 CI 仍然不能批准**——「单人」指
+用户本人签，不是 agent 可以签。协议改动仍然要攒批次——发布会作废受影响的 G1/G2/G3
+证据，现在作废的是我方自己的。
 
 **agent 指令文件用英文**（各仓 `CLAUDE.md`、`.claude/` 下的规则与 skill、
 `docs/agents/`）；**人看的东西用中文**（README、文档正文、`docs/defects/`、证据
