@@ -3,7 +3,7 @@
 <#
   setup.ps1 - Restore the workspace on a new machine.
 
-  Clones any of the seven component repositories that are missing into repos/,
+  Clones any of the eight component repositories that are missing into repos/,
   at the working branch listed in repos.md. Existing clones are left untouched —
   this script never pulls, resets, or checks out over your work.
 
@@ -24,6 +24,7 @@ $repos = @(
     @{ Dir = '8005-agv-onboard-hmi';    Branch = 'OnboardHmi_MVP' }
     @{ Dir = 'slots-simulator';         Branch = 'main' }
     @{ Dir = '8005-agv-protocol';       Branch = 'main' }
+    @{ Dir = '8005-test-lab';           Branch = 'main' }
 )
 
 foreach ($r in $repos) {

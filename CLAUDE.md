@@ -23,7 +23,7 @@ wherever it sits on disk.
 | `riot-sdk` | Writable — RIoT SDK, C# and Python |
 | `8005-agv-onboard-hmi` | Writable **on `w2g/*` branches only** — never `OnboardHmi_MVP` |
 | `slots-simulator` | Writable **on `w2g/*` branches only** — never `main` |
-| `8005-agv-protocol` | Writable — **notify Kun Wang after every change** |
+| `8005-agv-protocol` | Writable — no announcement duty since 2026-09-08 |
 | `8005-test-lab` | Writable — agent-first multi-machine test lab; decisions only until its `wayfinder:map` issue clears |
 
 ### Branch-scoped write
@@ -548,10 +548,10 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 
 ## Workspace layout
 
-This repository tracks only workspace-level files; the seven component clones
+This repository tracks only workspace-level files; the eight component clones
 and the `w2g-rc-*` build output are gitignored.
 
-**The seven clones live under `repos/`** (moved there on 2026-09-04 to keep the
+**The eight clones live under `repos/`** (moved there on 2026-09-04 to keep the
 root readable — previously they sat directly in it). They stay siblings of each
 other, so every cross-repository relative path is unchanged; what moved by one
 level is the path from the workspace root, e.g. `repos/8005-agv-protocol/integration-slices/index.json`.
@@ -564,9 +564,9 @@ Its history was rewritten to purge `.artifacts/`, so every commit hash changed
 and any old clone must be re-cloned. The pre-split mirror sits outside the
 workspace at `C:\Users\szy\8005-restructure-backup`. See `repos.md`.
 
-- `repos/` — the seven component clones, one directory per repository. Not
+- `repos/` — the eight component clones, one directory per repository. Not
   tracked here; each is its own clone on its own remote.
-- `repos.md` — the seven repositories, their working branches, and who owns each.
+- `repos.md` — the eight repositories, their working branches, and who owns each.
   It also records the 2026-09-02 split of `8005---AGV`.
 - `setup.ps1` — clones whatever is missing into `repos/` on a new machine. Never
   pulls or resets an existing clone.

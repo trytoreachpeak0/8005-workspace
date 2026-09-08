@@ -1,6 +1,6 @@
 # Component repositories
 
-All seven are cloned under `repos/` in this workspace and tracked on their own
+All eight are cloned under `repos/` in this workspace and tracked on their own
 remotes. This repository never contains their content — `setup.ps1` restores
 them. Write authority is defined in `CLAUDE.md`; the "Owner" column below is
 why, not a second policy.
@@ -19,16 +19,26 @@ repositories are unchanged.
 | `riot-sdk` | `riot-sdk` | `main` | mine | writable |
 | `8005-agv-onboard-hmi` | `8005-agv-onboard-hmi` | `OnboardHmi_MVP` | colleague | `w2g/*` branches only |
 | `slots-simulator` | `slots-simulator` | `main` | colleague | `w2g/*` branches only |
-| `8005-agv-protocol` | `8005-agv-protocol` | `main` | shared | writable, notify Kun Wang |
+| `8005-agv-protocol` | `8005-agv-protocol` | `main` | mine | writable — the announcement duty ended 2026-09-08 |
+| `8005-test-lab` | `8005-test-lab` | `main` | mine | writable — the multi-machine test lab, created 2026-09-04; decisions only until its wayfinder map clears |
 
 The naming conventions in `file-naming-convention/` govern this workspace root
-and the four repositories marked "mine". The other three keep their own habits.
+and four repositories by name — `8005-agv-program`, `8005-agv-control-server`,
+`8005-mes-ingest`, `riot-sdk`. That list is the document's own scope statement,
+so it did not grow when `8005-test-lab` and `8005-agv-protocol` joined the
+"mine" column; widening it is a decision, not a formality. Everything else keeps
+its own habits.
 
 "Owner" and "Agent access" stopped agreeing on 2026-09-04. The two repositories
 owned by the colleague are still his — he accepts or declines what lands in them
 — but the development work on both moved here. We commit on `w2g/*` branches and
 deliver by pull request; their working branches (`OnboardHmi_MVP`, `main`) stay
 untouched by us. `CLAUDE.md` has the exact rule.
+
+`8005-agv-protocol` moved from "shared" to "mine" on 2026-09-08, when the user
+took over the colleague's project. Content decisions were already his alone
+since 2026-09-02; what ended that day is the duty to announce every push, and
+the two-owner release signature. See `CLAUDE.md`.
 
 ## 2026-09-02 的拆分
 
