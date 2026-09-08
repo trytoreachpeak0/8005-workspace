@@ -43,6 +43,13 @@
     Leave the onboard client and simulator stopped at the end. Useful when the
     next thing you do is a deployment.
 
+.PARAMETER NoSimulator
+    Passed through to 10-start-onboard-stack.ps1 when the stack is restarted, for
+    a vehicle whose IO points at the real Modbus module. Without it the restart
+    starts the simulator too, which on such a vehicle is a process holding 1502
+    and 58006 that nothing talks to. The restart is the only reason this matters
+    here: clearing the two stores has nothing to do with which IO plane is in use.
+
 .PARAMETER Force
     Suppress the confirmation prompt by lowering $ConfirmPreference, the same way
     Set-JourneyRuntime.ps1 does. Needed to run this unattended: ConfirmImpact is
@@ -68,6 +75,7 @@ param(
     [string] $VehicleJournal = 'C:\Users\HT\AppData\Local\SQCD\8005AGV\onboard-journal.db',
     [string] $VehicleBackupRoot = 'C:\8005\journal-backup',
     [switch] $KeepStackDown,
+    [switch] $NoSimulator,
     [switch] $Force,
     [int] $ReadyTimeoutSeconds = 120
 )
@@ -260,8 +268,8 @@ if ($KeepStackDown) {
     return
 }
 
-Write-Step 'Restarting the onboard stack'
-& (Join-Path $PSScriptRoot '10-start-onboard-stack.ps1') -SshAlias $SshAlias | Out-Null
+Write-Step "Restarting the onboard stack$(if ($NoSimulator) { ' (client only; IO is on the real module)' })"
+& (Join-Path $PSScriptRoot '10-start-onboard-stack.ps1') -SshAlias $SshAlias -NoSimulator:$NoSimulator | Out-Null
 
 # A clean pair should reach Ready on its own. If it does not, say so here rather
 # than letting the next run discover it.
