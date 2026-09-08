@@ -5,45 +5,52 @@
     not the host.
 
 .DESCRIPTION
-    Two modes. What changed on 2026-09-07 is not the mode but the bypass list:
-    the Actions plane moved off the proxy and onto the direct path.
+    Two modes.
 
-      Proxy (default) — github.com and codeload.github.com go through the
-        control machine's Clash proxy, because the plant network will not carry
-        them. Everything else in -NoProxy is direct: the runner's control
-        plane, the artifact upload, NuGet.
+      Direct (default since 2026-09-08) — nothing uses the proxy. Every
+        endpoint CI needs answers the guest directly, github.com included.
 
-      Direct — nothing uses the proxy. Correct on the day github.com:443 stops
-        being blocked. -Mode Direct verifies that before it commits to it.
+      Proxy — github.com and codeload.github.com go through the control
+        machine's Clash proxy; everything in -NoProxy stays direct. This is
+        the fallback for the day the plant network really does block GitHub.
 
-    The measurements behind the split, taken from the guest on 2026-09-07/08
-    with a 45-second timeout (a shorter one turns a slow path into a fake
-    failure, which is how an earlier round of this got misread):
+    Read the next paragraph before reaching for Proxy mode, because the
+    evidence that once justified it was an artifact.
 
-      | 端点                        | 直连  | 过代理 |
-      | github.com HTTPS            |  0/8  | 12/12  |
-      | codeload.github.com HTTPS   |  0/3  |   ✓    |
-      | github.com:22 (TCP)         | 11/11 |   —    |
-      | results-receiver HTTPS      | 12/12 | 10/12  |
-      | blob.core.windows.net HTTPS | 11/12 |   —    |
+    Until 2026-09-08 this guest sent everything through the proxy, and the
+    survey that seemed to prove github.com needed it read like this — the left
+    column measured 0/8, so github.com "had to" be proxied:
 
-    Two conclusions, pointing in opposite directions. github.com over HTTPS
-    needs the proxy. The Actions plane is better off without it — the two
-    failures on the proxied row are `SocketException 10060 (172.19.162.241:7890)`,
-    the proxy hop itself, which is precisely what killed five release runs in a
-    row on 2026-09-07: CreateArtifact, FinalizeArtifact and a git fetch, each a
-    21-second TCP connect timeout to the proxy rather than to GitHub. See
-    8005-agv-control-server issue #7.
+      | 端点                        | 直连(坏) | 过代理 | 直连(修好后) |
+      | github.com HTTPS            |    0/8   | 12/12  |    12/12     |
+      | codeload.github.com HTTPS   |    0/3   |   ✓    |    12/12     |
+      | results-receiver HTTPS      |   12/12  | 10/12  |    12/12     |
+      | blob.core.windows.net HTTPS |   11/12  |   —    |    12/12     |
 
-    Switching nodes inside Clash is NOT the fix. It was tried: github.com
-    through the proxy went from 2/10 failures to 10/10 successes, and the next
-    release failed in exactly the same way. The bad leg is guest-to-proxy, not
-    the proxy's own upstream.
+    Nothing about GitHub or the plant firewall changed between those columns.
+    What changed is that AgvAmhs was stopped on the factory server. It had
+    leaked 10330 AMQP connections into RabbitMQ over six days, occupying 64% of
+    that host's 16384 ephemeral ports — and WinNAT borrows from that same pool
+    for every connection it translates on this guest's behalf. When it could not
+    borrow one the SYN was dropped silently and the guest saw a 21-second TCP
+    connect timeout. Five release runs died that way; so did the "direct"
+    measurements, which is why they pointed at the wrong culprit.
 
-    The end state that removes the proxy from CI altogether is SSH checkout —
-    github.com:22 is direct and was the only endpoint that never failed a
-    measurement — but that needs a deploy key per repository, so it is a
-    separate decision, not something this script can do.
+    The A/B that settled it, taken from this guest at one instant:
+    92/92 to 192.168.200.1 (no NAT) against 72/92 through NAT to a target the
+    factory server itself reached 198/198. After 17-disable-amhs-stack.ps1:
+    177/177 and 177/177. See 8005-agv-control-server issue #7.
+
+    Two things worth keeping from that hunt:
+
+      * Switching nodes inside Clash is NOT a fix for anything. It was tried,
+        github.com through the proxy went from 2/10 failures to 10/10
+        successes, and the next release failed identically. The proxy's
+        upstream was never the problem.
+      * A probe that only reaches the transport tells you nothing here. TCP
+        connect succeeded while TLS timed out, because the connect is small and
+        the port pool ran out under load. Measure with a real request and a
+        45-second timeout.
 
     Two places carry the setting:
       * machine-level environment variables — the runner, every action it runs,
@@ -64,7 +71,7 @@
     dead runner session before.
 
 .PARAMETER Mode
-    Proxy (default) or Direct.
+    Direct (default) or Proxy.
 
 .PARAMETER ProxyAddress
     host:port of the proxy. The control machine's Wi-Fi address; check it there
@@ -72,15 +79,16 @@
     vEthernet ones.
 
 .PARAMETER NoProxy
-    Comma-separated bypass list. Two rules govern what may go in it:
+    Bypass list, Proxy mode only. Two rules govern what may go in it:
 
       * .NET does not treat an entry as a domain suffix — measured 2026-09-07,
         `github.com` bypasses github.com but not api.github.com — so anything a
         .NET client reaches needs its own full hostname. curl, the Node toolkit
         and the runner do match parent domains.
       * Never add a bare `github.com`. Under a suffix-matching client that would
-        also bypass codeload.github.com, which is blocked direct, and action
-        downloads would start failing on any runner with a cold _actions cache.
+        also bypass codeload.github.com — and codeload is the host Proxy mode
+        exists to carry, so action downloads would start failing on any runner
+        with a cold _actions cache, which is a slow thing to notice.
 
     blob.core.windows.net is a parent domain on purpose: the artifact blob host
     is assigned per upload (productionresultssa0, sa1, ...) and only Node ever
@@ -97,13 +105,13 @@
     pwsh -NoProfile -File 09-configure-guest-proxy.ps1
 
 .EXAMPLE
-    pwsh -NoProfile -File 09-configure-guest-proxy.ps1 -Mode Direct
-    pwsh -NoProfile -File 09-configure-guest-proxy.ps1 -ProxyAddress 172.19.162.99:7890
+    pwsh -NoProfile -File 09-configure-guest-proxy.ps1 -Mode Proxy
+    pwsh -NoProfile -File 09-configure-guest-proxy.ps1 -Mode Proxy -ProxyAddress 172.19.162.99:7890
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Proxy', 'Direct')]
-    [string]$Mode = 'Proxy',
+    [ValidateSet('Direct', 'Proxy')]
+    [string]$Mode = 'Direct',
 
     [string]$ProxyAddress = '172.19.162.241:7890',
 

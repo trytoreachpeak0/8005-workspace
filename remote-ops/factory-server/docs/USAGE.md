@@ -17,9 +17,15 @@
 
 - **本目录可写**，随便加脚本和记录。
 - 能连上这台机器**不等于**能改它上面跑的代码所属的仓库。写权限只看根 `CLAUDE.md`。
-- **这台服务器上跑着一整套在用的 AGV 服务**（`AgvAmhs` 5160、`AGV.Web` 8081、
-  nginx 9093、RabbitMQ、Redis、SQL Server 1433）。任何全局性改动——防火墙、
-  重启、装角色——都会影响它们，动手前先确认。
+- **这台服务器上跑着一整套在用的 AGV 服务**（`AGV.Web` 8081、nginx 9093、Redis、
+  SQL Server 1433，以及 `MesIngest` 与 `8005 AGV ControlServer`）。任何全局性
+  改动——防火墙、重启、装角色——都会影响它们，动手前先确认。
+- **`AgvAmhs` 与 `RabbitMQ` 已于 2026-09-08 停止并设为 `Disabled`**（用户确认两者
+  不在生产状态）。停它们不是因为碍事：`AgvAmhs` 向 RabbitMQ 泄漏 AMQP 连接，六天
+  攒到 10330 条，吃掉本机 64% 的临时端口，把所有经 WinNAT 出去的客户机流量拖垮了
+  ——详见第 8 节与 `8005-agv-control-server#7`。要重新启用，脚本是
+  `../scripts/17-disable-amhs-stack.ps1 -Revert`，但**先让写 `AgvAmhs` 的人修掉那个
+  泄漏**，否则三四天后端口池又会见底，届时坏的不只是 CI。
 - `HistoryResetAcknowledgement` 和 `StoragePressurePause` 的恢复**不允许**通过这条
   通道执行，必须在服务器本地控制台做（README 第 6 节）。
 
@@ -376,58 +382,40 @@ GitHub Actions runner。三项配置是这两个角色要求的，不要"顺手"
 
 ### 客户机到 GitHub 的网络约束
 
-**`github.com:443` 不通**——不是客户机的问题，**这台服务器自己也不通**，2026-09-02
-两边都实测过，2026-09-08 复测仍然如此。DNS 解析正常（`20.205.243.166`，不是投毒），
-TCP 有时能连上，但 TLS 握手过不去：45 秒超时下直连 0/8，过代理 12/12。
+**没有约束了——2026-09-08 起客户机全部直连**，`HTTP_PROXY`/`NO_PROXY` 与 git 的
+system proxy 都是空的。这一节留着，是因为在此之前它写着完全相反的话，而那份记载是被
+一个 NAT 故障骗出来的。
 
-| 端点 | 状态 | 用途 |
+| 端点 | 现在（2026-09-08 实测，45 秒超时） | 曾经的记载 |
 | --- | --- | --- |
-| `github.com:22` | ✅ 直连 11/11 | git over SSH。所有测量里唯一一次都没失败的 |
-| `api.github.com` | ⚠️ 走代理 | runner 注册与心跳。直连时好时坏，别指望 |
-| `pipelines.actions.githubusercontent.com` | ✅ 直连 | 作业队列 |
-| `results-receiver.actions.githubusercontent.com` | ✅ 直连 12/12 | 日志、artifact 的 Create/Finalize |
-| `broker.actions.githubusercontent.com` | ✅ 直连 | 保活长轮询 |
-| `objects.githubusercontent.com` | ✅ 直连 | action 与 release 资产 |
-| `*.blob.core.windows.net` | ✅ 直连 15/15 | artifact 字节 |
-| `api.nuget.org` | ✅ 直连 | restore。会跳 `nuget.azure.cn`，那一跳自己也会抖 |
-| `github.com:443` | ❌ 直连 0/8 | 网页、HTTPS clone、release 下载 |
-| `codeload.github.com` | ❌ 直连 0/3 | action 的 tarball 下载 |
-| `vstsagentpackage.azureedge.net` | ❌ | runner 自动更新包 |
+| `github.com` HTTPS | ✅ 12/12，中位 400 ms | ❌「TCP 握手直接不成」 |
+| `codeload.github.com` | ✅ 12/12 | ❌ 0/3 |
+| `api.github.com` | ✅ 12/12 | ✅ 直连 |
+| `objects.githubusercontent.com` | ✅ | ✅ 直连 |
+| `*.actions.githubusercontent.com`（pipelines / results-receiver / broker） | ✅ | ✅ 直连 |
+| `*.blob.core.windows.net`（artifact 字节） | ✅ | ❌「DNS 都解析不了」 |
+| `api.nuget.org` | ✅ | ✅ 直连 |
+| `github.com:22` | ✅ | ✅ 直连 |
+| `vstsagentpackage.azureedge.net` | 未复测 | ❌ runner 自动更新包 |
 
-所以现在的配置是**一半过代理一半直连**：`github.com`、`codeload.github.com`、
-`api.github.com` 走控制端的 Clash，其余全部直连。唯一定义处是
-`../scripts/09-configure-guest-proxy.ps1`，改完要重启 runner 服务；理由与实测数据在
-工作区 `CLAUDE.md` 的 CI 小节。**SSH checkout 仍然是更好的终局**（`github.com:22`
-从没失败过，且能把控制端那台笔记本彻底从 CI 里拿掉），但它要给每个仓各配一把
-deploy key，属于另一个决定。
+**为什么之前的记载是错的。**`AgvAmhs` 泄漏了 10330 条到本机 RabbitMQ 的 AMQP 连接，
+吃掉本服务器 64% 的临时端口（16384 个，49152-65535），而 WinNAT 给客户机做地址转换时
+要从同一个池子里借外部端口。借不到就静默丢 SYN，客户机那头看到 21 秒超时——**看起来
+就像「目标网络把我们挡了」**。停掉那两个服务后（`../scripts/17-disable-amhs-stack.ps1`，
+端口占用 67% → 1%），同一批测量全部转绿。完整因果链与验收证据在工作区 `CLAUDE.md` 的
+CI 小节，以及 `8005-agv-control-server#7`。
 
-⚠️ **厂区到公网的 path MTU 是 1000，而且 PMTUD 是黑洞**：DF ping 972 字节通、
-1000 字节静默丢弃，没有 ICMP「需要分片」回来，客户机与本服务器两台一致
-（2026-09-08 实测）。排查时会看到「TCP 连得上、TLS 握手超时」这种像 MTU 的现象。
-把客户机 MTU 降到 1000 试过，`github.com` 直连仍然 0/8，**已改回 1500**——它不是
-故障原因，但知道它存在能少走弯路。
+**教训：目标看起来「被挡」的时候，先确认本地出得去。**而且判断直连通不通要用真实
+HTTPS 请求加 45 秒超时——只测 TCP connect 会得出相反结论，因为 connect 包小，TLS 那
+几个大包才会撞上端口分配失败。
 
-一次性的安装包（Git、runner 包）有两条路：
+配置的唯一定义处是 `../scripts/09-configure-guest-proxy.ps1`（默认 `-Mode Direct`，
+`-Mode Proxy` 留作后备），**改完必须重启 runner 服务才生效**。
 
-1. **控制端 `scp` 中转**，最可靠，不依赖任何常驻服务。安装脚本都接受
-   `-InstallerPath` 参数直接用暂存好的包，跳过下载：
-
-   ```bash
-   curl -sL -o Git-2.55.0.5-64-bit.exe https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe
-   scp Git-2.55.0.5-64-bit.exe vm01:C:/agv-ops/downloads/
-   ssh vm01 "pwsh -NoProfile -File C:/agv-ops/08-install-git-guest.ps1 -InstallerPath C:/agv-ops/downloads/Git-2.55.0.5-64-bit.exe"
-   ```
-
-2. **经控制端的代理** `172.19.162.241:7890`，需要控制端开着、Clash 开着且勾了
-   "允许局域网连接"。实测经它访问 `github.com` 返回 200。**这个地址是控制端 Wi-Fi
-   的 DHCP 地址，会变**，不要写进任何需要长期有效的配置。
-
-⚠️ **不要在客户机里用 `192.168.200.1` 指代控制端。**控制端自己有一块
-`vEthernet (Huawei)` 恰好也是这个地址，而它同时又是客户机在本服务器上的默认网关，
-两者会撞。要找控制端只能用它的企业网地址。
-
-⚠️ **客户机的 dotnet 输出是中文**（"已通过!"而不是 "Passed!"）。写 CI 脚本或
-workflow 时不要靠英文字符串判断结果，用退出码或 `--logger trx`。
+⚠️ **厂区到公网的 DF ping 在 1000 字节以上不通**（972 字节通、1000 字节静默丢弃，
+客户机与本服务器两台一致，没有 ICMP「需要分片」回来）。排查时会看着像 MTU 问题。把
+客户机 MTU 降到 1000 试过，当时并没有改善——那会儿真正的病因是上面那个端口池——
+**已还原 1500**。
 
 ### 日常查看
 

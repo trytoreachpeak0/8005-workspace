@@ -242,62 +242,81 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
 丢失，导致查询文件摘要对不上）。**教训是：改动会影响构建的文件后，用干净
 checkout 验证一次**——例如临时克隆到别处再跑测试。
 
-### runner 到 GitHub 的网络：一半过代理一半直连，不要整体切
+### runner 到 GitHub 的网络：现在是全直连，根因不在网络配置里
 
-**2026-09-08 落地**，起因是 release 连续五次失败（`8005-agv-control-server#7`）：
-构建每次都成功，五次全栽在与 GitHub 通信那一步。唯一定义处是
-`remote-ops/factory-server/scripts/09-configure-guest-proxy.ps1`（`-Mode Proxy`
-是默认，`-Mode Direct` 留给 github.com 哪天不再被挡的那一天），**改完必须重启
-runner 服务才生效**。
+**2026-09-08 定案**，起因是 release 连续五次失败（`8005-agv-control-server#7`）：构建
+每次都成功，五次全栽在与 GitHub 通信那一步，报错都是 21 秒的 TCP connect 超时。
 
-| 目标 | 怎么走 | 实测（客户机上，45 秒超时） |
+**根因不在 CI，也不在代理，在 factory-server 上的一个连接泄漏。**`AgvAmhs` 向本机
+RabbitMQ 开 AMQP 连接（对端 5672）却不关闭，跑六天攒到 10330 条，占掉那台主机 16384 个
+临时端口（49152-65535）里的 64%。而 **WinNAT 每为客户机转换一条出站连接，就要从同一个
+端口池里借一个外部端口**——借不到时 SYN 被静默丢弃，客户机那头看到的就是 21 秒超时。
+CI 只是碰巧最先撞上：它过 NAT，比主机自己更早分不到端口。
+
+定死它的是这组同一时刻的 A/B：
+
+| 观测 | 停 AgvAmhs 前 | 停 AgvAmhs 后 |
 | --- | --- | --- |
-| `github.com` HTTPS | **过控制端 Clash 代理** | 直连 0/8，过代理 12/12 |
-| `codeload.github.com` | **过代理** | 直连 0/3——action 下载会挂在这 |
-| `api.github.com` | 过代理 | |
-| `objects.githubusercontent.com`、`*.actions.githubusercontent.com` | **直连** | 12/12 |
-| `*.blob.core.windows.net`（artifact 字节） | **直连** | 15/15 |
-| `api.nuget.org` | 直连 | |
-| `github.com:22` | 直连 | 11/11，所有测量里唯一一次都没失败的端点 |
+| 客户机 → `192.168.200.1`（**不过 NAT**） | 92/92 100% | 177/177 100% |
+| 客户机 → `172.19.162.241`（**过 NAT**） | 72/92 **78%** | 177/177 **100%** |
+| factory01 → 同一目标（同一时刻） | 198/198 100% | 159/159 100% |
+| ICMP（两边） | 100% | 100% |
+| 主机临时端口占用 | 10968 / 16384（67%） | 152 / 16384（1%） |
 
-六条别再重走的结论：
+`AgvAmhs` 与 `RabbitMQ` 已于 2026-09-08 **停止并设为 Disabled**（用户确认两者不在生产
+状态），脚本是 `remote-ops/factory-server/scripts/17-disable-amhs-stack.ps1`，带
+`-Revert`。`AGVWebApi`、`MesIngest`、`8005 AGV ControlServer`、SQL Server 都没动。
+**这个泄漏本身没修**，只是把漏水的服务关了；哪天要重新启用它，先让写它的人修连接泄漏，
+否则三四天后端口池又会见底，那时坏的就不只是 CI。
 
-1. **换代理节点不是解药。**把 Clash 的节点从日本切到美国之后，github.com 过代理
-   由 2/10 失败变成 10/10 成功，紧接着第五次 release 仍以完全相同的方式失败。坏的
-   那一跳是「客户机→代理」，不是代理的上游。
-2. **21 秒是 Windows 的 TCP connect 超时**，不是 GitHub 的超时。三种互不相干的客户
-   端（Node 的 upload-artifact、.NET 的 runner、git/curl）同一症状，说明问题在网络
-   不在客户端库。GitHub 报的 `ECONNRESET`/`ETIMEDOUT` 是二手信息，真错误在 runner
-   的 `_diag` 日志里，会指名 `172.19.162.241:7890`。
-3. **探测要用 45 秒超时。**这条路会成阵地停十几秒，短超时把停顿读成「不可达」——
-   同一批端点 4 秒超时测出 36% 成功、45 秒测出 100%。**判定成功的标准是 release
-   连续两次实跑出可下载的 artifact，不是「探测通了」**；上一轮就是靠短超时探测得
-   出了错误结论。本轮的验收证据是 run `34145513351` 与 `34146036477`，第二个的包
-   下载回来校验过 SHA-256。
-4. **runner 不读 `.proxy` / `.noproxy` 文件。**这个版本只认环境变量
-   （`http_proxy`/`https_proxy`/`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`），程序集里
-   连 `.proxy` 这个字面量都没有。`10-install-github-runner.ps1` 曾经写这两个文件，
-   已经删掉——一个看着像配置、实际什么都不做的文件，第一次出事就要吃掉一小时。
-5. **.NET 的 `NO_PROXY` 不做后缀匹配**（实测 `github.com` 能豁免 github.com，豁免
-   不了 api.github.com），而 curl、Node 的 toolkit 和 runner 会做。所以每个主机名都
-   要写全。**并且绝不要写裸的 `github.com`**——做后缀匹配的那些客户端会把
-   `codeload.github.com` 一起放去直连，而那条直连不通。
-6. **厂区到公网的 path MTU 是 1000，而且 PMTUD 是黑洞**（DF ping 972 通、1000 不通，
-   客户机与 factory-server 两台一致，没有 ICMP「需要分片」回来）。它**不是**这次
-   故障的原因——把客户机 MTU 降到 1000 之后 github.com 直连仍是 0/8，已改回 1500
-   ——但排查时会看到「TCP 连得上、TLS 握手超时」这种像 MTU 的现象，别被带偏。
+**修好之后代理就不需要了。**客户机现在跑 `-Mode Direct`，`HTTP_PROXY`/`NO_PROXY`/git 的
+system proxy 全部清空——**CI 与控制端笔记本再无关系**。唯一定义处是
+`remote-ops/factory-server/scripts/09-configure-guest-proxy.ps1`，`-Mode Proxy` 留作后备，
+**改完必须重启 runner 服务才生效**。
 
-**artifact 上传本来就需要重试。**`CreateArtifact`/`FinalizeArtifact` 是这条链上仅
-剩的单次调用（checkout 自己 fetch 三次，restore 有自己的重试），而 upload-artifact
-不提供任何重试开关，`run:` 步骤又没法重新调用一个 action，所以只能在 workflow 里把
-三次尝试写开——`release.yml` 就是这么做的，中间隔 30 秒，后两次带 `overwrite`。
-`test.yml` 与 `l2.yml` 传的是诊断材料不是交付物，那两处用 `continue-on-error`：判定
-在上一步，别让一次网络抖动把绿的跑成红的。
+五条别再重走的弯路：
 
-**CD 断线时的备用路是 `repos/8005-agv-control-server/scripts/Build-LocalRc.ps1`**，
-在控制端本地产出与 workflow 等价的一套东西（zip + `.sha256` + `release-manifest.json`
-+ `SHA256SUMS.txt`），`15-deploy-control-server.ps1 -PackagePath` 直接能吃。它替代的
-只是 `gh run download`，别的一步没改。
+1. **被 NAT 误导过一次，写在这里免得再来。**当时测出 `github.com` 直连 0/8、过代理
+   12/12，据此得出「github.com 被厂区网挡了，必须过代理」，还照此改了配置。**那是
+   假象**——端口池修好后同一个测量是 12/12、中位 400 ms，比过代理还快。**目标看起来
+   「被挡」的时候，先确认本地出得去。**
+2. **换代理节点不是解药。**把 Clash 节点从日本切到美国后，github.com 过代理由 2/10
+   失败变成 10/10 成功，紧接着第五次 release 仍以完全相同的方式失败。代理的上游从来
+   不是问题。
+3. **21 秒是 Windows 的 TCP connect 超时**，不是 GitHub 的超时。三种互不相干的客户端
+   （Node 的 upload-artifact、.NET 的 runner、git/curl）同一症状，说明问题在网络不在
+   客户端库。GitHub 报的 `ECONNRESET`/`ETIMEDOUT` 是二手信息。
+4. **只测到传输层的探测在这里什么都证明不了。**TCP connect 通、TLS 握手超时是常态——
+   connect 包小，TLS 那几个大包正好撞上端口分配失败。**要用真实请求加 45 秒超时**：
+   同一批端点 4 秒超时测出 36% 成功、45 秒测出 100%。**判定成功的标准是 release 连续
+   两次实跑出可下载的 artifact，不是「探测通了」。**
+5. **runner 不读 `.proxy` / `.noproxy` 文件。**这个版本只认环境变量
+   （`http_proxy`/`https_proxy`/`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`），程序集里连
+   `.proxy` 这个字面量都没有。`10-install-github-runner.ps1` 曾经写这两个文件，已经
+   删掉——一个看着像配置、实际什么都不做的文件，第一次出事就要吃掉一小时。
+
+还有两条与本次无关但值得知道：**.NET 的 `NO_PROXY` 不做后缀匹配**（`github.com` 豁免
+不了 `api.github.com`），而 curl、Node 的 toolkit 和 runner 会做；**厂区到公网的 DF ping
+在 1000 字节以上不通**（972 通、1000 静默丢，两台机器一致，没有 ICMP「需要分片」回来），
+排查时会看着像 MTU 问题，但把客户机 MTU 降到 1000 试过，当时 github.com 直连仍是 0/8，
+已还原 1500。
+
+**artifact 上传的重试留着。**`CreateArtifact`/`FinalizeArtifact` 是这条链上仅剩的单次
+调用（checkout 自己 fetch 三次，restore 有自己的重试），而 upload-artifact 不提供任何
+重试开关，`run:` 步骤又没法重新调用一个 action，所以在 `release.yml` 里把三次尝试写开，
+中间隔 30 秒，后两次带 `overwrite`。根因修掉之后它一次都没触发过，但它救过一次真失败，
+成本是零，留着。`test.yml` 与 `l2.yml` 传的是诊断材料不是交付物，那两处用
+`continue-on-error`：判定在上一步，别让一次网络抖动把绿的跑成红的。
+
+**验收证据。**Proxy+bypass 配置下 `34145513351`、`34146036477`（前者第一次上传失败、
+靠重试救回）；停掉 AgvAmhs 之后 `34175549786` 一把过；切成全直连之后 `34176439971` 与
+`34176609797` 连续两次一把过，三个重试步骤全部 skipped。`34146036477` 的包下载回控制端
+校验过 SHA-256，manifest 里两端 commit 齐全。
+
+**CD 断线时的备用路是 `repos/8005-agv-control-server/scripts/Build-LocalRc.ps1`**，在
+控制端本地产出与 workflow 等价的一套东西（zip + `.sha256` + `release-manifest.json` +
+`SHA256SUMS.txt`），`15-deploy-control-server.ps1 -PackagePath` 直接能吃。它替代的只是
+`gh run download`，别的一步没改。
 
 ## CD：MesIngest 部署到 factory-server，控制端中转
 
