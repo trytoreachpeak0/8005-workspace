@@ -37,9 +37,16 @@ expected to carry them. What replaced the old rule is narrower than "writable":
 - **Never push to their working branch** — `OnboardHmi_MVP` for the onboard HMI,
   `main` for the simulator. Never force-push anything there, never delete or
   rewrite a branch that is not ours, never tag or release.
-- **Changes reach Kun Wang as a pull request** into that working branch, opened
-  when he wants them. **We do not merge it.** The repository is still his to
-  accept from, and a merged PR is a decision, not a delivery.
+- **Changes reach Kun Wang as a pull request** into that working branch, and
+  **since 2026-09-08 we merge it ourselves once he has agreed.** The pull request
+  is still how a change arrives — it is what he reviews and what records the
+  decision — but clicking merge is no longer his to do. Until that date the rule
+  was the opposite ("a merged PR is a decision, not a delivery"); the user
+  changed it because waiting on the click was stalling work he had already
+  approved. Everything else about those branches is unchanged: never push to
+  `OnboardHmi_MVP` or `main` directly, never force-push, never delete or rewrite
+  a branch that is not ours, never tag or release. **Agreement still has to come
+  from him** — merging without it is not covered by this change.
 - Issues, pull requests and comments stay allowed, as they have been since
   2026-09-03.
 
