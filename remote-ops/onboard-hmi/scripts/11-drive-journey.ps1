@@ -52,19 +52,39 @@
     phase can only be proven by driving a real journey, and a broken driver costs
     one to discover.
 
+    STEPS 2 AND 3 REQUIRE THE SIMULATOR, AND STEP 1 DOES NOT. Both of the
+    operator's hands -- reading which slot opened, putting cargo in it, closing
+    the door -- are calls to the simulator's automation plane on 127.0.0.1:58006.
+    A vehicle switched to the real Modbus module (09-switch-io-module.ps1
+    -RealModule) has no such plane: the door is a real solenoid and the cargo is
+    real cargo, so that half belongs to a person standing at the vehicle. The
+    scan does not, because it goes to the CLIENT's own automation face and never
+    touches IO. -ScanOnly is that split -- submit the sublot from here, and stop
+    before reaching for hands that do not exist.
+
 .PARAMETER Sublot
     Submit this instead of what the server asked for. Only useful for negative
     tests.
 
 .PARAMETER CargoState
     OCCUPIED (default) completes a load. EMPTY reproduces a failed one, and is
-    also what an unload wants.
+    also what an unload wants. Ignored under -ScanOnly, which never gets as far
+    as the cargo.
+
+.PARAMETER ScanOnly
+    Submit the sublot and return, leaving the operator's part to a person. This
+    is what a vehicle running against the real IO module needs; see the note
+    above. Contradicts -SkipScan, which drops the only phase this one keeps.
 
 .EXAMPLE
     ./11-drive-journey.ps1
 
 .EXAMPLE
     ./11-drive-journey.ps1 -CargoState EMPTY
+
+.EXAMPLE
+    # Real IO module: the scan is still automated, the hands are yours.
+    ./11-drive-journey.ps1 -ScanOnly
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -74,6 +94,7 @@ param(
     [ValidateSet('OCCUPIED', 'EMPTY')]
     [string] $CargoState = 'OCCUPIED',
     [switch] $SkipScan,
+    [switch] $ScanOnly,
     [string] $ServerDatabase = 'C:\ProgramData\8005\ControlServer\data\controlserver.db',
     [string] $ServerInstallRoot = 'C:\Program Files\8005 AGV\ControlServer',
     [string] $VehicleWorkRoot = 'C:\8005\automation',
@@ -81,6 +102,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($SkipScan -and $ScanOnly) {
+    throw '-SkipScan drops the scan and -ScanOnly keeps nothing else, so together they ask for an empty run.'
+}
 
 function Write-Step { param([string] $Message) Write-Host "  $Message" -ForegroundColor Cyan }
 
@@ -173,7 +198,9 @@ if ($SkipScan) {
     Write-Step "Sublot to submit: $Sublot"
 }
 
-$what = $SkipScan ? "play the operator's part (cargo=$CargoState)" : "submit sublot $Sublot and play the operator's part (cargo=$CargoState)"
+$what = if ($ScanOnly) { "submit sublot $Sublot and stop (the operator's part is a person's)" }
+        elseif ($SkipScan) { "play the operator's part (cargo=$CargoState)" }
+        else { "submit sublot $Sublot and play the operator's part (cargo=$CargoState)" }
 if (-not $PSCmdlet.ShouldProcess($SshAlias, $what)) { return }
 
 # --- deploy ---------------------------------------------------------------
@@ -194,6 +221,14 @@ if (-not $SkipScan) {
         ("-NoProfile -ExecutionPolicy Bypass -File `"$VehicleWorkRoot\agv-drive-journey.ps1`" " +
          "-Phase Scan -Sublot `"$Sublot`" -ResultPath `"$scanResult`"") `
         $scanResult
+}
+
+if ($ScanOnly) {
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Sublot submitted. The operator's part is yours." -ForegroundColor Green
+    Write-Host '  The client opens one slot at a time and waits for each; watch the HMI.' -ForegroundColor Yellow
+    Write-Host '  Nothing here ends the trip either -- 13-close-gates-when-idle.ps1 still' -ForegroundColor Yellow
+    Write-Host '  has to be running, or the runtime takes the next demand 2 s after Completed.' -ForegroundColor Yellow
+    return
 }
 
 # --- 2. wait for the client to say it is waiting --------------------------
