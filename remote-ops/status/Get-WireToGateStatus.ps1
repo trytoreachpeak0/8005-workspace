@@ -145,6 +145,26 @@ try {
     $io = $cfg.ioModule
 } catch { }
 $simProcess = Get-Process 'SQCD_8005AGV_Simulator' -ErrorAction SilentlyContinue | Select-Object -First 1
+
+# With the simulator the IO plane is a local process, and a PID plus a listener
+# is the whole story. With the real module it is a box on 192.168.71.0/24 that
+# only this machine can see, so the reachability has to be measured from here --
+# there is no equivalent of "the process is running" to stand in for it.
+# TcpClient rather than Test-NetConnection: the module does not answer ICMP, and
+# the cmdlet spends its time on a ping that proves nothing before it gets to the
+# port.
+$ioReachable = $null
+if ($io -and $io.host -ne '127.0.0.1') {
+    $client = $null
+    try {
+        $client = [Net.Sockets.TcpClient]::new()
+        $ioReachable = $client.ConnectAsync($io.host, [int]$io.port).Wait(3000) -and $client.Connected
+    } catch {
+        $ioReachable = $false
+    } finally {
+        $client?.Dispose()
+    }
+}
 [pscustomobject]@{
     utcNowUnixMs     = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     processId        = if ($proc) { $proc.Id } else { $null }
@@ -159,6 +179,7 @@ $simProcess = Get-Process 'SQCD_8005AGV_Simulator' -ErrorAction SilentlyContinue
     ioPort           = if ($io) { $io.port } else { $null }
     simulatorPid     = if ($simProcess) { $simProcess.Id } else { $null }
     modbusListening  = [bool](Get-NetTCPConnection -State Listen -LocalPort 1502 -ErrorAction SilentlyContinue)
+    ioReachable      = $ioReachable
 } | ConvertTo-Json -Compress
 '@
 
@@ -386,16 +407,22 @@ function Get-Snapshot {
             (($null -ne $session) ? "$($session.readiness) $($session.reasonCode)" : 'no session yet') `
             'journey'
 
-        # Only meaningful when the client is pointed at the local simulator; with
-        # a real Modbus module there is no local process to expect.
+        # Both IO planes are gated, by the evidence each one can actually offer:
+        # a local process plus a listener for the simulator, a TCP connect from
+        # the vehicle for the real module. This used to return UNKNOWN for the
+        # real module, which is not the same as "not applicable" -- UNKNOWN is
+        # not PASS, so linkComplete below could never be reached on a vehicle
+        # running against real IO, however healthy both ends were.
         New-Gate 'io-target-reachable' `
             ($onboard.reachable `
-                ? (($onboard.ioHost -eq '127.0.0.1') ? ($onboard.modbusListening -and $null -ne $onboard.simulatorPid) : $null) `
+                ? (($onboard.ioHost -eq '127.0.0.1') `
+                    ? ($onboard.modbusListening -and $null -ne $onboard.simulatorPid) `
+                    : $onboard.ioReachable) `
                 : $null) `
             ($onboard.reachable `
                 ? (($onboard.ioHost -eq '127.0.0.1') `
                     ? ("simulator $($onboard.ioHost):$($onboard.ioPort), pid $($onboard.simulatorPid), 1502 listening=$($onboard.modbusListening)") `
-                    : "real module $($onboard.ioHost):$($onboard.ioPort), not gated here") `
+                    : "real module $($onboard.ioHost):$($onboard.ioPort), tcp from vehicle=$($onboard.ioReachable)") `
                 : 'onboard unreachable')
 
         New-Gate 'vehicle-safety-stopped' $safetyPass $safetyDetail
