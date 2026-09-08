@@ -264,9 +264,26 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
 丢失，导致查询文件摘要对不上）。**教训是：改动会影响构建的文件后，用干净
 checkout 验证一次**——例如临时克隆到别处再跑测试。
 
-### runner 到 GitHub 的网络：现在是全直连，根因不在网络配置里
+### runner 到 GitHub 的网络：现在走代理，但那个 21 秒超时有两个不同的根因
 
-**2026-09-08 定案**，起因是 release 连续五次失败（`8005-agv-control-server#7`）：构建
+**这一节记着两件事，别把它们搞混——症状一模一样（21 秒 TCP connect 超时），根因完全
+不同，而先诊断错了一次的代价是好几个小时。**
+
+1. **端口池耗尽**（2026-09-08 上午定案）：本机出不去，看着像目标被挡。**修法是停掉泄漏
+   的服务，不是配代理。**详见下面。
+2. **厂区到特定 GitHub IP 真的不通**（2026-09-08 下午）：本机出得去，`api.github.com`
+   也通，只有 `github.com` 那个 IP 不通。**修法就是配代理。**见本节末尾。
+
+**先判断是哪一种：查 factory-server 的临时端口占用。**健康时约 1-2%（实测 269/16384），
+耗尽时 67%。占用正常就不是第一种，别再去停服务或查 NAT。
+
+```powershell
+ssh factory01 "(Get-NetTCPConnection | Where-Object { `$_.LocalPort -ge 49152 }).Count"
+```
+
+#### 根因一：端口池耗尽（已修，服务已停）
+
+起因是 release 连续五次失败（`8005-agv-control-server#7`）：构建
 每次都成功，五次全栽在与 GitHub 通信那一步，报错都是 21 秒的 TCP connect 超时。
 
 **根因不在 CI，也不在代理，在 factory-server 上的一个连接泄漏。**`AgvAmhs` 向本机
@@ -292,8 +309,8 @@ CI 只是碰巧最先撞上：它过 NAT，比主机自己更早分不到端口�
 `8005 AGV ControlServer`、SQL Server 都没动，停完一切正常，说明没有别的东西在用那个
 消息队列。
 
-**修好之后代理就不需要了。**客户机现在跑 `-Mode Direct`，`HTTP_PROXY`/`NO_PROXY`/git 的
-system proxy 全部清空——**CI 与控制端笔记本再无关系**。唯一定义处是
+修好之后代理一度不需要了，客户机切回了 `-Mode Direct`。**那个状态只维持了几个小时**，
+见下面的根因二。唯一定义处是
 `remote-ops/factory-server/scripts/09-configure-guest-proxy.ps1`，`-Mode Proxy` 留作后备，
 **改完必须重启 runner 服务才生效**。
 
@@ -302,7 +319,9 @@ system proxy 全部清空——**CI 与控制端笔记本再无关系**。唯一
 1. **被 NAT 误导过一次，写在这里免得再来。**当时测出 `github.com` 直连 0/8、过代理
    12/12，据此得出「github.com 被厂区网挡了，必须过代理」，还照此改了配置。**那是
    假象**——端口池修好后同一个测量是 12/12、中位 400 ms，比过代理还快。**目标看起来
-   「被挡」的时候，先确认本地出得去。**
+   「被挡」的时候，先确认本地出得去。**（同一天下午那个结论又变成真的了，见根因二。
+   所以这条的用法不是「被挡都是假象」，而是**「先确认本地出得去」这个动作本身**——两次
+   的分歧点正在这里。）
 2. **换代理节点不是解药。**把 Clash 节点从日本切到美国后，github.com 过代理由 2/10
    失败变成 10/10 成功，紧接着第五次 release 仍以完全相同的方式失败。代理的上游从来
    不是问题。
@@ -335,6 +354,41 @@ system proxy 全部清空——**CI 与控制端笔记本再无关系**。唯一
 靠重试救回）；停掉 AgvAmhs 之后 `34175549786` 一把过；切成全直连之后 `34176439971` 与
 `34176609797` 连续两次一把过，三个重试步骤全部 skipped。`34146036477` 的包下载回控制端
 校验过 SHA-256，manifest 里两端 commit 齐全。
+
+#### 根因二：厂区到 `github.com` 那个 IP 真的不通（现行状态：Proxy）
+
+同日下午，protocol 的 g1（run `34209440540`）挂在 `actions/checkout`，报错与上面一模
+一样：`Failed to connect to github.com:443 after 21069 ms`。**但这次是真的被挡**，
+区分它与根因一的是这组数据：
+
+| 观测 | 结果 |
+| --- | --- |
+| factory01 临时端口占用 | **269 / 16384（1.6%）**，健康——**这一条排除了根因一** |
+| `AgvAmhs` / `RabbitMQ` | 仍是 Stopped / Disabled，没被恢复 |
+| factory01 → `www.baidu.com`、`www.microsoft.com` | 4/4 ✓ 本机出得去 |
+| factory01 → `api.github.com`（`20.205.243.168`） | **4/4 ✓** |
+| factory01 → `github.com`（`20.205.243.166`） | **0/8 ✗** |
+| vm01 → `github.com` 直连 | **0/6 ✗** |
+| vm01 → `codeload.github.com` 直连 | **3/6**——时通时不通 |
+| DNS | 解析正常，返回真实 GitHub IP，无污染 |
+| vm01 → 上述全部**过代理** | **6/6 ✓**，中位 700–1400 ms |
+
+两个 IP 只差最后一位、一个通一个不通，而本机出得去、DNS 干净、端口池健康——**这排除了
+配置侧的每一种解释，剩下的就是厂区出口对特定 IP 的封锁**。国内连 GitHub 时通时不通是
+常态，`codeload` 那个 3/6 就是它的样子。
+
+**所以客户机切回了 `-Mode Proxy`（默认 bypass 列表，未改）**，CI 与控制端笔记本又绑在
+一起了。验收：同一个 run `34209440540` 重跑，40 秒一把过（失败那次跑了 2m5s）。
+
+**这次没有把 bypass 列表清空，是有实测依据的**：`objects`、`pipelines`、
+`results-receiver`、`broker`、`blob.core.windows.net`、`api.nuget.org` 直连都是 5/5，
+脚本内置的 `$mustBeDirect` 验证也要求它们直连可达。只有 `github.com`、
+`codeload.github.com`、`api.github.com` 走代理——那正是脚本 Proxy 模式的默认设计。
+
+**一个测量陷阱，我踩了一次：**第一轮诊断里 `objects.githubusercontent.com` 测出 0/4，
+差点据此把它从 bypass 里挪走。那是假阴性——**那些主机对 HEAD 请求返回 4xx，而我的探测
+把非 2xx 当成了失败**。脚本注释早就写着「status code is irrelevant, an answer is the
+point」。判定连通要看**有没有回应**，不是回应是不是 200。
 
 **CD 断线时的备用路是 `repos/8005-agv-control-server/scripts/Build-LocalRc.ps1`**，在
 控制端本地产出与 workflow 等价的一套东西（zip + `.sha256` + `release-manifest.json` +
@@ -600,9 +654,15 @@ environment gate; the 8 GB is static because dynamic memory had been assigning
 it 2.5 GB, which starves a restore/build/test cycle. Reproduce both with
 `remote-ops/factory-server/scripts/06-configure-golden-renderer-vm.ps1`.
 
-**The guest reaches GitHub directly over HTTPS**, `github.com` included —
-12/12 at a median 400 ms, measured 2026-09-08. So does the factory server. No
-proxy is configured anywhere in the CI path.
+**The guest reaches `github.com` through the control machine's Clash proxy**
+(`172.19.162.241:7890`), and everything else in the CI path directly. It briefly
+did reach `github.com` directly — 12/12 at a median 400 ms on the morning of
+2026-09-08 — but by that afternoon that IP (`20.205.243.166`) was unreachable
+from the plant while `api.github.com` (`20.205.243.168`) still answered, so the
+guest went back to `-Mode Proxy`. **The CI path therefore depends on the control
+machine again**: Clash must be running with LAN connections allowed. See the
+"runner 到 GitHub 的网络" section above — it carries the two distinct root causes
+behind the identical 21-second timeout, and which measurement tells them apart.
 
 **Everything here uses git over HTTPS. Nothing uses git over SSH** — all eight
 clones, the workspace repository, `gh`'s `git_protocol` and every

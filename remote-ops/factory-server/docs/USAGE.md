@@ -409,16 +409,26 @@ CI 小节，以及 `8005-agv-control-server#7`。
 
 **教训：目标看起来「被挡」的时候，先确认本地出得去。**而且判断直连通不通要用真实
 HTTPS 请求加 45 秒超时——只测 TCP connect 会得出相反结论，因为 connect 包小，TLS 那
-几个大包才会撞上端口分配失败。
+几个大包才会撞上端口分配失败。**判定「通」看的是有没有回应，不是回应是不是 200**：
+`objects.githubusercontent.com` 一类主机对 HEAD 就返回 4xx，把非 2xx 当失败会测出
+假阴性。
+
+⚠️ **同一天下午，那个「被挡」变成真的了。**端口池健康（269/16384，1.6%）、本机能到
+baidu / microsoft / `api.github.com`、DNS 干净，唯独 `github.com`（`20.205.243.166`）
+0/8，而 `api.github.com`（`20.205.243.168`）4/4。客户机 `codeload.github.com` 直连
+3/6——时通时不通。**客户机因此切回 `-Mode Proxy`。**同一条教训的两次结论相反，分歧点
+就在「先确认本地出得去」这个动作上：上午本机出不去，下午本机出得去。
 
 **git 一律走 HTTPS，没有一处用 git over SSH。**八个克隆、工作区仓、`gh` 的
 `git_protocol`、所有 `actions/checkout` 全是 HTTPS，三台机器上都没有
 `url.*.insteadOf` 改写（2026-09-08 逐台核过）。表里 `github.com:22` 通只是一条网络
-事实，不是任何东西走的路——**保持这样**：SSH 检出要给每个仓各配一把 deploy key，
-而它唯一的好处（把控制端笔记本从 CI 里拿掉）现在已经由全直连实现了。
+事实，不是任何东西走的路——**保持这样**：SSH 检出要给每个仓各配一把 deploy key，成本
+比它省下的多。（它曾经还有一个好处是把控制端笔记本从 CI 里拿掉，但 2026-09-08 下午切
+回代理之后那个好处没了，CI 又依赖控制端的 Clash 了。）
 
-配置的唯一定义处是 `../scripts/09-configure-guest-proxy.ps1`（默认 `-Mode Direct`，
-`-Mode Proxy` 留作后备），**改完必须重启 runner 服务才生效**。
+配置的唯一定义处是 `../scripts/09-configure-guest-proxy.ps1`（**2026-09-08 下午起默认
+`-Mode Proxy`**，`-Mode Direct` 留作后备），**改完必须重启 runner 服务才生效**。
+不带参数跑它就是当前配置，不会把 CI 切坏。
 
 ⚠️ **厂区到公网的 DF ping 在 1000 字节以上不通**（972 字节通、1000 字节静默丢弃，
 客户机与本服务器两台一致，没有 ICMP「需要分片」回来）。排查时会看着像 MTU 问题。把

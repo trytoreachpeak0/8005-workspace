@@ -7,15 +7,22 @@
 .DESCRIPTION
     Two modes.
 
-      Direct (default since 2026-09-08) — nothing uses the proxy. Every
-        endpoint CI needs answers the guest directly, github.com included.
+      Proxy (default since the afternoon of 2026-09-08) — github.com,
+        codeload.github.com and api.github.com go through the control
+        machine's Clash proxy; everything in -NoProxy stays direct. That day
+        did come: github.com's IP stopped answering from the plant while
+        api.github.com's kept answering. See the second block below.
 
-      Proxy — github.com and codeload.github.com go through the control
-        machine's Clash proxy; everything in -NoProxy stays direct. This is
-        the fallback for the day the plant network really does block GitHub.
+      Direct — nothing uses the proxy. This was the default for one morning,
+        after a port-pool leak that had masqueraded as a GitHub block was
+        fixed. Reach for it only after measuring that github.com really does
+        answer directly.
 
-    Read the next paragraph before reaching for Proxy mode, because the
-    evidence that once justified it was an artifact.
+    Read the next two paragraphs before changing modes. The first says the
+    evidence that once justified Proxy was an artifact; the second says the
+    same symptom later turned out to be real. The symptoms are identical --
+    a 21-second TCP connect timeout -- and only one measurement separates
+    them: whether the factory server's own ephemeral port pool is exhausted.
 
     Until 2026-09-08 this guest sent everything through the proxy, and the
     survey that seemed to prove github.com needed it read like this — the left
@@ -40,6 +47,17 @@
     92/92 to 192.168.200.1 (no NAT) against 72/92 through NAT to a target the
     factory server itself reached 198/198. After 17-disable-amhs-stack.ps1:
     177/177 and 177/177. See 8005-agv-control-server issue #7.
+
+    Then, the same afternoon, the block became real and Proxy came back. This
+    time the port pool was healthy (269/16384, 1.6%), AgvAmhs was still
+    stopped, and the factory server itself reached baidu.com, microsoft.com
+    and api.github.com (20.205.243.168) 4/4 -- while github.com
+    (20.205.243.166) answered 0/8. DNS was clean, returning the real GitHub
+    addresses. Two IPs one digit apart, one reachable and one not, with local
+    egress proven: that is a block, not a local fault. The guest measured
+    codeload.github.com at 3/6 direct -- intermittent is what this looks like
+    -- and 6/6 through the proxy. g1 run 34209440540 failed on checkout, then
+    passed in 40s on rerun after this script was run with -Mode Proxy.
 
     Two things worth keeping from that hunt:
 
@@ -71,7 +89,7 @@
     dead runner session before.
 
 .PARAMETER Mode
-    Direct (default) or Proxy.
+    Proxy (default) or Direct.
 
 .PARAMETER ProxyAddress
     host:port of the proxy. The control machine's Wi-Fi address; check it there
@@ -105,13 +123,13 @@
     pwsh -NoProfile -File 09-configure-guest-proxy.ps1
 
 .EXAMPLE
-    pwsh -NoProfile -File 09-configure-guest-proxy.ps1 -Mode Proxy
+    pwsh -NoProfile -File 09-configure-guest-proxy.ps1 -Mode Direct
     pwsh -NoProfile -File 09-configure-guest-proxy.ps1 -Mode Proxy -ProxyAddress 172.19.162.99:7890
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('Direct', 'Proxy')]
-    [string]$Mode = 'Direct',
+    [string]$Mode = 'Proxy',
 
     [string]$ProxyAddress = '172.19.162.241:7890',
 
