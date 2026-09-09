@@ -12,8 +12,9 @@ ControlServer 的 CI 已经在 `win11-01` 上跑（`.github/workflows/test.yml`�
 ## 1. 三十秒版
 
 ```bash
-# 一、出包（CI，手动触发，要指定车载端 commit）
+# 一、出包（CI，手动触发，要指定车载端 commit 与分支）
 gh workflow run release.yml --repo trytoreachpeak0/8005-agv-control-server \
+  --ref ControlServer_MVP \
   -f onboard_commit=238b46eb2c9ae90584e4288a782176f66b7de942
 ```
 
@@ -177,8 +178,14 @@ git -C 8005-agv-onboard-hmi log --oneline -1 OnboardHmi_MVP
 ```bash
 # 2. 出包
 gh workflow run release.yml --repo trytoreachpeak0/8005-agv-control-server \
+  --ref ControlServer_MVP \
   -f onboard_commit=<40 位 hash>
 ```
+
+**`--ref` 不能省。**这个仓的默认分支是 `main`，还停在 `64b3070`——release workflow 刚建
+那会儿的 commit。省掉 `--ref` 就是从那里构建服务端，2026-09-09 实测触发过一次
+（run `34356760424`）。那次恰好在组装步骤失败、没有产出 artifact，但**它本可以静默成功**：
+拿到的会是一个 commit 完全不对、而哈希与流程一切正常的包。
 
 ```bash
 # 3. 先干跑一次，看它打算做什么
