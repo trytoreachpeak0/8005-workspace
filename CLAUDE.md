@@ -37,16 +37,24 @@ expected to carry them. What replaced the old rule is narrower than "writable":
 - **Never push to their working branch** — `OnboardHmi_MVP` for the onboard HMI,
   `main` for the simulator. Never force-push anything there, never delete or
   rewrite a branch that is not ours, never tag or release.
-- **Changes reach Kun Wang as a pull request** into that working branch, and
-  **since 2026-09-08 we merge it ourselves once he has agreed.** The pull request
-  is still how a change arrives — it is what he reviews and what records the
-  decision — but clicking merge is no longer his to do. Until that date the rule
-  was the opposite ("a merged PR is a decision, not a delivery"); the user
-  changed it because waiting on the click was stalling work he had already
-  approved. Everything else about those branches is unchanged: never push to
-  `OnboardHmi_MVP` or `main` directly, never force-push, never delete or rewrite
-  a branch that is not ours, never tag or release. **Agreement still has to come
-  from him** — merging without it is not covered by this change.
+- **Changes still arrive as a pull request** into that working branch, and
+  **since 2026-09-09 both the agreement and the merge are ours.** The pull request
+  is not ceremony: it is still where a change is reviewed, where its evidence is
+  recorded, and what the slice board points at. What it is no longer is a gate
+  somebody outside this workspace holds.
+
+  This rule moved twice, and the second move is the one to remember. Until
+  2026-09-08 a merged PR was "a decision, not a delivery" — Kun Wang clicked
+  merge. That day the click moved to us while **his agreement was still
+  required**. On 2026-09-09 the user removed that requirement too, on exactly the
+  grounds that moved the release signature: he took over Kun Wang's project
+  outright, so a rule demanding an approval nobody is there to give does not hold
+  a line — it just stalls work, and gets worked around instead of followed.
+
+  Everything else about those branches is unchanged: **never push to
+  `OnboardHmi_MVP` or `main` directly** — a change still gets there by opening a
+  PR and merging it, never by pushing — never force-push, never delete or rewrite
+  a branch that is not ours, never tag or release.
 - Issues, pull requests and comments stay allowed, as they have been since
   2026-09-03.
 
@@ -149,9 +157,9 @@ and not back to 5.1.
 
 项目由两个人推进。**分工在 2026-09-04 变了**：`8005-agv-onboard-hmi` 与
 `slots-simulator` 原本由 Kun Wang（GitHub `SocialKKKK`）负责，现在**开发工作在
-Zhengyu Shao 这边**——我们在那两个仓开自己的 `w2g/*` 分支改，改完以 PR 的形式交给他，
-由他决定合不合（见上面 Branch-scoped write）。`8005-agv-control-server` 一直是
-Zhengyu Shao 的；`8005-agv-protocol` 共同维护。**权威文档是
+Zhengyu Shao 这边**——我们在那两个仓开自己的 `w2g/*` 分支改，改完开 PR 进它们的工作分支，
+**2026-09-09 起同意与合并都归我方**，不再等 Kun Wang（见上面 Branch-scoped write）。
+`8005-agv-control-server` 一直是 Zhengyu Shao 的；`8005-agv-protocol` 共同维护。**权威文档是
 `repos/8005-agv-program/docs/collaboration-workflow.md`**，各仓 `CLAUDE.md` 里内联了
 agent 必须遵守的部分。
 
