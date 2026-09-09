@@ -28,7 +28,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Baseline = @{
-    Sdk              = '8.0.424'
+    Sdk              = '8.0.425'
     RollForward      = 'disable'
     TargetFrameworks = @('net8.0', 'net8.0-windows')
     TestPackages     = @{
