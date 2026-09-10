@@ -46,9 +46,15 @@
     reaches the gate with nothing to open. So the wait is real, and the trip
     between load and unload is never interrupted.
 
-    A journey that ends Blocked is reported and nothing is stopped. Blocked is
-    still unresolved, so the engine never reaches discovery and there is no next
-    demand to race for, while recovery needs the loop a stop would remove.
+    A journey that is Blocked is reported and nothing is stopped. Blocked is not
+    terminal -- only Completed is -- so the engine never reaches discovery and
+    there is no next demand to race for, while recovery needs the loop a stop
+    would remove.
+
+    A JOURNEY CARRIES DEMANDS. Since protocol 0.2.0 a journey has its own id and
+    its demands live in JourneyDemands; it can take on another demand at a later
+    stop. So the watch is on a journey, and the demands that journey took on
+    while it was watched are its own, not ones the runtime slipped through.
 
 .PARAMETER ServerDatabase
     The SQLite file the watcher reads. Pointing it at a copy is how the
@@ -56,7 +62,8 @@
     write and the verification are real, only the completion signal is not.
 
 .PARAMETER DemandId
-    Watch this journey rather than latching onto whichever one is unresolved.
+    Watch the journey carrying this demand rather than latching onto whichever
+    one is unresolved.
 
 .PARAMETER Force
     Suppress the confirmation prompt by lowering $ConfirmPreference, the same way
@@ -129,7 +136,8 @@ $sqlitePrelude
     accepted      = Read-Column 'SELECT DemandId FROM AcceptedDemands ORDER BY DemandId'
     intentDemands = Read-Column 'SELECT DISTINCT DemandId FROM OrderIntents ORDER BY DemandId'
     intentLegs    = Read-Column 'SELECT MovementLegId FROM OrderIntents'
-    journeys = Read-Column "SELECT DemandId || ' ' || Stage || ' ' || COALESCE(BlockReasonCode, '-') FROM JourneyRuntimes ORDER BY CreatedAt"
+    journeys = Read-Column "SELECT r.JourneyId || ' ' || r.Stage || ' ' || COALESCE(r.BlockReasonCode, '-') || ' demands ' || COALESCE((SELECT group_concat(d.DemandId, ',') FROM JourneyDemands d WHERE d.JourneyId = r.JourneyId), '-') FROM JourneyRuntimes r WHERE r.Stage <> 'Completed' ORDER BY r.CreatedAt"
+    newest   = Read-Column "SELECT JourneyId || ' ' || Stage FROM JourneyRuntimes ORDER BY UpdatedAt DESC LIMIT 1"
     runtime  = [bool](Get-Content -LiteralPath '$ServerConfigPath' -Raw | ConvertFrom-Json).JourneyRuntime.enabled
     dispatch = [bool](Get-Content -LiteralPath '$ServerConfigPath' -Raw | ConvertFrom-Json).RiotCreateDispatch.enabled
     service  = (Get-Service -Name '$($ServiceName -replace "'", "''")').Status.ToString()
@@ -145,11 +153,14 @@ Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Watching $ServerAlias for the journ
 $before = Get-ServerState
 $beforeLevel = -not $before.runtime ? 'Off' : ($before.dispatch ? 'Dispatch' : 'Intake')
 Write-Step "Gates are $beforeLevel (runtime=$($before.runtime), createDispatch=$($before.dispatch)); service is $($before.service)"
-if (@($before.journeys).Count -eq 0) {
-    Write-Step 'No journey on the server yet; the watcher will wait for one to appear.'
+if (@($before.journeys).Count) {
+    foreach ($j in @($before.journeys)) { Write-Step "Journey in flight: $j" }
+}
+elseif (@($before.newest).Count -and -not $DemandId) {
+    Write-Step "No journey in flight; the newest is $(@($before.newest)[0]). The watcher will latch onto it and close the gates at once."
 }
 else {
-    foreach ($j in @($before.journeys)) { Write-Step "Journey: $j" }
+    Write-Step 'No journey on the server yet; the watcher will wait for one to appear.'
 }
 Write-Step "AcceptedDemands=$(@($before.accepted).Count) OrderIntent legs=$(@($before.intentLegs).Count)"
 if (-not $before.runtime) {
@@ -157,7 +168,7 @@ if (-not $before.runtime) {
     Write-Host '  The watch still runs; it will prove the close path rather than guard a real race.' -ForegroundColor Yellow
 }
 
-$target = $DemandId ? "$ServerAlias (journey $DemandId)" : "$ServerAlias (whichever journey is in flight)"
+$target = $DemandId ? "$ServerAlias (the journey carrying $DemandId)" : "$ServerAlias (whichever journey is in flight)"
 if (-not $PSCmdlet.ShouldProcess($target, 'Wait for Completed, then stop the service and close both journey gates')) {
     return
 }
@@ -199,7 +210,7 @@ $result = ConvertFrom-RemoteJson $lines
 switch ($result.status) {
     'COMPLETED' { }
     'STOP_FAILED' {
-        throw "Journey $($result.demandId) completed but the service could not be stopped: $($result.stopError). THE GATES ARE STILL OPEN -- close them yourself with Set-JourneyRuntime.ps1 -Off."
+        throw "Journey $($result.journeyId) completed but the service could not be stopped: $($result.stopError). THE GATES ARE STILL OPEN -- close them yourself with Set-JourneyRuntime.ps1 -Off."
     }
     default {
         throw "$($result.status): $($result.message) THE GATES WERE NOT CHANGED."
@@ -212,7 +223,7 @@ switch ($result.status) {
 $completedAt = $result.completedRecordedAtUtc -is [datetime] `
     ? ([datetime]$result.completedRecordedAtUtc).ToUniversalTime().ToString('o') `
     : [string]$result.completedRecordedAtUtc
-Write-Step "Journey $($result.demandId) reached Completed at $completedAt (server record, UTC)"
+Write-Step "Journey $($result.journeyId) (demands $(@($result.demandIds) -join ', ')) reached Completed at $completedAt (server record, UTC)"
 Write-Step "Service stop requested $($result.reactionMs) ms after that record, stopped in $($result.stopDurationMs) ms; service is $($result.serviceStatus)"
 
 # ------------------------------------------------------------------- close ---
@@ -257,16 +268,21 @@ Write-Step 'Verified on the server: runtime=False, createDispatch=False, service
 # first real run on 2026-09-08 latched at one leg and finished at two, and a
 # leg-id comparison called that a lost race when nothing had been taken. What
 # must not appear is another accepted demand, or a movement leg for one.
+#
+# "Another" means one the watched journey does not carry. A journey can take on a
+# demand at a later stop (WireToGateStore.JoinJourneyAsync), which adds an
+# AcceptedDemands row mid-trip; that demand is this trip, not a lost race.
 $acceptedAtLatch = @($result.acceptedDemandIdsAtLatch)
 $acceptedNow = @($after.accepted)
 $intentDemandsAtLatch = @($result.orderIntentDemandIdsAtLatch)
 $intentDemandsNow = @($after.intentDemands)
-$newDemands = @($acceptedNow | Where-Object { $_ -notin $acceptedAtLatch })
-$newIntentDemands = @($intentDemandsNow | Where-Object { $_ -notin $intentDemandsAtLatch })
+$ownDemands = @($result.demandIds)
+$newDemands = @($acceptedNow | Where-Object { $_ -notin $acceptedAtLatch -and $_ -notin $ownDemands })
+$newIntentDemands = @($intentDemandsNow | Where-Object { $_ -notin $intentDemandsAtLatch -and $_ -notin $ownDemands })
 
 Write-Host ''
-Write-Host "AcceptedDemands $($acceptedAtLatch.Count) -> $($acceptedNow.Count); demands with a movement leg $($intentDemandsAtLatch.Count) -> $($intentDemandsNow.Count); legs $($result.orderIntentLegsAtLatch) -> $(@($after.intentLegs).Count) (this journey's own second leg is expected)" -ForegroundColor Green
+Write-Host "AcceptedDemands $($acceptedAtLatch.Count) -> $($acceptedNow.Count); demands with a movement leg $($intentDemandsAtLatch.Count) -> $($intentDemandsNow.Count); legs $($result.orderIntentLegsAtLatch) -> $(@($after.intentLegs).Count) (this journey's own demands and legs are expected)" -ForegroundColor Green
 if ($newDemands.Count -or $newIntentDemands.Count) {
     throw "The gate shut, but not before the runtime took another demand: accepted [$($newDemands -join ', ')]; dispatched [$($newIntentDemands -join ', ')]. The vehicle may be moving. Check it, then 12-reset-journey-state.ps1."
 }
-Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Both gates closed after journey $($result.demandId); nothing new was accepted." -ForegroundColor Green
+Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Both gates closed after journey $($result.journeyId); nothing new was accepted." -ForegroundColor Green

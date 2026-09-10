@@ -1,8 +1,9 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-    Clears an in-flight WIRE_TO_GATE journey from BOTH ends so the next one
-    starts clean. Runs ON the control host. Test environments only.
+    Settles every in-flight WIRE_TO_GATE journey on the server and clears the
+    vehicle's onboard journal -- both ends or neither -- so the next journey
+    starts clean. Runs ON the control host.
 
 .DESCRIPTION
     This exists because clearing one end is worse than clearing neither, and
@@ -20,24 +21,69 @@
 
     So this script resets the pair, or neither:
 
-        server (factory01)  every row keyed to the in-flight demand or its
-                            station operation, plus any unacknowledged outbox
-                            message -- a queued command for a demand that no
-                            longer exists would be replayed at the next session
+        server (factory01)  every journey whose Stage is not Completed is SETTLED
+                            the way the product settles a journey that never
+                            loaded: its demands cancelled and permanently
+                            suppressed, its lease released, its pending outbox
+                            acknowledged, and the journey row marked Completed and
+                            KEPT. server-settle-journey.ps1 does the work and
+                            documents the write set.
         vehicle (agv01)     the whole onboard journal file, which the client
                             recreates empty on its next start
                             (SqliteWireToGateJournal uses CREATE TABLE IF NOT EXISTS)
 
-    Both stores are backed up first, and both backups are kept: they are the
-    evidence for whatever made the reset necessary.
+    WHY SETTLE, NOT DELETE. Until 2026-09-10 this script deleted rows, and by
+    then it was both broken and wrong. Broken, because protocol 0.2.0 gave the
+    journey its own identity (migration MultiDemandJourneyStopSequence,
+    2026-09-08): JourneyRuntimes has no DemandId column any more, and the survey
+    threw before anything was deleted. Wrong, because a delete that matched
+    tables by a DemandId column could never reach JourneyRuntimes, JourneyStops
+    or VehicleDispatchLeases -- and an unreleased lease blocks every future
+    intake -- and because deleting a JourneyRuntimes row takes the vehicle's
+    revision history with it: a new journey seeds its snapshot revisions from the
+    MAX over that vehicle's rows. That is the 2026-09-04 failure again. A settled
+    row keeps the history, so a settled server and an emptied journal agree: the
+    new journal accepts whatever revision comes next. The settlement was first
+    done by hand on production on 2026-09-10 (8005-agv-program#19); this is that
+    procedure made repeatable.
 
-    THIS IS NOT A PRODUCT FEATURE. Nothing here belongs in a plant that is
-    running work. A real stuck journey is resolved through recovery, which is
-    what the recovery state machine and `docs/defects/` are about. This is the
-    blunt instrument for a test rig whose leftovers are in the way.
+    WHAT IT REFUSES. A journey still carrying a demand with a commanded slot
+    operation -- any StationOperations row. A door may be open or cargo on board,
+    and only the peer can settle that, through recovery. The refusal comes from
+    the survey, before either end is touched, and -WhatIf reports it too.
+
+    THE ORDER, AND WHY THE SERVER GOES FIRST. The server's half is the one that
+    can be undone: one transaction, rolled back on any surprise, service put back
+    as it was found. So it runs first, and the journal is removed only after a
+    committed settlement. (The old order was journal first; on 2026-09-07 the
+    server half then failed, and the journal was already gone.) The service is
+    left stopped until the journal is gone, so a settled server never runs
+    against a vehicle still holding the abandoned journey. If the journal step
+    fails, the script stops there, says so, and leaves the service stopped on
+    purpose.
+
+    WHAT IT DOES NOT DO. Cancel RIoT orders -- the server has no way to; the
+    survey lists the journey's legs so they can be checked by hand. Reset
+    SessionRecoveries -- the vehicle's next handshake recomputes readiness. Touch
+    JourneyStops -- the product leaves them as they are, too.
+
+    THIS IS NOT A PRODUCT FEATURE. A stuck journey the product can still reach --
+    operator cancellation, station timeout, recovery -- goes through the product.
+    This is for a journey none of those can reach, typically one behind a session
+    that never became Ready.
 
     The vehicle's client is stopped for the duration -- the journal is open
     while it runs -- and restarted at the end.
+
+.PARAMETER ReasonCode
+    Recorded on each suppression and on the journey. One of the codes
+    WireToGateStore.SuppressingReasonCodes accepts, matched exactly. There is no
+    default: the suppression is permanent -- no entry point lifts it, and it also
+    catches the fresh DemandId MesIngest allocates if the same lot leaves the
+    catalog and returns -- so the reason is the lasting explanation of why a lot
+    is never moved again. A person abandoning the lots is CANCELLED_BY_OPERATOR,
+    which is what 2026-09-10 recorded. Not needed for -WhatIf, or when nothing is
+    in flight.
 
 .PARAMETER KeepStackDown
     Leave the onboard client and simulator stopped at the end. Useful when the
@@ -57,13 +103,15 @@
     to prompt on.
 
 .PARAMETER WhatIf
-    Report what would be deleted on both ends and stop.
+    Report what would be settled on both ends, and what would be refused, then
+    stop. The survey script is copied to the server's ops directory and removed
+    again; neither store is changed.
 
 .EXAMPLE
     ./12-reset-journey-state.ps1 -WhatIf
 
 .EXAMPLE
-    ./12-reset-journey-state.ps1
+    ./12-reset-journey-state.ps1 -ReasonCode CANCELLED_BY_OPERATOR
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
@@ -72,8 +120,13 @@ param(
     [string] $ServerDatabase = 'C:\ProgramData\8005\ControlServer\data\controlserver.db',
     [string] $ServerInstallRoot = 'C:\Program Files\8005 AGV\ControlServer',
     [string] $ServerBackupRoot = 'D:\zhengyushao\control-server-ops',
+    [string] $ServiceName = '8005 AGV ControlServer',
     [string] $VehicleJournal = 'C:\Users\HT\AppData\Local\SQCD\8005AGV\onboard-journal.db',
     [string] $VehicleBackupRoot = 'C:\8005\journal-backup',
+    # WireToGateStore.SuppressingReasonCodes; server-settle-journey.ps1 checks it again.
+    [ValidateSet('CANCELLED_BY_OPERATOR', 'CANCELLED_BY_LOAD_COMPENSATION', 'CANCELLED_BY_STOP_COMPLETE',
+        'CANCELLED_BY_STATION_TIMEOUT', 'TERMINATED_BY_FAULT_CARGO_HANDOFF', IgnoreCase = $false)]
+    [string] $ReasonCode,
     [switch] $KeepStackDown,
     [switch] $NoSimulator,
     [switch] $Force,
@@ -96,89 +149,155 @@ function Invoke-Remote {
 
 $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss')
 
+# The settlement runs from a file copied to the server, never from an encoded
+# command line or stdin. An interpolated remote script grew with its input, and
+# on 2026-09-07 the encoded command came back "not properly encoded" halfway
+# through a reset; stdin silently skips multi-line blocks. The file is fixed
+# size, takes plain arguments, and does its own discovery.
+$settleLocal = Join-Path $PSScriptRoot 'server-settle-journey.ps1'
+if (-not (Test-Path -LiteralPath $settleLocal)) { throw "Settlement script not found: $settleLocal" }
+$settleRemote = "$ServerBackupRoot\server-settle-journey-$stamp.ps1"
+$settleArgs = "-Database '$ServerDatabase' -InstallRoot '$ServerInstallRoot'"
+
+function Invoke-Settlement {
+    param([string] $Arguments)
+
+    $lines = @(& ssh -o BatchMode=yes -o ConnectTimeout=15 $ServerAlias `
+            "pwsh -NoProfile -ExecutionPolicy Bypass -File '$settleRemote' $settleArgs $Arguments" 2>&1 |
+            ForEach-Object { [string]$_ })
+    $exit = $LASTEXITCODE
+    # ssh folds its own stderr in, so the result is the last line that starts an
+    # object, not the whole output.
+    $json = $lines | Where-Object { $_.TrimStart().StartsWith('{') } | Select-Object -Last 1
+    if ($exit -ne 0 -or -not $json) {
+        throw "server-settle-journey.ps1 failed on $ServerAlias (exit $exit):`n$($lines -join "`n")"
+    }
+    return $json | ConvertFrom-Json
+}
+
 # ---------------------------------------------------------------- survey ---
 
-# Which demand is in flight, and what would go? Discovered rather than passed
-# in: the point of the script is that both ends agree afterwards, and a demand
-# id typed by hand is one more thing that can be wrong.
-#
-# Tables are matched by column, not by name. The set of tables carrying a
-# DemandId has grown twice already, and a reset that misses one leaves exactly
-# the kind of half-state this script exists to prevent.
-$surveyScript = @"
-`$dll = (Get-ChildItem '$ServerInstallRoot' -Filter 'Microsoft.Data.Sqlite.dll' -Recurse | Select-Object -First 1).FullName
-Add-Type -Path `$dll
-`$c = [Microsoft.Data.Sqlite.SqliteConnection]::new('Data Source=$ServerDatabase;Mode=ReadOnly')
-`$c.Open()
-`$m = `$c.CreateCommand(); `$m.CommandText = 'SELECT DemandId FROM JourneyRuntimes'
-`$demands = @(); `$r = `$m.ExecuteReader(); while (`$r.Read()) { `$demands += `$r.GetString(0) }; `$r.Close()
-`$m2 = `$c.CreateCommand(); `$m2.CommandText = 'SELECT SlotOperationAttemptId FROM StationOperations'
-`$attempts = @(); `$r2 = `$m2.ExecuteReader(); while (`$r2.Read()) { `$attempts += `$r2.GetString(0) }; `$r2.Close()
-`$tables = @(); `$mt = `$c.CreateCommand()
-`$mt.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> '__EFMigrationsHistory' ORDER BY name"
-`$rt = `$mt.ExecuteReader(); while (`$rt.Read()) { `$tables += `$rt.GetString(0) }; `$rt.Close()
-`$plan = @()
-foreach (`$t in `$tables) {
-    `$ci = `$c.CreateCommand(); `$ci.CommandText = "PRAGMA table_info([`$t])"
-    `$cols = @(); `$ri = `$ci.ExecuteReader(); while (`$ri.Read()) { `$cols += `$ri.GetString(1) }; `$ri.Close()
-    `$where = @()
-    if (`$cols -contains 'DemandId' -and `$demands.Count) {
-        `$where += "DemandId IN ('" + (`$demands -join "','") + "')"
+Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settling journey state on $ServerAlias + $SshAlias" -ForegroundColor Green
+
+$null = Invoke-Remote $ServerAlias "New-Item -ItemType Directory -Path '$ServerBackupRoot' -Force | Out-Null"
+& scp -o BatchMode=yes $settleLocal "${ServerAlias}:$settleRemote" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not copy the settlement script to $ServerAlias" }
+
+try {
+    # Which journeys are in flight, and what would be written? Discovered rather
+    # than passed in: the point of the script is that both ends agree afterwards,
+    # and an id typed by hand is one more thing that can be wrong.
+    $survey = Invoke-Settlement ''
+    $journeys = @($survey.journeys)
+
+    if (-not $journeys.Count) { Write-Step 'Server: no journey in flight.' }
+    foreach ($journey in $journeys) {
+        $blocked = $journey.blockReasonCode ? " / $($journey.blockReasonCode)" : ''
+        Write-Step "Journey $($journey.journeyId): $($journey.stage)$blocked on $($journey.agvId), updated $($journey.updatedAt)"
+        Write-Step "  revisions $($journey.revisions) (kept; the next journey continues from here)"
+        foreach ($demand in @($journey.demands)) {
+            $facts = @("stop $($demand.stopSequence)", $demand.state, "accepted $($demand.acceptedStatus ?? '(no row)')")
+            if ($demand.suppressed) { $facts += 'already suppressed' }
+            if ($demand.stationOperations) { $facts += "$($demand.stationOperations) station operation(s)" }
+            if ($demand.recoveryWorkflows) { $facts += "$($demand.recoveryWorkflows) recovery workflow(s)" }
+            Write-Step "  demand $($demand.demandId): $($facts -join ', ')"
+        }
+        $lease = $journey.lease ? ($journey.lease.releasedAt ? "released $($journey.lease.releasedAt)" : "HELD since $($journey.lease.acquiredAt)") : '(no row)'
+        Write-Step "  lease: $lease"
+        # A script block, not `ForEach-Object messageType`: the member-name form
+        # honours ShouldProcess, so under -WhatIf it announces itself instead of
+        # returning anything.
+        Write-Step "  pending outbox of this journey: $(@($journey.outbox).Count) [$((@($journey.outbox) | ForEach-Object { $_.messageType }) -join ', ')]"
+        foreach ($leg in @($journey.riotLegs)) {
+            Write-Step "  RIoT leg $($leg.purpose) $($leg.movementLegId): $($leg.status) order $($leg.orderId ?? '-') (not cancelled by this script)"
+        }
+        if (@($journey.refusals).Count) {
+            Write-Step '  would refuse this journey (below); nothing would be written'
+        }
+        else {
+            Write-Step ("  would write: AcceptedDemands {0}, TransportDemandSuppressions {1}, JourneyDemands {2}, VehicleDispatchLeases {3}, ProtocolOutbox {4}, JourneyRuntimes 1" -f
+                @($journey.cancelDemandIds).Count, @($journey.suppressDemandIds).Count, @($journey.settleDemandIds).Count,
+                ($journey.releaseLease ? 1 : 0), @($journey.outbox).Count)
+        }
     }
-    if (`$cols -contains 'SlotOperationAttemptId' -and `$attempts.Count) {
-        `$where += "SlotOperationAttemptId IN ('" + (`$attempts -join "','") + "')"
+    foreach ($message in @($survey.unattributedOutbox)) {
+        Write-Step "Pending outbox row not attributable to a journey, left alone: $($message.messageType) $($message.messageId)"
     }
-    if (`$t -eq 'ProtocolOutbox') { `$where += 'AcknowledgedAt IS NULL' }
-    if (-not `$where.Count) { continue }
-    `$clause = `$where -join ' OR '
-    `$q = `$c.CreateCommand(); `$q.CommandText = "SELECT COUNT(*) FROM [`$t] WHERE `$clause"
-    `$n = [int]`$q.ExecuteScalar()
-    if (`$n -gt 0) { `$plan += [pscustomobject]@{ table = `$t; rows = `$n; where = `$clause } }
-}
-`$c.Close()
-[pscustomobject]@{ demands = `$demands; attempts = `$attempts; plan = `$plan } | ConvertTo-Json -Depth 6 -Compress
-"@
 
-Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Resetting journey state on $ServerAlias + $SshAlias" -ForegroundColor Green
-$survey = Invoke-Remote $ServerAlias $surveyScript | ConvertFrom-Json
-
-if (-not $survey.plan -or $survey.plan.Count -eq 0) {
-    Write-Step 'Server has nothing to clear.'
-} else {
-    Write-Step "In-flight demands: $((@($survey.demands) -join ', ') ?? '(none)')"
-    foreach ($p in $survey.plan) { Write-Step ("{0,-32} {1} row(s)" -f $p.table, $p.rows) }
-}
-$serverTotal = ($survey.plan | Measure-Object -Property rows -Sum).Sum ?? 0
-
-$journalInfo = Invoke-Remote $SshAlias @"
+    $journalInfo = Invoke-Remote $SshAlias @"
 if (Test-Path -LiteralPath '$VehicleJournal') {
     `$f = Get-Item -LiteralPath '$VehicleJournal'
     "`$(`$f.Length) bytes, last written `$(`$f.LastWriteTime.ToString('o'))"
 } else { '(absent)' }
 "@
-Write-Step "Vehicle journal: $journalInfo"
+    Write-Step "Vehicle journal: $journalInfo"
 
-if ($WhatIfPreference) {
-    Write-Host '  WhatIf: nothing was changed on either end.' -ForegroundColor Yellow
-    return
-}
-# Both strings are built first: ShouldProcess throws a bare null-reference when
-# either argument is null, which says nothing about which one it was.
-$target = '{0} ({1} rows) and {2} (the onboard journal)' -f $ServerAlias, $serverTotal, $SshAlias
-$action = 'Delete journey state from both ends'
-if (-not $PSCmdlet.ShouldProcess($target, $action)) {
-    return
-}
+    $refusals = @($survey.refusals)
+    foreach ($refusal in $refusals) { Write-Host "  REFUSED: $refusal" -ForegroundColor Red }
 
-# ------------------------------------------------------------- vehicle ---
+    if ($WhatIfPreference) {
+        Write-Host "  WhatIf: nothing was changed on either end$($refusals.Count ? '; a real run would refuse' : '')." -ForegroundColor Yellow
+        return
+    }
+    if ($refusals.Count) {
+        throw "Refused before touching either end: $($refusals -join '; ')."
+    }
+    if (-not $journeys.Count -and $journalInfo -eq '(absent)') {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Nothing to do on either end." -ForegroundColor Green
+        return
+    }
+    if ($journeys.Count -and -not $ReasonCode) {
+        throw '-ReasonCode is required to settle: every demand still carried is suppressed PERMANENTLY under it. Run with -WhatIf to see which demands those are.'
+    }
 
-# The client holds the journal open, and it must not be running while the
-# server's rows go either: it would reconnect mid-delete and report facts about
-# a demand that is half gone.
-Write-Step 'Stopping the onboard stack'
-& (Join-Path $PSScriptRoot '10-start-onboard-stack.ps1') -SshAlias $SshAlias -Stop | Out-Null
+    # Both strings are built first: ShouldProcess throws a bare null-reference when
+    # either argument is null, which says nothing about which one it was.
+    $cancelled = @($journeys | ForEach-Object { @($_.cancelDemandIds) }).Count
+    $target = $journeys.Count `
+        ? ('{0} ({1} journey(s) settled; {2} demand(s) cancelled and PERMANENTLY suppressed as {3}) and {4} (the onboard journal)' -f
+            $ServerAlias, $journeys.Count, $cancelled, $ReasonCode, $SshAlias) `
+        : ('{0} (the onboard journal; nothing is in flight on {1})' -f $SshAlias, $ServerAlias)
+    $action = 'Settle journey state on both ends'
+    if (-not $PSCmdlet.ShouldProcess($target, $action)) {
+        return
+    }
 
-$vehicleResult = Invoke-Remote $SshAlias @"
+    # ------------------------------------------------------ onboard stop ---
+
+    # The client holds the journal open, and it must not be running while the
+    # server settles either: it would reconnect mid-way and report facts about a
+    # journey that is half closed.
+    Write-Step 'Stopping the onboard stack'
+    & (Join-Path $PSScriptRoot '10-start-onboard-stack.ps1') -SshAlias $SshAlias -Stop | Out-Null
+
+    # ---------------------------------------------------------- server ---
+
+    $settled = $null
+    if ($journeys.Count) {
+        $ids = @($journeys | ForEach-Object { $_.journeyId }) -join ','
+        $settled = Invoke-Settlement ("-Settle -ServiceName '{0}' -BackupRoot '{1}' -ReasonCode {2} -Stamp {3} -ExpectJourneyIds '{4}'" -f
+            ($ServiceName -replace "'", "''"), $ServerBackupRoot, $ReasonCode, $stamp, $ids)
+        switch ($settled.status) {
+            'SETTLED' {
+                foreach ($table in $settled.writes.PSObject.Properties) { Write-Step ("{0,-28} {1}" -f $table.Name, $table.Value) }
+                Write-Step "Server settled as $ReasonCode; backup at $($settled.backup); service is $($settled.serviceStatus)"
+            }
+            'REFUSED' {
+                throw "$ServerAlias refused the settlement: $($settled.message) $(@($settled.refusals) -join '; ') Nothing changed on either end; the onboard stack is stopped."
+            }
+            default {
+                throw "Settlement on $ServerAlias ended $($settled.status): $($settled.message) The onboard journal was NOT touched and the onboard stack is stopped. Check '$ServiceName' on $ServerAlias before anything else."
+            }
+        }
+    }
+    else {
+        Write-Step 'Server: nothing to settle'
+    }
+
+    # --------------------------------------------------------- vehicle ---
+
+    try {
+        $vehicleResult = Invoke-Remote $SshAlias @"
 `$ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath '$VehicleJournal')) { '(no journal to reset)'; return }
 `$dest = '$VehicleBackupRoot-$stamp'
@@ -189,76 +308,22 @@ Get-ChildItem (Split-Path -Parent '$VehicleJournal') -Filter 'onboard-journal.db
     ForEach-Object { Remove-Item `$_.FullName -Force }
 "backed up to `$dest and removed; the client recreates it empty on next start"
 "@
-Write-Step "Journal: $vehicleResult"
-
-# -------------------------------------------------------------- server ---
-
-if ($serverTotal -gt 0) {
-    # The delete runs from a file copied to the server, not from an encoded
-    # command line. Interpolating the survey's plan into the remote script made
-    # its length grow with the number of tables, and on 2026-09-07 the encoded
-    # command came back "not properly encoded" -- the vehicle journal was already
-    # gone by then, which is precisely the half-state this script exists to
-    # avoid. So the remote script is a fixed size and repeats the discovery on
-    # the server instead of carrying it across.
-    $remoteScript = @"
-`$ErrorActionPreference = 'Stop'
-`$db = '$ServerDatabase'
-`$root = '$ServerInstallRoot'
-`$svc = '8005 AGV ControlServer'
-Stop-Service -Name `$svc -Force
-`$dest = '$ServerBackupRoot\db-backup-$stamp'
-New-Item -ItemType Directory -Path `$dest -Force | Out-Null
-foreach (`$suffix in '', '-wal', '-shm') {
-    `$p = "`$db`$suffix"
-    if (Test-Path -LiteralPath `$p) { Copy-Item -LiteralPath `$p -Destination `$dest -Force }
-}
-`$dll = (Get-ChildItem `$root -Filter 'Microsoft.Data.Sqlite.dll' -Recurse | Select-Object -First 1).FullName
-Add-Type -Path `$dll
-`$c = [Microsoft.Data.Sqlite.SqliteConnection]::new("Data Source=`$db")
-`$c.Open()
-`$demands = @(); `$attempts = @()
-`$m = `$c.CreateCommand(); `$m.CommandText = 'SELECT DemandId FROM JourneyRuntimes'
-`$r = `$m.ExecuteReader(); while (`$r.Read()) { `$demands += `$r.GetString(0) }; `$r.Close()
-`$m = `$c.CreateCommand(); `$m.CommandText = 'SELECT SlotOperationAttemptId FROM StationOperations'
-`$r = `$m.ExecuteReader(); while (`$r.Read()) { `$attempts += `$r.GetString(0) }; `$r.Close()
-`$tables = @(); `$m = `$c.CreateCommand()
-`$m.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> '__EFMigrationsHistory' ORDER BY name"
-`$r = `$m.ExecuteReader(); while (`$r.Read()) { `$tables += `$r.GetString(0) }; `$r.Close()
-`$tx = `$c.BeginTransaction()
-`$total = 0
-foreach (`$t in `$tables) {
-    `$ci = `$c.CreateCommand(); `$ci.Transaction = `$tx; `$ci.CommandText = "PRAGMA table_info([`$t])"
-    `$cols = @(); `$ri = `$ci.ExecuteReader(); while (`$ri.Read()) { `$cols += `$ri.GetString(1) }; `$ri.Close()
-    `$where = @()
-    if (`$cols -contains 'DemandId' -and `$demands.Count) { `$where += "DemandId IN ('" + (`$demands -join "','") + "')" }
-    if (`$cols -contains 'SlotOperationAttemptId' -and `$attempts.Count) { `$where += "SlotOperationAttemptId IN ('" + (`$attempts -join "','") + "')" }
-    if (`$t -eq 'ProtocolOutbox') { `$where += 'AcknowledgedAt IS NULL' }
-    if (-not `$where.Count) { continue }
-    `$d = `$c.CreateCommand(); `$d.Transaction = `$tx
-    `$d.CommandText = "DELETE FROM [`$t] WHERE " + (`$where -join ' OR ')
-    `$n = `$d.ExecuteNonQuery()
-    if (`$n -gt 0) { "  {0,-32} {1}" -f `$t, `$n; `$total += `$n }
-}
-`$tx.Commit()
-`$c.Close()
-"  committed `$total rows; backup at `$dest"
-Start-Service -Name `$svc
-"@
-    $localTemp = Join-Path ([IO.Path]::GetTempPath()) "w2g-server-reset-$stamp.ps1"
-    Set-Content -LiteralPath $localTemp -Value $remoteScript -Encoding utf8NoBOM
-    try {
-        & scp -o BatchMode=yes $localTemp "${ServerAlias}:$ServerBackupRoot/server-reset-$stamp.ps1" 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Could not copy the reset script to $ServerAlias" }
-        $deleted = & ssh -o BatchMode=yes $ServerAlias `
-            "pwsh -NoProfile -ExecutionPolicy Bypass -File `"$ServerBackupRoot\server-reset-$stamp.ps1`"; Remove-Item `"$ServerBackupRoot\server-reset-$stamp.ps1`" -Force" 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Server reset failed: $(($deleted | Out-String).Trim())" }
-        ($deleted | Out-String) -split "`r?`n" | ForEach-Object { if ($_.Trim()) { Write-Step $_.Trim() } }
-    } finally {
-        Remove-Item -LiteralPath $localTemp -Force -ErrorAction SilentlyContinue
     }
-} else {
-    Write-Step 'Server: nothing to delete'
+    catch {
+        if ($settled) {
+            throw "HALF DONE. $ServerAlias is settled (backup $($settled.backup)) and '$ServiceName' is left STOPPED on purpose, but the journal on $SshAlias was not cleared: $($_.Exception.Message) Clear $VehicleJournal by hand, then start the service."
+        }
+        throw
+    }
+    Write-Step "Journal: $vehicleResult"
+
+    if ($settled -and $settled.serviceWasRunning) {
+        $null = Invoke-Remote $ServerAlias "Start-Service -Name '$($ServiceName -replace "'", "''")'"
+        Write-Step "Service '$ServiceName' started again"
+    }
+}
+finally {
+    & ssh -o BatchMode=yes -o ConnectTimeout=15 $ServerAlias "Remove-Item -LiteralPath '$settleRemote' -Force -ErrorAction SilentlyContinue" 2>&1 | Out-Null
 }
 
 # ------------------------------------------------------------- restart ---

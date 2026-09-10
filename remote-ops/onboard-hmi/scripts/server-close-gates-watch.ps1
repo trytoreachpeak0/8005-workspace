@@ -42,11 +42,21 @@
     load would drive to the gate and find nothing opening. `-Off` not stopping an
     in-flight journey is true of the VEHICLE, not of the server-side journey.
 
-    Blocked is the other terminal stage and it is NOT a reason to stop the
-    service. A blocked journey still counts as unresolved, so the engine never
-    reaches discovery and no new demand can be accepted -- there is no race to
-    win -- while recovery needs the loop that a stop would take away. It is
-    reported and the service is left alone.
+    Completed IS THE ONLY TERMINAL STAGE. The engine counts every other stage as
+    an unresolved journey (JourneyRuntimeEngine.ExecuteOnceAsync), Blocked
+    included: Blocked is where recovery runs, and a recovered journey leaves it.
+    So a Blocked journey is latched like any other, then reported, and the
+    service is left alone -- while it is unresolved the engine never reaches
+    discovery, so there is no race to win, and recovery needs the loop a stop
+    would take away. This watcher used to treat Blocked as terminal when
+    latching, which is not the engine's view: started beside a Blocked journey it
+    skipped it, announced the runtime idle, and latched onto whichever journey
+    had been updated last.
+
+    A JOURNEY, NOT A DEMAND. Since protocol 0.2.0 (migration
+    MultiDemandJourneyStopSequence, 2026-09-08) a journey has its own id and
+    carries its demands in JourneyDemands -- it may pick up more of them on the
+    way. JourneyRuntimes has no DemandId column any more.
 
 .PARAMETER Database
     The ControlServer SQLite file to watch. Pointing this at a copy is how the
@@ -54,7 +64,8 @@
     write and the verification are all real, only the completion signal is not.
 
 .PARAMETER DemandId
-    Watch this journey instead of latching onto whichever one is unresolved.
+    Watch the journey carrying this demand instead of latching onto whichever
+    one is unresolved.
 
 .OUTPUTS
     Heartbeat lines while waiting, then exactly one line of compact JSON. The
@@ -140,6 +151,15 @@ function Read-Ledger {
     }
 }
 
+# The watched journey's own demands, which the caller must not count as taken
+# through the window: a journey can pick up another demand at a later stop.
+function Read-JourneyDemandIds {
+    param([string] $Id)
+    $rows = Read-Rows "SELECT DemandId FROM JourneyDemands WHERE JourneyId = '$($Id -replace "'", "''")' ORDER BY StopSequence, DemandId"
+    # The comma keeps a one-demand journey an array, so the JSON says [id], not id.
+    return , @($rows | ForEach-Object { $_[0] })
+}
+
 function Write-Heartbeat {
     param([string] $Message)
     Write-Output "[$([DateTime]::Now.ToString('HH:mm:ss'))] $Message"
@@ -150,9 +170,20 @@ function Write-Result {
     Write-Output ([pscustomobject]$Fields | ConvertTo-Json -Depth 5 -Compress)
 }
 
-$nonTerminal = "Stage NOT IN ('Completed', 'Blocked')"
-
 # ------------------------------------------------------------------- latch ---
+
+$journeyId = $null
+$latchedStage = $null
+
+if ($DemandId) {
+    $row = Read-Rows "SELECT r.JourneyId, r.Stage FROM JourneyDemands d JOIN JourneyRuntimes r ON r.JourneyId = d.JourneyId WHERE d.DemandId = '$($DemandId -replace "'", "''")'"
+    if ($row.Count -eq 0) {
+        Write-Result @{ status = 'VANISHED'; demandId = $DemandId; message = "No journey carries demand $DemandId. Nothing was stopped." }
+        return
+    }
+    $journeyId = $row[0][0]
+    $latchedStage = $row[0][1]
+}
 
 # The interesting case is being started BEFORE the journey exists, which is the
 # only way to be sure the watcher is already in place when it completes. So an
@@ -160,11 +191,10 @@ $nonTerminal = "Stage NOT IN ('Completed', 'Blocked')"
 # already finished, in which case the runtime is idle right now and the gate
 # should have been shut already.
 $latchDeadline = [DateTime]::UtcNow.AddSeconds($LatchTimeoutSeconds)
-$latchedStage = $null
 $lastHeartbeat = [DateTime]::UtcNow
 Write-Heartbeat "Watching $Database for a journey to latch onto (poll ${PollMilliseconds} ms)"
-while (-not $DemandId) {
-    $open = Read-Rows "SELECT DemandId, Stage FROM JourneyRuntimes WHERE $nonTerminal ORDER BY CreatedAt"
+while (-not $journeyId) {
+    $open = Read-Rows "SELECT JourneyId, Stage FROM JourneyRuntimes WHERE Stage <> 'Completed' ORDER BY CreatedAt"
     if ($open.Count -gt 1) {
         Write-Result @{
             status  = 'AMBIGUOUS'
@@ -173,15 +203,15 @@ while (-not $DemandId) {
         return
     }
     if ($open.Count -eq 1) {
-        $DemandId = $open[0][0]
+        $journeyId = $open[0][0]
         $latchedStage = $open[0][1]
         break
     }
-    $finished = Read-Rows 'SELECT DemandId, Stage FROM JourneyRuntimes ORDER BY UpdatedAt DESC'
+    $finished = Read-Rows 'SELECT JourneyId, Stage FROM JourneyRuntimes ORDER BY UpdatedAt DESC LIMIT 1'
     if ($finished.Count -gt 0) {
-        $DemandId = $finished[0][0]
+        $journeyId = $finished[0][0]
         $latchedStage = $finished[0][1]
-        Write-Heartbeat "No unresolved journey; newest is $DemandId at $latchedStage -- the runtime is idle already"
+        Write-Heartbeat "No unresolved journey; newest is $journeyId at $latchedStage -- the runtime is idle already"
         break
     }
     if ([DateTime]::UtcNow -ge $latchDeadline) {
@@ -198,22 +228,14 @@ while (-not $DemandId) {
     Start-Sleep -Milliseconds $PollMilliseconds
 }
 
-if (-not $latchedStage) {
-    $row = Read-Rows "SELECT Stage FROM JourneyRuntimes WHERE DemandId = '$($DemandId -replace "'", "''")'"
-    if ($row.Count -eq 0) {
-        Write-Result @{ status = 'VANISHED'; demandId = $DemandId; message = "No journey row for $DemandId. Nothing was stopped." }
-        return
-    }
-    $latchedStage = $row[0][0]
-}
-
 $latchedAt = [DateTimeOffset]::UtcNow
 $ledgerAtLatch = Read-Ledger
-Write-Heartbeat "Latched onto $DemandId at stage $latchedStage; AcceptedDemands=$($ledgerAtLatch.acceptedDemandIds.Count) OrderIntent legs=$($ledgerAtLatch.orderIntentLegCount)"
+$demandsAtLatch = Read-JourneyDemandIds $journeyId
+Write-Heartbeat "Latched onto journey $journeyId at stage $latchedStage (demands $($demandsAtLatch -join ', ')); AcceptedDemands=$($ledgerAtLatch.acceptedDemandIds.Count) OrderIntent legs=$($ledgerAtLatch.orderIntentLegCount)"
 
 # -------------------------------------------------------------------- wait ---
 
-$idQuoted = $DemandId -replace "'", "''"
+$idQuoted = $journeyId -replace "'", "''"
 $journeyDeadline = [DateTime]::UtcNow.AddSeconds($JourneyTimeoutSeconds)
 $lastHeartbeat = [DateTime]::UtcNow
 $consecutiveFailures = 0
@@ -223,7 +245,7 @@ $updatedAt = $null
 
 while ($true) {
     try {
-        $row = Read-Rows "SELECT Stage, BlockReasonCode, UpdatedAt FROM JourneyRuntimes WHERE DemandId = '$idQuoted'"
+        $row = Read-Rows "SELECT Stage, BlockReasonCode, UpdatedAt FROM JourneyRuntimes WHERE JourneyId = '$idQuoted'"
         $consecutiveFailures = 0
     }
     catch {
@@ -237,9 +259,10 @@ while ($true) {
 
     if ($row.Count -eq 0) {
         Write-Result @{
-            status   = 'VANISHED'
-            demandId = $DemandId
-            message  = "Journey $DemandId disappeared while being watched (12-reset-journey-state.ps1?). Nothing was stopped."
+            status    = 'VANISHED'
+            journeyId = $journeyId
+            demandIds = $demandsAtLatch
+            message   = "Journey $journeyId disappeared while being watched. Nothing was stopped."
         }
         return
     }
@@ -253,21 +276,23 @@ while ($true) {
     if ($stage -eq 'Blocked') {
         Write-Result @{
             status          = 'BLOCKED'
-            demandId        = $DemandId
+            journeyId       = $journeyId
+            demandIds       = $demandsAtLatch
             stage           = $stage
             blockReasonCode = $blockReason
             updatedAt       = $updatedAt
-            message         = "Journey $DemandId is Blocked ($blockReason). The service was left running: a blocked journey is still unresolved, so no new demand can be accepted, and recovery needs the runtime loop."
+            message         = "Journey $journeyId is Blocked ($blockReason). The service was left running: a blocked journey is still unresolved, so no new demand can be accepted, and recovery needs the runtime loop."
         }
         return
     }
 
     if ([DateTime]::UtcNow -ge $journeyDeadline) {
         Write-Result @{
-            status   = 'TIMEOUT'
-            demandId = $DemandId
-            stage    = $stage
-            message  = "Journey $DemandId was still at $stage after ${JourneyTimeoutSeconds}s. Nothing was stopped."
+            status    = 'TIMEOUT'
+            journeyId = $journeyId
+            demandIds = $demandsAtLatch
+            stage     = $stage
+            message   = "Journey $journeyId was still at $stage after ${JourneyTimeoutSeconds}s. Nothing was stopped."
         }
         return
     }
@@ -295,6 +320,7 @@ $stoppedAt = [DateTimeOffset]::UtcNow
 
 $serviceStatus = (Get-Service -Name $ServiceName).Status.ToString()
 $ledgerAfterStop = Read-Ledger
+$demandsAfterStop = Read-JourneyDemandIds $journeyId
 $completedAt = $null
 if ($updatedAt) {
     $parsed = [DateTimeOffset]::MinValue
@@ -303,7 +329,8 @@ if ($updatedAt) {
 
 Write-Result @{
     status                   = $stopError ? 'STOP_FAILED' : 'COMPLETED'
-    demandId                 = $DemandId
+    journeyId                = $journeyId
+    demandIds                = $demandsAfterStop
     stage                    = $stage
     latchedStage             = $latchedStage
     latchedAtUtc             = $latchedAt.ToString('o')
@@ -320,5 +347,5 @@ Write-Result @{
     acceptedDemandIdsAfter      = $ledgerAfterStop.acceptedDemandIds
     orderIntentDemandIdsAfter   = $ledgerAfterStop.orderIntentDemandIds
     orderIntentLegsAfter        = $ledgerAfterStop.orderIntentLegCount
-    message                  = $stopError ? "Journey $DemandId completed but the service could not be stopped: $stopError" : "Journey $DemandId completed; service stopped."
+    message                  = $stopError ? "Journey $journeyId completed but the service could not be stopped: $stopError" : "Journey $journeyId completed; service stopped."
 }
