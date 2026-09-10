@@ -142,6 +142,35 @@ foreach ($repo in $Repos.Keys) {
     }
 }
 
+# 5. The protocol's compatibility matrix restates the SDK baseline and the runtime that ships
+#    with it. It is the only copy outside a global.json, and it has no .csproj, so the loop above
+#    skips that repository. G1 used to assert it against a literal in g1-validate.mjs instead, so
+#    both went stale together at the 8.0.425 bump (8005-agv-program#36).
+$matrixRepo = '8005-agv-protocol'
+$matrixItem = 'compatibility/implementation-version-matrix.json'
+$matrixPath = Join-Path $root $matrixRepo $matrixItem
+if (Test-Path -LiteralPath $matrixPath) {
+    $matrixBaseline = (Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json -AsHashtable).sharedDevelopmentBaseline
+    if ($matrixBaseline.dotnetSdk -ne $Baseline.Sdk) {
+        Add-Finding $matrixRepo $Repos[$matrixRepo] "$matrixItem dotnetSdk" $matrixBaseline.dotnetSdk $Baseline.Sdk
+    }
+
+    # No file pins the runtime: it is whatever the pinned SDK bundles, so read it from that SDK.
+    $sdkDirectory = (Get-Command dotnet -ErrorAction Ignore) ? ((& dotnet --list-sdks) | ForEach-Object {
+            if ($_ -match "^$([regex]::Escape($Baseline.Sdk)) \[(.+)\]$") { Join-Path $Matches[1] $Baseline.Sdk }
+        } | Select-Object -First 1) : $null
+    $bundledProps = $sdkDirectory ? (Join-Path $sdkDirectory 'Microsoft.NETCoreSdk.BundledVersions.props') : $null
+    if ($bundledProps -and (Test-Path -LiteralPath $bundledProps) -and
+        (Get-Content -LiteralPath $bundledProps -Raw) -match '<BundledNETCoreAppPackageVersion>([^<]+)<') {
+        if ($matrixBaseline.dotnetRuntime -ne $Matches[1]) {
+            Add-Finding $matrixRepo $Repos[$matrixRepo] "$matrixItem dotnetRuntime" $matrixBaseline.dotnetRuntime $Matches[1]
+        }
+    }
+    else {
+        Write-Warning "本机没有 SDK $($Baseline.Sdk)，无法核对 $matrixItem 的 dotnetRuntime"
+    }
+}
+
 if ($findings.Count -gt 0) {
     Write-Host ''
     $findings | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
