@@ -192,7 +192,10 @@ if ('$enabled' -eq 'true') {
     [Environment]::SetEnvironmentVariable('$vehicleVariable', '$proof', 'Machine')
     "$vehicleVariable set (machine scope)"
 } else {
-    [Environment]::SetEnvironmentVariable('$vehicleVariable', `$null, 'Machine')
+    # [NullString]::Value, not `$null: PowerShell hands `$null to a .NET string
+    # parameter as "", and on .NET 10 that writes an empty REG_SZ instead of
+    # deleting the variable. Measured on agv01 after the 2026-09-10 -Revert.
+    [Environment]::SetEnvironmentVariable('$vehicleVariable', [NullString]::Value, 'Machine')
     "$vehicleVariable removed"
 }
 "@
