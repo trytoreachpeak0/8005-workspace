@@ -72,8 +72,10 @@
     UI to prompt on.
 
 .EXAMPLE
-    # Start this first, in its own terminal. It waits for the journey to appear.
-    ./13-close-gates-when-idle.ps1 -Force
+    # Start this once the journey row exists. It only waits for one to appear on a
+    # server that has never had a journey: otherwise it latches onto the newest,
+    # already Completed row and closes the gates at once (8005-agv-program#45).
+    ./13-close-gates-when-idle.ps1 -Force -JourneyTimeoutSeconds 14400
 
 .EXAMPLE
     # ... then, elsewhere, the trip itself:
