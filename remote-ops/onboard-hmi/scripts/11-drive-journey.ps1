@@ -5,6 +5,13 @@
     the HMI. Runs ON the control host.
 
 .DESCRIPTION
+    ONE PLAIN OPERATION ONLY. The unattended acceptance windows -- the three
+    operator-inaction scenarios, the gate unload, recovery compensation, with
+    the evidence collector's checkpoints and field record -- are driven by
+    8005-agv-control-server scripts/field/Invoke-SlotConvergenceFieldDrive.ps1
+    and its FieldOperator.psm1 (8005-agv-program#43), whose acts are rehearsed on
+    the L2 rig. Extend those, not this.
+
     The L2 rig already automates the operator, but only on one machine: both
     halves are local to it. In the production topology the client is on the
     vehicle and this script is somewhere else, and both automation faces the
