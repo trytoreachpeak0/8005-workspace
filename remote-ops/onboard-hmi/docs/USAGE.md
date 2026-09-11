@@ -390,6 +390,25 @@ pwsh -File remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1 -SshAlias a
 客户端正在跑时脚本拒绝启动（除非 `-Force`），因为那意味着车可能在作业途中。**模拟器在跑不拦**
 ——那是正常中间态，会原样留着。`-SimulatorOnly` 只起模拟器，不起任何会让车动的东西。
 
+### 无人现场窗口的两个开关：`14` 与 `15`
+
+两个都是出厂关、部署会渲染回关、**客户端停着时**才动，开一次、`-Revert` 关一次，都不启动任何东西：
+
+| 脚本 | 开的是什么 | 不开的后果 |
+| --- | --- | --- |
+| `14-set-recovery-window.ps1` | 恢复入口（两端凭据 + `wireToGate.recoveryResumeEnabled`） | 真 `UNKNOWN` 进不了恢复 |
+| `15-set-automation-face.ps1` | 车载端自动化面 `127.0.0.1:58007`（`automation.enabled` + `automation.productionReviewReference`） | `FieldOperator.psm1` 的 `Remote` 模式连不上，无人窗口一个动作都做不了 |
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/15-set-automation-face.ps1 -ReviewReference '<放行记录的 URL>'
+pwsh -File remote-ops/onboard-hmi/scripts/15-set-automation-face.ps1 -Revert
+```
+
+`15` 的出处必填、没有默认值：Production 下客户端要求它是非占位符，而默认值等于谁跑脚本谁就拿到一次放行。
+agv01 的放行记录是 [8005-agv-program#44 的这条留言](https://github.com/trytoreachpeak0/8005-agv-program/issues/44#issuecomment-5632670629)，**只覆盖 agv01**。
+它逐个叶子比对改前改后，除这两个字段外有任何变化就还原备份并失败；备份留在 `C:\8005\appsettings-backup-automation-face-*.json`。
+**窗口内重新部署之后两个都要重跑**——部署不报错，面与恢复入口只是无声消失。
+
 ---
 
 ## 9. 完全撤销
