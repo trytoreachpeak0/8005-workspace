@@ -70,6 +70,26 @@
     reaches the gate with nothing opening. So -Off belongs after Completed, never
     between the load and the unload.
 
+.PARAMETER ChargeTriggerBatteryPercent
+    With -ChargeResumeBatteryPercent, and only with -Intake or -Dispatch: writes a
+    temporary charging threshold override into JourneyRuntime of
+    appsettings.Production.json, so the charging errand can be watched on a
+    vehicle whose battery is nowhere near the shipped 20 %. Field window two
+    (8005-agv-program#20) runs it once, between two journeys: trigger just above
+    the battery, resume a few percent higher.
+
+    AN OVERRIDE NEVER OUTLIVES THE GATES. Every call that does not pass the two
+    parameters removes any override it finds -- -Off above all, which is what
+    13-close-gates-when-idle.ps1 calls after the journey -- so closing the gates
+    also puts the shipped thresholds back. The base appsettings.json is never
+    edited.
+
+.PARAMETER ChargeResumeBatteryPercent
+    See -ChargeTriggerBatteryPercent. Must exceed the trigger and be at least the
+    base configuration's minimumBatteryPercent, or the service refuses to start --
+    the same two rules JourneyRuntimeOptionsValidator enforces, checked here
+    before anything is written.
+
 .PARAMETER Force
     Suppresses the confirmation prompt by lowering $ConfirmPreference. Do not use
     it with -Dispatch at a real vehicle: the prompt is where the authorization is
@@ -85,6 +105,16 @@ param(
 
     [Parameter(ParameterSetName = 'Off', Mandatory = $true)]
     [switch] $Off,
+
+    [Parameter(ParameterSetName = 'Intake')]
+    [Parameter(ParameterSetName = 'Dispatch')]
+    [ValidateRange(1, 100)]
+    [int] $ChargeTriggerBatteryPercent,
+
+    [Parameter(ParameterSetName = 'Intake')]
+    [Parameter(ParameterSetName = 'Dispatch')]
+    [ValidateRange(1, 100)]
+    [int] $ChargeResumeBatteryPercent,
 
     [string] $ServerAlias = 'factory01',
     [string] $ServiceName = '8005 AGV ControlServer',
@@ -103,6 +133,19 @@ $wantRuntime = -not $Off
 $wantDispatch = [bool]$Dispatch
 $levelName = $Off ? 'Off' : ($Dispatch ? 'Dispatch' : 'Intake')
 
+$triggerGiven = $PSBoundParameters.ContainsKey('ChargeTriggerBatteryPercent')
+$resumeGiven = $PSBoundParameters.ContainsKey('ChargeResumeBatteryPercent')
+if ($triggerGiven -ne $resumeGiven) {
+    throw 'Pass -ChargeTriggerBatteryPercent and -ChargeResumeBatteryPercent together, or neither.'
+}
+$wantOverride = $triggerGiven
+if ($wantOverride -and $ChargeResumeBatteryPercent -le $ChargeTriggerBatteryPercent) {
+    throw "ChargeResumeBatteryPercent ($ChargeResumeBatteryPercent) must exceed ChargeTriggerBatteryPercent ($ChargeTriggerBatteryPercent); the service refuses to start otherwise."
+}
+$wantTrigger = $wantOverride ? $ChargeTriggerBatteryPercent : $null
+$wantResume = $wantOverride ? $ChargeResumeBatteryPercent : $null
+$BaseConfigPath = Join-Path (Split-Path -Parent $ConfigPath) 'appsettings.json'
+
 function Invoke-Server {
     param([string] $Script)
 
@@ -118,19 +161,38 @@ function Write-Step { param([string] $Message) Write-Host "  $Message" -Foregrou
 
 $current = Invoke-Server @"
 `$c = Get-Content -LiteralPath '$ConfigPath' -Raw | ConvertFrom-Json
+`$b = (Get-Content -LiteralPath '$BaseConfigPath' -Raw | ConvertFrom-Json).JourneyRuntime
 [pscustomobject]@{
-    runtime  = [bool]`$c.JourneyRuntime.enabled
-    dispatch = [bool]`$c.RiotCreateDispatch.enabled
-    service  = (Get-Service -Name '$($ServiceName -replace "'", "''")').Status.ToString()
+    runtime        = [bool]`$c.JourneyRuntime.enabled
+    dispatch       = [bool]`$c.RiotCreateDispatch.enabled
+    chargeTrigger  = `$c.JourneyRuntime.chargeTriggerBatteryPercent
+    chargeResume   = `$c.JourneyRuntime.chargeResumeBatteryPercent
+    autoCharging   = [bool]`$b.autoChargingEnabled
+    baseTrigger    = `$b.chargeTriggerBatteryPercent
+    baseResume     = `$b.chargeResumeBatteryPercent
+    minimumBattery = `$b.minimumBatteryPercent
+    service        = (Get-Service -Name '$($ServiceName -replace "'", "''")').Status.ToString()
 } | ConvertTo-Json -Compress
 "@ | ConvertFrom-Json
 
 $currentLevel = -not $current.runtime ? 'Off' : ($current.dispatch ? 'Dispatch' : 'Intake')
+$currentOverride = ($null -ne $current.chargeTrigger -or $null -ne $current.chargeResume) `
+    ? "charge override trigger=$($current.chargeTrigger) resume=$($current.chargeResume)" : 'no charge override'
 Write-Host ''
-Write-Host "Journey gates are currently $currentLevel (runtime=$($current.runtime), createDispatch=$($current.dispatch)); service is $($current.service)."
+Write-Host "Journey gates are currently $currentLevel (runtime=$($current.runtime), createDispatch=$($current.dispatch)); $currentOverride; service is $($current.service)."
 
-if ($current.runtime -eq $wantRuntime -and $current.dispatch -eq $wantDispatch) {
-    Write-Host "Already $levelName. Nothing to do." -ForegroundColor Yellow
+if ($wantOverride) {
+    if (-not $current.autoCharging) {
+        throw "autoChargingEnabled is false in $BaseConfigPath; a threshold override would change nothing."
+    }
+    if ($null -ne $current.minimumBattery -and $ChargeResumeBatteryPercent -lt [int]$current.minimumBattery) {
+        throw "ChargeResumeBatteryPercent ($ChargeResumeBatteryPercent) is below minimumBatteryPercent ($($current.minimumBattery)); the service refuses to start otherwise."
+    }
+}
+
+if ($current.runtime -eq $wantRuntime -and $current.dispatch -eq $wantDispatch -and
+    $current.chargeTrigger -eq $wantTrigger -and $current.chargeResume -eq $wantResume) {
+    Write-Host "Already $levelName$($wantOverride ? " with that charge override" : ''). Nothing to do." -ForegroundColor Yellow
     return
 }
 
@@ -188,10 +250,35 @@ if ($wantRuntime) {
     Write-Host ''
 }
 
+if ($wantOverride) {
+    Write-Host "  CHARGE OVERRIDE: trigger $ChargeTriggerBatteryPercent %, resume $ChargeResumeBatteryPercent % (shipped $($current.baseTrigger) / $($current.baseResume))." -ForegroundColor Yellow
+    Write-Host '  With no journey unresolved and the battery below the trigger, the engine sends the vehicle to the' -ForegroundColor Yellow
+    Write-Host '  charger before it takes any demand. The next call without these parameters -- -Off included -- removes it.' -ForegroundColor Yellow
+    Write-Host ''
+}
+elseif ($null -ne $current.chargeTrigger -or $null -ne $current.chargeResume) {
+    Write-Host "  The charge override is removed; back to the shipped $($current.baseTrigger) / $($current.baseResume)." -ForegroundColor Cyan
+    Write-Host ''
+}
+
 $action = switch ($levelName) {
     'Dispatch' { 'Open both gates and start real vehicle movement' }
     'Intake' { 'Open the runtime gate only; accept a real demand without moving' }
     'Off' { 'Close both journey gates' }
+}
+if ($wantOverride) { $action += " with charge thresholds $ChargeTriggerBatteryPercent / $ChargeResumeBatteryPercent" }
+
+# The same edit applied to the file and to the expectation it is verified against. Removing first means a
+# call without the parameters always leaves the shipped thresholds in force.
+function Get-OverrideEdit([string] $Variable) {
+    $lines = @(
+        "`$$Variable.JourneyRuntime.PSObject.Properties.Remove('chargeTriggerBatteryPercent')",
+        "`$$Variable.JourneyRuntime.PSObject.Properties.Remove('chargeResumeBatteryPercent')")
+    if ($wantOverride) {
+        $lines += "`$$Variable.JourneyRuntime | Add-Member -NotePropertyName 'chargeTriggerBatteryPercent' -NotePropertyValue $ChargeTriggerBatteryPercent"
+        $lines += "`$$Variable.JourneyRuntime | Add-Member -NotePropertyName 'chargeResumeBatteryPercent' -NotePropertyValue $ChargeResumeBatteryPercent"
+    }
+    return $lines -join "`n"
 }
 # -Force suppresses the prompt by lowering ConfirmPreference, never by skipping
 # ShouldProcess -- skipping it would make -Force -WhatIf perform the change.
@@ -220,6 +307,7 @@ if (`$c.PSObject.Properties.Name -notcontains 'RiotCreateDispatch') {
 } else {
     `$c.RiotCreateDispatch.enabled = `$$wantDispatch
 }
+$(Get-OverrideEdit 'c')
 Set-Content -LiteralPath `$path -Value (`$c | ConvertTo-Json -Depth 12) -Encoding utf8NoBOM
 
 `$expected = `$before | ConvertFrom-Json
@@ -229,6 +317,7 @@ if (`$expected.PSObject.Properties.Name -notcontains 'RiotCreateDispatch') {
 } else {
     `$expected.RiotCreateDispatch.enabled = `$$wantDispatch
 }
+$(Get-OverrideEdit 'expected')
 `$actual = (Get-Content -LiteralPath `$path -Raw | ConvertFrom-Json) | ConvertTo-Json -Depth 12 -Compress
 
 Restart-Service -Name '$($ServiceName -replace "'", "''")' -Force
@@ -238,15 +327,20 @@ Restart-Service -Name '$($ServiceName -replace "'", "''")' -Force
     drift       = (`$expected | ConvertTo-Json -Depth 12 -Compress) -ne `$actual
     runtimeNow  = [bool]`$now.JourneyRuntime.enabled
     dispatchNow = [bool]`$now.RiotCreateDispatch.enabled
+    triggerNow  = `$now.JourneyRuntime.chargeTriggerBatteryPercent
+    resumeNow   = `$now.JourneyRuntime.chargeResumeBatteryPercent
     service     = (Get-Service -Name '$($ServiceName -replace "'", "''")').Status.ToString()
 } | ConvertTo-Json -Compress
 "@ | ConvertFrom-Json
 
 Write-Step "Backup: $($result.backup)"
 if ($result.drift) {
-    throw "The configuration changed in more than the two gate fields. Restore $($result.backup) on $ServerAlias."
+    throw "The configuration changed in more than the gate and charge-threshold fields. Restore $($result.backup) on $ServerAlias."
 }
-Write-Step "runtime=$($result.runtimeNow), createDispatch=$($result.dispatchNow); service $($result.service)"
+if ($result.triggerNow -ne $wantTrigger -or $result.resumeNow -ne $wantResume) {
+    throw "The charge override reads trigger=$($result.triggerNow) resume=$($result.resumeNow), not $wantTrigger / $wantResume. Restore $($result.backup) on $ServerAlias."
+}
+Write-Step "runtime=$($result.runtimeNow), createDispatch=$($result.dispatchNow), charge override $(($null -eq $result.triggerNow) ? 'none' : "$($result.triggerNow) / $($result.resumeNow)"); service $($result.service)"
 
 # ------------------------------------------------------------------- verify ---
 
