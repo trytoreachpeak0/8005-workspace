@@ -74,7 +74,7 @@
     With -ChargeResumeBatteryPercent, and only with -Intake or -Dispatch: writes a
     temporary charging threshold override into JourneyRuntime of
     appsettings.Production.json, so the charging errand can be watched on a
-    vehicle whose battery is nowhere near the shipped 20 %. Field window two
+    vehicle whose battery is nowhere near the shipped 30 %. Field window two
     (8005-agv-program#20) runs it once, between two journeys: trigger just above
     the battery, resume a few percent higher.
 
@@ -85,10 +85,11 @@
     edited.
 
 .PARAMETER ChargeResumeBatteryPercent
-    See -ChargeTriggerBatteryPercent. Must exceed the trigger and be at least the
-    base configuration's minimumBatteryPercent, or the service refuses to start --
-    the same two rules JourneyRuntimeOptionsValidator enforces, checked here
-    before anything is written.
+    See -ChargeTriggerBatteryPercent. Must exceed the trigger, and the trigger must
+    be at least the base configuration's minimumBatteryPercent, or the service
+    refuses to start -- the same two rules JourneyRuntimeOptionsValidator enforces
+    since 8005-agv-program#53, checked here before anything is written. With the
+    battery below that floor, pass the floor itself as the trigger.
 
 .PARAMETER Force
     Suppresses the confirmation prompt by lowering $ConfirmPreference. Do not use
@@ -185,8 +186,12 @@ if ($wantOverride) {
     if (-not $current.autoCharging) {
         throw "autoChargingEnabled is false in $BaseConfigPath; a threshold override would change nothing."
     }
-    if ($null -ne $current.minimumBattery -and $ChargeResumeBatteryPercent -lt [int]$current.minimumBattery) {
-        throw "ChargeResumeBatteryPercent ($ChargeResumeBatteryPercent) is below minimumBatteryPercent ($($current.minimumBattery)); the service refuses to start otherwise."
+    # JourneyRuntimeOptionsValidator since 8005-agv-program#53: a trigger below the demand floor leaves a
+    # band where the vehicle is neither given work nor sent to charge. The resume level exceeds the
+    # trigger, so it clears the floor too. A binary from before that fix only checks the resume level,
+    # which this rule implies.
+    if ($null -ne $current.minimumBattery -and $ChargeTriggerBatteryPercent -lt [int]$current.minimumBattery) {
+        throw "ChargeTriggerBatteryPercent ($ChargeTriggerBatteryPercent) is below minimumBatteryPercent ($($current.minimumBattery)); the service refuses to start otherwise. At a battery below the floor, lift the trigger to the floor itself."
     }
 }
 
