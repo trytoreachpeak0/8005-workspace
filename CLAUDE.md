@@ -83,10 +83,12 @@ rule changed rather than being bypassed: `docs/release-governance.md`, the
 attestation JSON Schema and `tools/g1-validate.mjs` (`size===2` → `size===1`)
 were all changed together, and `protocol-v0.2.0` was released under the new one.
 
-**Releases now carry exactly one product owner.** Two things did not move, and
-they are the point of the attestation: **AI and CI still cannot approve**, and it
-still records a named real person deciding at a stated time. "One signature"
-means the user signs — never that an agent may.
+**Releases carry exactly one approval — and since 2026-09-12 an AI agent may give
+it.** The user decided that on 2026-09-12: requiring them to run every release by
+hand added a step without adding a decision. An agent approves a release only when
+the user has authorized that specific release in the conversation, and the
+attestation says so — `approverKind: AI_AGENT` plus `authorizedBy` naming the user —
+so it is never read as the user's own signature. **CI still cannot approve.**
 
 ### Notify-after-change
 
@@ -107,9 +109,10 @@ evidence — ours.** Say which `W2G-IS-*` slices a change touches and which evid
 it invalidates, in the commit message and in the slice board. The audience moved;
 the accounting did not.
 
-Formal releases need an approval attestation before an immutable tag — **one
-product owner since 2026-09-08**, two before that. **AI and CI still cannot
-approve.** That governs tagging a `ProtocolRelease`, not ordinary commits.
+Formal releases need an approval attestation before an immutable tag — **exactly
+one approval**: the product owner, or since 2026-09-12 an AI agent the product owner
+authorized for that release (two product owners before 2026-09-08). **CI still
+cannot approve.** That governs tagging a `ProtocolRelease`, not ordinary commits.
 
 ### Scope
 
@@ -170,8 +173,9 @@ agent 必须遵守的部分。
 （`W2G-IS-00` 到 `W2G-IS-07`），每个切片的 `gates` 就是分工。跨仓库反馈必须带可复现的
 门禁证据。protocol 由 Zhengyu Shao 单独决定内容，**推送后不再需要通知任何人**
 （2026-09-08 起，此前每次推送都要开 issue @`SocialKKKK`，见上面 Notify-after-change）。
-发布打 tag 同日起**改为单人签名**（此前双人），**AI 和 CI 仍然不能批准**——「单人」指
-用户本人签，不是 agent 可以签。协议改动仍然要攒批次——发布会作废受影响的 G1/G2/G3
+发布打 tag 同日起**改为单人签名**（此前双人）；**2026-09-12 起 AI 也可以批准**，
+前提是用户在对话里授权了那一次发布，attestation 如实记 `approverKind: AI_AGENT` 与
+`authorizedBy`；**CI 仍然不能批准**。协议改动仍然要攒批次——发布会作废受影响的 G1/G2/G3
 证据，现在作废的是我方自己的。
 
 **agent 指令文件用英文**（各仓 `CLAUDE.md`、`.claude/` 下的规则与 skill、
