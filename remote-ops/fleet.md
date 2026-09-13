@@ -136,7 +136,7 @@ TCP 与 ICMP 全 0/3），而 agv02 的「以太网 6」被人单独改过，不
 | 现场值文件 | [onboard-hmi/config/site-agv02.json](onboard-hmi/config/site-agv02.json) |
 | `agvId` / `expectedVehicleKey` | **已确定**（照上面的对应表填，来源是 RIoT） |
 | `onboardInstanceId` | **待定**，要新生成一个 Guid |
-| IO 模块 | **待定**。同网段见过 `192.168.71.50`，很可能是它，但要实测 502 通了再填 |
+| IO 模块 | `192.168.71.150`，2026-09-13 从车上实测（见下方「每台车局域网里的两台 Modbus 设备」） |
 | 车载端 | 未部署 |
 
 **已知隐患：**「以太网 6」被配了 `192.168.71.221`，与「以太网 5」的 `192.168.71.180`
@@ -151,7 +151,7 @@ agv02 单独被人改的**。未处理，接线前要先决定拆掉哪一个。
 | 现场值文件 | [onboard-hmi/config/site-agv03.json](onboard-hmi/config/site-agv03.json) |
 | `agvId` / `expectedVehicleKey` | **已确定**（照上面的对应表填，来源是 RIoT） |
 | `onboardInstanceId` | **待定**，要新生成一个 Guid |
-| IO 模块 | **待定**，同上，要实测 |
+| IO 模块 | `192.168.71.150`，2026-09-13 从车上实测 |
 | 车载端 | 未部署 |
 
 时钟已于 2026-09-03 修好：上线时读到 2027-02-09、快 158.1 天，修后偏移 `+0.0001s`，
@@ -169,7 +169,22 @@ agv02 单独被人改的**。未处理，接线前要先决定拆掉哪一个。
 | `agvId` | **已知** | 就是这台车的 RIoT `deviceName`。示例值 `AGV-8005-01` 被客户端当作占位符，Production 下启动即抛 `InvalidDataException` |
 | `vehicleSafety.expectedVehicleKey` | **已知** | 就是这台车的 RIoT `deviceKey`，还须与 ControlServer 登记的一致 |
 | `onboardInstanceId` | **待定** | D 形式 Guid（`8-4-4-4-12`），跨部署稳定。`pwsh -c '[guid]::NewGuid().ToString()'`。**不要复制别的车的** |
-| `ioModule.host` | **待定** | 实测 502 通过之后再填 |
+| `ioModule.host` | **已知**，三台都是 `192.168.71.150` | 2026-09-13 实测，见下 |
+
+### 每台车局域网里的两台 Modbus 设备
+
+2026-09-13 在三台车上各扫一遍 `192.168.71.0/24` 的 502 端口，三台完全一样：`192.168.71.50` 与
+`192.168.71.150` 都应答。用 W1 自检脚本（`8005-agv-control-server` 的 `scripts/field/Test-W1SlotIoModule.ps1`，
+只发 FC01/FC02、不开锁）分辨：
+
+| 地址 | 读 DO 100 起 16 路、DI 200 起 16 路 | 结论 |
+| --- | --- | --- |
+| `192.168.71.150` | 输出全 `0`、锁反馈全 `1`、光幕全 `1` | 仓位 IO 模块 |
+| `192.168.71.50` | DI 200 返回 Modbus 异常 `0x02`（没有这段地址） | 另一种设备，不是仓位模块 |
+
+此前这里写过「`.50` 是另一台车的模块、2 号车很可能就是它」。三台车各在自己的 CPE 后面，局域网互不相通，
+每台车上都有这两台设备，那个推测是错的。`agv02`／`agv03` 当天上位机里仍没有 `C:\8005`（车载端未部署），
+`C2000Service` 在跑。
 
 另外 ControlServer 的 `JourneyRuntime` 目前只登记了 agv01 一台车（`agvId` +
 `vehicleKey` 是单值不是列表），要跑另外两台车得先解决那一侧。
