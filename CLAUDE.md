@@ -535,6 +535,41 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 **CD 不跑门禁，不启用 `JourneyRuntime`，不碰 `SQAGV`。**门禁属于切 RC 的流程；
 产品安装脚本以 `JourneyRuntime.enabled=false` 部署，不建单不动车。
 
+## 全产品（v2）的完整测试与实车运行：用 agv02／agv03 隔离做，不干扰 MVP
+
+**用户 2026-09-14 定，今后都照此执行。**生产跑的是 MVP 线（`ControlServer_MVP`／`OnboardHmi_MVP`，
+`protocol-v0.3.0`）：factory01 上的 `8005 AGV ControlServer` 服务只管 `agv01`，正在服务客户。
+全产品 v2 线（`fp/v2-impl`／`w2g/fp-v2-impl`，`protocol-v1.0.0`）的完整测试、实车运行与现场演练
+（例如批次 2 票 19 的 W1 空载急停演练）**不等生产切到 v2**，在备用车上、用独立的 v2 服务端实例做。
+
+**允许（不必再逐项问）：**
+
+- 访问 `agv02`、`agv03`：SSH 上位机，在上面部署与启动 v2 车载端，修它们的时钟，填
+  `remote-ops/onboard-hmi/config/site-agv02.json`／`site-agv03.json` 的现场值。
+- 在生产位置之外运行 v2 服务端实例，并让它经 RIoT 只为 `agv02`／`agv03` 建单、发订单命令与急停命令。
+
+**四样共享资源必须隔离：**
+
+| 资源 | 冲突 | 隔离做法 |
+| --- | --- | --- |
+| MES 需求 | 两版默认都从工厂服务器本机 `127.0.0.1:5088` 的生产 MesIngest 取需求，v2 会抢走真实需求 | v2 实例不接生产 MesIngest，用 `8005-agv-control-server` 的 `tools/ControlServer.FakeMesIngest` 注入测试需求 |
+| 端口与数据库 | 两版默认都监听 `58005`／`58007`，库都在 `%ProgramData%/8005/ControlServer` | v2 实例换端口、换库目录，不用 `C:\Program Files\8005 AGV\ControlServer` 与 `D:\zhengyushao\ControlServer`；**不在 factory01 上跑**，确需在 factory01 上跑先问 |
+| RIoT | 两版连同一个 RIoT（`172.19.206.222:8888`），RIoT 上有 25 台可调度车 | `JourneyRuntime.agvId`／`vehicleKey` 只能是 `agv02` 或 `agv03`（见 `remote-ops/fleet.md`）；绝不对 `agv01` 或其他车建单、发订单命令或急停 |
+| 地图与通道 | 备用车与 `agv01` 同在 map 25 | 选 `agv01` 不经过的路段、`agv01` 空闲的时段，避开演示与生产高峰 |
+
+**不碰，要碰先问：**`agv01`；factory01 上 MVP 服务的进程、安装目录、配置与数据库；生产 MesIngest；
+`ControlServer_MVP`、`OnboardHmi_MVP` 分支。
+
+**仍然逐次授权：**任何会让车动、或会发出急停的运行，每一次都要用户在对话里单独授权，现场有人盯着、
+物理急停可按；急停演练车必须空载。授权不跨次，上面「允许」那一栏不替代它。
+
+**急停之后怎么释放，要事先写进演练方案。**在途单被报 FAILED 触发的急停目前没有自动解除路径
+（`8005-agv-control-server/docs/emergency-stop-field-fallback.md`）；v2 实例仍在运行、故障仍在时去 RIoT
+手动解锁，会被判为外部解除并立即重触发。
+
+2026-09-14 18:28 从控制端探测：`agv02`、`agv03` 的 CPE 上 RIoT 用的 5001 端口通，上位机 SSH 的 22022
+不通（上位机大概率没开机）；两台都还没部署车载端。
+
 ## .NET 工具链基线
 
 四个可写 .NET 仓库统一到一套工具链，真相来源是
