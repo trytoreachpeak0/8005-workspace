@@ -389,11 +389,21 @@ ECDSA    SHA256:jJwAGsmXTGAXJdPsjrocFRbHw3eztrIrr3ZPBwpngQk
   它是 FULL 恢复模式、`log_reuse_wait_desc = LOG_BACKUP`、最后一次备份 2025-12-22、
   日志 `AGV_log.ldf` 已涨到 66 GB（数据文件才 0.51 GB）。**知道这个状况，但不要去
   备份、改恢复模式、收缩日志或建作业。**
-- **SQL 实例级设置（`max server memory`、停 PolyBase）默认不改。** 早先方案把设内存
-  上限列为装 Hyper-V 的前置条件，那是基于"SQL 会涨到吃满内存"的判断；实测推翻了它
-  ——开机三小时后 `sqlservr` 仍只占 1.23 GB，因为该实例的数据文件总共才约 1.7 GB，
-  缓冲池没东西可缓存。当前内存余量充足，而这些是承载 `SQAGV` 的共享实例的设置，
-  没必要为不存在的问题去动它。将来真要塞多台虚拟机时再重新评估。
+- **`max server memory` 已于 2026-09-15 设为 8192 MB（8 GB）。** 早先这里写"默认不改"，
+  理由是开机三小时 `sqlservr` 仍只占 1.23 GB、实例数据才约 1.7 GB、缓冲池没东西可缓存。
+  那个前提在 MES ingest 部署到本机后失效了：MesIngest 库涨到约 4.8 GB，未设上限的 SQL
+  把空闲 RAM 全用作数据页与执行计划缓存，提交内存涨到 12.4 GB，主机可用内存一度只剩
+  3.7 GB。经用户授权设 8 GB 上限后当场降到 8.0 GB（不重启），主机可用回到 6.7 GB；那约
+  2.5 GB 计划缓存是可丢弃缓存、封顶即被回收，不是泄漏。8 GB 装得下当前实例数据（共约
+  6.4 GB），只是缓存余量小些，纯性能取舍，可随时调整。改动方式：以 `sa` 连库执行
+  `sp_configure 'max server memory (MB)', 8192; RECONFIGURE`。这是承载 `SQAGV` 的共享实例
+  的设置，再动之前掂量对 `SQAGV` 的影响。将来塞多台虚拟机时重新评估这个值。
+- **`agvops` 已于 2026-09-15 提为该实例的 sysadmin**（此前只有 `dbcreator` + `ALTER ANY
+  LOGIN`）。提权用的是用户提供的 `sa` 密码执行 `ALTER SERVER ROLE sysadmin ADD MEMBER`，
+  `sa` 本身未改。此后从 factory01 用 `sqlcmd -S . -E` 即可读全部 server-state DMV（内存、
+  等待、计划缓存），不必再绕 WMI 性能计数器。
+- **停 PolyBase 默认不改。** `SQLPBDMS` / `SQLPBENGINE`（`mpdwsvc`，约 1.7 GB 私有内存）
+  仍在跑，除非确有需要否则不动它——它也是共享实例的一部分。
 
 ---
 
