@@ -185,9 +185,6 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 协议消息名与 schema 字段与 `vectorId`。引用报错和测试输出先贴英文原文再中文解释。
 不回溯改旧的。
 
-不知道该做什么时用 **`w2g-next`** skill（`.claude/skills/w2g-next/`）：它读真实状态并
-按固定优先级阶梯给出唯一一个下一步。
-
 ## CI：不用托管 runner，改用 factory-server 上的 self-hosted runner
 
 **不要用 GitHub 托管 runner。**2026-09-02 试过五轮，riot-sdk 与 control-server
