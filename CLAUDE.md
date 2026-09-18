@@ -203,9 +203,11 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 `.github/workflows/golden-renderer.yml`（`mode=verify` / `mode=candidates`，只能
 手动触发）。
 
-**已落地（2026-09-02）。**win11-01 上跑着**五个** runner，用标签分工。以下是
+**已落地（2026-09-02）。**win11-01 上跑着**六个** runner，用标签分工。以下是
 2026-09-03 从 `gh api repos/<仓>/actions/runners` 实读的结果，不是当初的计划——本表
-一度只记了下面前三行，漏掉了 control-server 与 protocol 那两个，而它们一直在跑：
+一度只记了下面前三行，漏掉了 control-server 与 protocol 那两个，而它们一直在跑。
+第六个 `win11-01-onboard-hmi` 于 2026-09-18 加上（`8005-agv-onboard-hmi#101`），只跑
+`w2g/fp-v2-impl` 这条线；`OnboardHmi_MVP` 不加 CI，因为 MVP 预计几周后会被 v2 替换：
 
 | runner | 模式 | 标签 | 归属仓 |
 | --- | --- | --- | --- |
@@ -214,8 +216,9 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 | `win11-01-mes-ingest-desktop` | 交互式（session 1） | `golden-renderer` | 8005-mes-ingest |
 | `win11-01-control-server` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-control-server |
 | `win11-01-protocol` | 服务（session 0） | `node24` `headless` | 8005-agv-protocol |
+| `win11-01-onboard-hmi` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-onboard-hmi |
 
-五个都带 `self-hosted` `Windows` `X64` `win11-01`。注意
+六个都带 `self-hosted` `Windows` `X64` `win11-01`。注意
 `win11-01-mes-ingest-desktop` **不带** `headless`，也是唯一带 `golden-renderer` 的
 ——这一条正是标签分工能成立的原因。
 
