@@ -195,6 +195,23 @@ try {
     $result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
     Write-Step "Installer result written to $resultPath"
 
+    # The product scripts set both of these (control-server #148, #149) and verify them; this only
+    # makes them visible on the control host. A package older than that fix reports neither -- say so,
+    # because such a service still stays down after a background service fails.
+    if ($result.PSObject.Properties.Name -contains 'serviceRecovery') {
+        Write-Step ('Service recovery: reset {0}s, {1}, failureflag {2}' -f
+            $result.serviceRecovery.resetSeconds, $result.serviceRecovery.actions, $result.serviceRecovery.failureFlag)
+    } else {
+        Write-Warning 'The installer reported no service recovery policy; this package predates control-server #148.'
+    }
+    if ($result.PSObject.Properties.Name -contains 'logFileLimits') {
+        $limits = $result.logFileLimits.PSObject.Properties.Name -contains 'limits' ?
+            $result.logFileLimits.limits : $result.logFileLimits
+        Write-Step ('Log file limits: roll={0} size={1} count={2} age={3}' -f
+            $limits.rollOnFileSizeLimit, $limits.fileSizeLimitBytes, $limits.retainedFileCountLimit,
+            $limits.retainedFileTimeLimit)
+    }
+
     # ---------------------------------------------------- MesIngest secret ---
 
     # Neither product script injects this one. MesIngest binds 0.0.0.0 on this
