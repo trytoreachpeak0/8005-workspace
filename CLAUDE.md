@@ -217,7 +217,7 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 `.github/workflows/golden-renderer.yml`（`mode=verify` / `mode=candidates`，只能
 手动触发）。
 
-**已落地（2026-09-02）。**win11-01 上跑着**七个** runner，用标签分工。以下是
+**已落地（2026-09-02）。**win11-01 上跑着**八个** runner，用标签分工。以下是
 2026-09-03 从 `gh api repos/<仓>/actions/runners` 实读的结果，不是当初的计划——本表
 一度只记了下面前三行，漏掉了 control-server 与 protocol 那两个，而它们一直在跑。
 第六个 `win11-01-onboard-hmi` 于 2026-09-18 加上（`8005-agv-onboard-hmi#101`），只跑
@@ -227,7 +227,13 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 所以 `l2.yml` 与 `release.yml` 仍只落在原 runner 上，两个 l2 永远不会同时抢那 4 个
 端口槽位，而同一张票的 test 与 l2 能并行。回退办法是把 `test.yml` 的 `runs-on` 改回
 `[self-hosted, headless]`。同日 vm01 页面文件由 4 GB 调到 8 GB（已提交上限 16 GiB），
-因为实测 test 单独 +4.0 GiB、与 l2 并行时整机峰值 9.42 GiB：
+因为实测 test 单独 +4.0 GiB、与 l2 并行时整机峰值 9.42 GiB。
+第八个 `win11-01-control-server-desktop` 于 2026-09-19 加上（用户当日批准，
+`8005-workspace-v2/ci-research/real-rig-bottleneck.md` 方案 b），**交互式、只跑服务端的
+真装置 L2**（`l2.yml` 的 `real-rig` 作业，手动 `-f rig=real`）：真装置要起车载端 WPF 与模拟器窗口，session 0 的服务 runner
+起不了。它只带 `cs-desktop`，不带 `headless`／`cs-test`／`golden-renderer`，所以不会领
+别的作业；装法是 `remote-ops/factory-server/scripts/18-install-control-server-desktop-runner.ps1`
+（`-Remove` 卸掉）。它与 mes-ingest 的桌面作业共用同一个桌面，靠下面第 2 条的互斥体排队：
 
 | runner | 模式 | 标签 | 归属仓 |
 | --- | --- | --- | --- |
@@ -238,14 +244,15 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 | `win11-01-protocol` | 服务（session 0） | `node24` `headless` | 8005-agv-protocol |
 | `win11-01-onboard-hmi` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-onboard-hmi |
 | `win11-01-control-server-2` | 服务（session 0） | `dotnet8` `cs-test` | 8005-agv-control-server（只跑 `test.yml`） |
+| `win11-01-control-server-desktop` | 交互式（session 1） | `dotnet8` `cs-desktop` | 8005-agv-control-server（只跑 `l2.yml` 的 `real-rig` 作业） |
 
-七个都带 `self-hosted` `Windows` `X64` `win11-01`。注意
-`win11-01-mes-ingest-desktop` **不带** `headless`，也是唯一带 `golden-renderer` 的
-——这一条正是标签分工能成立的原因。
+八个都带 `self-hosted` `Windows` `X64` `win11-01`。注意两个交互式 runner 都**不带**
+`headless`，`win11-01-mes-ingest-desktop` 是唯一带 `golden-renderer` 的，
+`win11-01-control-server-desktop` 是唯一带 `cs-desktop` 的——这一条正是标签分工能成立的原因。
 
-交互式那个由登录触发的计划任务在桌面会话里拉起，依赖客户机的 autologon（用
+交互式那两个由登录触发的计划任务（`GitHubRunner-<名字>`）在桌面会话里拉起，依赖客户机的 autologon（用
 Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，`DefaultPassword`
-键不存在）。**workflow 的 `runs-on` 一定要带 `headless`、`golden-renderer` 或 `cs-test`**，
+键不存在）。**workflow 的 `runs-on` 一定要带 `headless`、`golden-renderer`、`cs-test` 或 `cs-desktop`**，
 只写 `[self-hosted, win11-01]` 会被两种 runner 里任意一个领走，而其中一个画不了图。
 
 **加了 runner 就回来改这张表。**它漏记了两个 runner 至少一天，而这张表是判断
@@ -296,8 +303,12 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
    `Global\MesIngestWatchUiTests`（只能把那个脚本与自己串起来），而
    `desktop-tests.yml` **一把锁都没有**，靠的是本仓共用的 `concurrency` 分组。
 
-   **现在的获取方式是快速失败（超时 0，exit 3）。第二个仓真要加进来，先把它改成带
-   超时的等待**——CI 作业该排队，不该因为撞上另一个仓的调度就变红。
+   **2026-09-19 起第二个仓加进来了，CI 排队、手动仍快速失败。**`8005-agv-control-server`
+   的真装置 L2 在交互式 runner `win11-01-control-server-desktop` 上跑，每个场景拿一次锁
+   （排队 1800 秒，`scripts/DesktopLock.psm1`）；`8005-mes-ingest` 的 `desktop-tests.yml`
+   与 `golden-renderer.yml` 同日改为传 1800 秒超时排队（`8005-mes-ingest#8`，合入
+   `b670166a`），作业超时相应加大。脚本默认值仍是 0（exit 3），给在客户机上手动跑的人用。
+   CI 作业该排队，不该因为撞上另一个仓的调度就变红。
 
    只给需要金机的 runner 打 `golden-renderer` 标签，别的 runner 不要带。
 3. **黄金渲染机的 Validation 阶段只能 `workflow_dispatch` 手动触发。**它会产生
