@@ -5,7 +5,21 @@ is its own clone with its own remote — stage, commit, and push one repository 
 a time, and never assume a change in one is visible to another.
 
 Each repository carries its own `CLAUDE.md` with the rules for working inside
-it, but Claude Code loads those only once it reads a file in that directory.
+it, and Claude Code loads those only once it reads a file in that directory —
+with one exception, imported on the next line so that it arrives at session
+start instead:
+
+@repos/8005-test-lab/CLAUDE.md
+
+That one is imported because `8005-test-lab` is an agent-first tool whose own
+`CLAUDE.md` tells a session what to read and in what order, and a reading order
+that arrives *after* the session has already read something in that repository
+arrives too late to be a reading order. Measured 2026-09-09 in
+[#34](https://github.com/trytoreachpeak0/8005-test-lab/issues/34): the five
+sessions that worked that map never received it at session start. The other five
+repositories keep the on-demand behaviour, which suits them — their rules are
+about editing code that is already in front of you.
+
 This file is the authority on write access and applies from the start of every
 session. Where a repository restates any of it, this file wins.
 
@@ -245,10 +259,21 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
 
 三条硬约束：
 
-1. **挂了 self-hosted runner 的仓库绝不能是 public。**任何人提一个 PR 就能在那
-   台机器上执行任意代码，而它经跳板能碰到 factory-server 上的生产服务。
-   `8005-agv-protocol` 已于 2026-09-02 从 public 转为 private，正是为此。不要把
-   任何仓库改回 public。
+1. **哪些仓库是 public 由用户决定，2026-09-14 起八个组件仓库全部是 public**
+   （Repository write authority 表里那八个）；`8005-workspace` 本身仍是 private。
+   先改的是 `8005-agv-control-server` 与 `8005-mes-ingest`，同日用户要求其余六个
+   一并公开。起因是 artifact 存储配额：私有仓库共用个人账户
+   每月 500 MB·月的免费额度，按「大小 × 存放小时数」累计，发布包把它用满后所有
+   上传都被拒（`Artifact storage quota has been hit`），删文件也扣不掉当月已累计的
+   量；公开仓库的 artifact 不计额度。用户明确接受了代价，并说不用管：任何人都能看到
+   代码、完整历史、证据目录里的厂区地址和凭据样值、Actions 日志和发布包；任何人提一个
+   PR 就能在 win11-01 上执行代码，而它经跳板能碰到 factory-server 上的生产服务。
+   公开前没有做敏感信息清理，也没有关 PR 或加 fork PR 审批。**不要自行把它们改回
+   private，也不要自行加这些防护**——要改等用户开口。
+
+   这条原本是「挂了 self-hosted runner 的仓库绝不能是 public」，`8005-agv-protocol`
+   正是为此于 2026-09-02 从 public 转为 private。其余仓库仍是 private，要公开同样
+   先问用户。
 2. **`trytoreachpeak0` 是个人账号不是组织，一个 runner 只能绑一个仓库。**要给
    多个仓做 CI，就必须在同一台机器上装多个 runner 实例（不同目录、不同服务名），
    而它们会各自并行领作业。所以**不要指望"一台机器一个 runner"去保证黄金渲染机
@@ -555,7 +580,7 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 | MES 需求 | 两版默认都从工厂服务器本机 `127.0.0.1:5088` 的生产 MesIngest 取需求，v2 会抢走真实需求 | v2 实例不接生产 MesIngest，用 `8005-agv-control-server` 的 `tools/ControlServer.FakeMesIngest` 注入测试需求 |
 | 端口与数据库 | 两版默认都监听 `58005`／`58007`，库都在 `%ProgramData%/8005/ControlServer` | v2 实例换端口、换库目录，不用 `C:\Program Files\8005 AGV\ControlServer` 与 `D:\zhengyushao\ControlServer`；**不在 factory01 上跑**，确需在 factory01 上跑先问 |
 | RIoT | 两版连同一个 RIoT（`172.19.206.222:8888`），RIoT 上有 25 台可调度车 | `JourneyRuntime.agvId`／`vehicleKey` 只能是 `agv02` 或 `agv03`（见 `remote-ops/fleet.md`）；绝不对 `agv01` 或其他车建单、发订单命令或急停 |
-| 地图与通道 | 备用车与 `agv01` 同在 map 25 | 选 `agv01` 不经过的路段、`agv01` 空闲的时段，避开演示与生产高峰 |
+| 地图与通道 | 备用车与 `agv01` 同在 RIoT map 26（2026-09-19 用户更正，此前误记为 25） | 选 `agv01` 不经过的路段、`agv01` 空闲的时段，避开演示与生产高峰 |
 
 **不碰，要碰先问：**`agv01`；factory01 上 MVP 服务的进程、安装目录、配置与数据库；生产 MesIngest；
 `ControlServer_MVP`、`OnboardHmi_MVP` 分支。
