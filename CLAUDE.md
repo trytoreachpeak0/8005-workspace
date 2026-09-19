@@ -217,11 +217,17 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 `.github/workflows/golden-renderer.yml`（`mode=verify` / `mode=candidates`，只能
 手动触发）。
 
-**已落地（2026-09-02）。**win11-01 上跑着**六个** runner，用标签分工。以下是
+**已落地（2026-09-02）。**win11-01 上跑着**七个** runner，用标签分工。以下是
 2026-09-03 从 `gh api repos/<仓>/actions/runners` 实读的结果，不是当初的计划——本表
 一度只记了下面前三行，漏掉了 control-server 与 protocol 那两个，而它们一直在跑。
 第六个 `win11-01-onboard-hmi` 于 2026-09-18 加上（`8005-agv-onboard-hmi#101`），只跑
-`w2g/fp-v2-impl` 这条线；`OnboardHmi_MVP` 不加 CI，因为 MVP 预计几周后会被 v2 替换：
+`w2g/fp-v2-impl` 这条线；`OnboardHmi_MVP` 不加 CI，因为 MVP 预计几周后会被 v2 替换。
+第七个 `win11-01-control-server-2` 于 2026-09-19 加上（`8005-agv-control-server#168`，
+调研报告里的方案 d），**只跑服务端的 `test.yml`**：它只带 `cs-test`、不带 `headless`，
+所以 `l2.yml` 与 `release.yml` 仍只落在原 runner 上，两个 l2 永远不会同时抢那 4 个
+端口槽位，而同一张票的 test 与 l2 能并行。回退办法是把 `test.yml` 的 `runs-on` 改回
+`[self-hosted, headless]`。同日 vm01 页面文件由 4 GB 调到 8 GB（已提交上限 16 GiB），
+因为实测 test 单独 +4.0 GiB、与 l2 并行时整机峰值 9.42 GiB：
 
 | runner | 模式 | 标签 | 归属仓 |
 | --- | --- | --- | --- |
@@ -231,14 +237,15 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 | `win11-01-control-server` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-control-server |
 | `win11-01-protocol` | 服务（session 0） | `node24` `headless` | 8005-agv-protocol |
 | `win11-01-onboard-hmi` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-onboard-hmi |
+| `win11-01-control-server-2` | 服务（session 0） | `dotnet8` `cs-test` | 8005-agv-control-server（只跑 `test.yml`） |
 
-六个都带 `self-hosted` `Windows` `X64` `win11-01`。注意
+七个都带 `self-hosted` `Windows` `X64` `win11-01`。注意
 `win11-01-mes-ingest-desktop` **不带** `headless`，也是唯一带 `golden-renderer` 的
 ——这一条正是标签分工能成立的原因。
 
 交互式那个由登录触发的计划任务在桌面会话里拉起，依赖客户机的 autologon（用
 Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，`DefaultPassword`
-键不存在）。**workflow 的 `runs-on` 一定要带 `headless` 或 `golden-renderer`**，
+键不存在）。**workflow 的 `runs-on` 一定要带 `headless`、`golden-renderer` 或 `cs-test`**，
 只写 `[self-hosted, win11-01]` 会被两种 runner 里任意一个领走，而其中一个画不了图。
 
 **加了 runner 就回来改这张表。**它漏记了两个 runner 至少一天，而这张表是判断
@@ -272,8 +279,7 @@ Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，
    private，也不要自行加这些防护**——要改等用户开口。
 
    这条原本是「挂了 self-hosted runner 的仓库绝不能是 public」，`8005-agv-protocol`
-   正是为此于 2026-09-02 从 public 转为 private。其余仓库仍是 private，要公开同样
-   先问用户。
+   正是为此于 2026-09-02 从 public 转为 private。
 2. **`trytoreachpeak0` 是个人账号不是组织，一个 runner 只能绑一个仓库。**要给
    多个仓做 CI，就必须在同一台机器上装多个 runner 实例（不同目录、不同服务名），
    而它们会各自并行领作业。所以**不要指望"一台机器一个 runner"去保证黄金渲染机
