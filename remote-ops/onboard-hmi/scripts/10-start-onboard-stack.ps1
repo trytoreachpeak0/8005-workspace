@@ -44,6 +44,14 @@
     Start even though something is already running. Refuses by default: a
     running client means the vehicle may be mid-journey.
 
+    Since onboard-hmi#157 the client is a singleton, and that changes what this
+    switch can deliver. Forcing a start while a client is up launches a process
+    that takes one look at the machine-wide mutex Global\SQCD.Agv.Wpf-<agvId>,
+    brings the running window to the front, and exits with code 3 -- so the
+    client you end up with is the one that was already there, not a new one.
+    The probe below only counts processes and will report success either way.
+    To actually replace a running client, use -Stop and then start again.
+
 .PARAMETER SimulatorOnly
     Start only the slot IO simulator. The client stays down, so nothing that
     moves the vehicle is started. Useful when the person at the vehicle wants
