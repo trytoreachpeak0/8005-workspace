@@ -98,10 +98,28 @@ function Write-Step { param([string] $Message) Write-Host "  $Message" -Foregrou
 function Invoke-Onboard {
     param([string] $Script)
 
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+    # `pwsh -EncodedCommand` does not report a status of its own. When the script
+    # ends without an explicit `exit`, it exits 1 if `$?` is False -- and `$?` is
+    # whatever the LAST statement left behind. `-ErrorAction SilentlyContinue`
+    # sets it False while printing nothing, so a block whose final statement is a
+    # `Get-Process -ErrorAction SilentlyContinue` that matched nothing comes back
+    # as "exit 1, no output". That is the empty `ssh agv01 failed:` which
+    # interrupted 12-reset-journey-state.ps1 on 2026-09-20 *after* the stack had
+    # already stopped cleanly, leaving the reset half done.
+    #
+    # So the status is made deliberate rather than inherited: a run that reaches
+    # the end says so. This does not hide failures -- a terminating error never
+    # reaches `exit 0` -- but it does mean a block that wants a non-terminating
+    # error to count as failure has to say `$ErrorActionPreference = 'Stop'`
+    # itself, as the blocks below do.
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$Script`nexit 0"))
     $raw = & ssh -o BatchMode=yes -o ConnectTimeout=15 $SshAlias "pwsh -NoProfile -EncodedCommand $encoded" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "ssh $SshAlias failed: $(($raw | Out-String).Trim())" }
-    ($raw | Out-String).Trim()
+    $exit = $LASTEXITCODE
+    $text = ($raw | Out-String).Trim()
+    # Never throw a bare colon again: say what the exit code was even when the
+    # far end had nothing to say.
+    if ($exit -ne 0) { throw "ssh $SshAlias failed (exit $exit): $(if ($text) { $text } else { '(no output)' })" }
+    $text
 }
 
 # Names as the vehicle's own process list reports them, which is what every
@@ -111,6 +129,7 @@ $simulatorProcess = [IO.Path]::GetFileNameWithoutExtension($SimulatorExe)
 
 function Get-StackState {
     $json = Invoke-Onboard @"
+`$ErrorActionPreference = 'Stop'
 `$onboard   = @(Get-Process -Name '$onboardProcess' -ErrorAction SilentlyContinue)
 `$simulator = @(Get-Process -Name '$simulatorProcess' -ErrorAction SilentlyContinue)
 `$ports = @{}
@@ -194,10 +213,23 @@ if ($Stop) {
     # Client first: stopping the IO plane under a running client is how you get
     # an IO trace nobody can explain afterwards.
     Invoke-Onboard @"
+`$ErrorActionPreference = 'Stop'
 foreach (`$name in '$onboardProcess', '$simulatorProcess') {
-    Get-Process -Name `$name -ErrorAction SilentlyContinue | ForEach-Object {
-        `$_.CloseMainWindow() | Out-Null
-        if (-not `$_.WaitForExit(10000)) { `$_.Kill(); `$_.WaitForExit(10000) | Out-Null }
+    foreach (`$p in @(Get-Process -Name `$name -ErrorAction SilentlyContinue)) {
+        # Errors are terminating here so that a Kill which is actually refused
+        # says so, instead of being swallowed and rediscovered as "STILL RUNNING"
+        # with no reason attached. The guard is what keeps that from turning into
+        # the opposite failure: a process that exits on its own between the
+        # enumeration and the call is the outcome being asked for, and aborting
+        # on it would stop the client and leave the simulator up. So the verdict
+        # is the process itself -- still alive, still a failure -- and the state
+        # check below is what reports it either way.
+        try {
+            `$p.CloseMainWindow() | Out-Null
+            if (-not `$p.WaitForExit(10000)) { `$p.Kill(); `$p.WaitForExit(10000) | Out-Null }
+        } catch {
+            if (-not `$p.HasExited) { throw }
+        }
     }
 }
 "@ | Out-Null

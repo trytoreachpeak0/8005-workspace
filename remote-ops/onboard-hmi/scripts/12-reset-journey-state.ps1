@@ -141,10 +141,18 @@ function Write-Step { param([string] $Message) Write-Host "  $Message" -Foregrou
 function Invoke-Remote {
     param([string] $Alias, [string] $Script)
 
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+    # Same contract as Invoke-Onboard in 10-start-onboard-stack.ps1, for the same
+    # reason: without a trailing `exit`, the remote pwsh reports `$?` from
+    # whatever statement ran last, and `-ErrorAction SilentlyContinue` leaves that
+    # False while printing nothing. A block that wants a non-terminating error to
+    # count as failure sets `$ErrorActionPreference = 'Stop'` itself; a
+    # terminating error never reaches `exit 0`.
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$Script`nexit 0"))
     $raw = & ssh -o BatchMode=yes -o ConnectTimeout=15 $Alias "pwsh -NoProfile -EncodedCommand $encoded" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "ssh $Alias failed: $(($raw | Out-String).Trim())" }
-    ($raw | Out-String).Trim()
+    $exit = $LASTEXITCODE
+    $text = ($raw | Out-String).Trim()
+    if ($exit -ne 0) { throw "ssh $Alias failed (exit $exit): $(if ($text) { $text } else { '(no output)' })" }
+    $text
 }
 
 $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss')
@@ -318,7 +326,10 @@ Get-ChildItem (Split-Path -Parent '$VehicleJournal') -Filter 'onboard-journal.db
     Write-Step "Journal: $vehicleResult"
 
     if ($settled -and $settled.serviceWasRunning) {
-        $null = Invoke-Remote $ServerAlias "Start-Service -Name '$($ServiceName -replace "'", "''")'"
+        # -ErrorAction Stop, not by default: the settlement leaves the service
+        # deliberately stopped, so "started again" must not be printed over a
+        # non-terminating failure that Invoke-Remote now lets through.
+        $null = Invoke-Remote $ServerAlias "Start-Service -Name '$($ServiceName -replace "'", "''")' -ErrorAction Stop"
         Write-Step "Service '$ServiceName' started again"
     }
 }
