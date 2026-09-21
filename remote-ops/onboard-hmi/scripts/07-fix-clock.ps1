@@ -226,9 +226,13 @@ else {
     Write-Step 'No reference time passed; the correction comes from the time server.'
 }
 
-# No early return when the clock already looks right. Installing the limits and
-# the startup task is what makes the NEXT power loss a non-event, and a machine
-# whose clock is currently fine is exactly where that has to be installed.
+# DO NOT re-add the "clock is already within 5 seconds, nothing to do" early
+# return that stood here until 2026-09-21. It reads like an obvious saving and
+# it is the bug: what this script installs -- the lifted correction limits and
+# the startup task -- is for the NEXT power loss, not for the reading on the
+# screen right now. A car whose clock currently looks fine is precisely the one
+# that has not been inoculated yet. Running this again on a healthy machine
+# costs one NTP packet (workspace#5).
 if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Lift the w32time correction limits, sync from $TimeServer, and register '$startupTaskName'")) {
     Write-Step 'WhatIf: nothing above was changed.'
     return
