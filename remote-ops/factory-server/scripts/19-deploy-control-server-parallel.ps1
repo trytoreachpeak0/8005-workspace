@@ -134,8 +134,20 @@ $definition = Read-ParallelInstanceDefinition -Path $InstanceDefinitionPath
 # Refused here, before a package is downloaded and before anything is copied to a machine that
 # is serving customers. The same assertion runs again on the server: the control host proves
 # the file it read is deployable, the server proves the file it received is.
-$null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch:$AllowRiotCreateDispatch
-Write-Step "Instance definition accepted: $($definition['instanceId']) (from $InstanceDefinitionPath)"
+#
+# Except for -Uninstall. An uninstall removes what was installed, from the definition the server
+# recorded at install time, and that script asserts it there. Here only opsRoot is needed -- to
+# find the server-side scripts -- and it is held to the same allowlist a directory the uninstaller
+# may delete is. Requiring the whole local file to be deployable would make an instance that
+# was installed impossible to remove the moment this machine's copy gained a placeholder.
+if ($Uninstall) {
+    $opsProblem = Test-ParallelInstanceOwnedPath -Path ([string] $definition['opsRoot'])
+    if ($opsProblem) { throw "opsRoot in $InstanceDefinitionPath $opsProblem." }
+    Write-Step "Uninstall: using opsRoot $($definition['opsRoot']) from $InstanceDefinitionPath; the server asserts its own installed definition."
+} else {
+    $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch:$AllowRiotCreateDispatch
+    Write-Step "Instance definition accepted: $($definition['instanceId']) (from $InstanceDefinitionPath)"
+}
 
 $opsRoot = [string] $definition['opsRoot']
 $stagingRoot = [string] $definition['stagingRoot']
@@ -176,15 +188,29 @@ function Copy-ParallelScripts {
 # ----------------------------------------------------------------- uninstall ---
 
 if ($Uninstall) {
-    Copy-ParallelScripts
+    # Nothing is copied to the server on this path, dry run or not (control-server#262
+    # re-review, M2). The first version copied the scripts and instance.json before asking
+    # ShouldProcess, so "-Uninstall -WhatIf" wrote to the server -- and overwrote the definition
+    # the instance had been installed from with whatever this machine's copy says today. The
+    # uninstall runs the scripts the last install left in opsRoot, and they read
+    # installed-instance.json, which the installer recorded before it changed anything.
+    $remoteScript = "$opsRoot\Uninstall-ParallelInstanceLocal.ps1"
+    $present = & ssh $SshAlias "pwsh -NoProfile -Command `"Test-Path -LiteralPath '$remoteScript' -PathType Leaf`"" 2>&1
     $data = $RemoveData ? ' -RemoveData' : ''
     if (-not $PSCmdlet.ShouldProcess($SshAlias, 'Uninstall the v2 parallel instance')) {
-        # The server-side script prints the full item list under -WhatIf and removes nothing,
-        # so a dry run shows exactly what a real one would take away.
-        Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Uninstall-ParallelInstanceLocal.ps1`" -InstanceDefinitionPath `"$opsRoot\instance.json`" -ConfirmUninstall -WhatIf$data")
+        if ("$present".Trim() -eq 'True') {
+            # Read-only: the server-side script prints its full item list under -WhatIf, from the
+            # definition it would really use, and removes nothing.
+            Invoke-Ssh @("pwsh -NoProfile -File `"$remoteScript`" -ConfirmUninstall -WhatIf$data")
+        } else {
+            Write-Step "WhatIf: no $remoteScript on $SshAlias -- nothing was installed through this path."
+        }
         return
     }
-    Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Uninstall-ParallelInstanceLocal.ps1`" -InstanceDefinitionPath `"$opsRoot\instance.json`" -ConfirmUninstall -Confirm:`$false$data")
+    if ("$present".Trim() -ne 'True') {
+        throw "No $remoteScript on $SshAlias. Nothing was installed through this path, or opsRoot was removed by hand."
+    }
+    Invoke-Ssh @("pwsh -NoProfile -File `"$remoteScript`" -ConfirmUninstall -Confirm:`$false$data")
     Write-Step 'Uninstall complete. The MVP service was not involved.'
     return
 }

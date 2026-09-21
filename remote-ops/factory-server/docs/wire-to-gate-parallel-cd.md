@@ -41,8 +41,8 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
   -ControlServerRepository <同上> -Uninstall
 ```
 
-**真装之前先看第 11 节**：装完服务就处在 `-Intake` 状态（接真实数据、做真实决策、不动车），
-而且实例定义里的地图现在还是占位的 25，第一步要换成 map 26 的现场值。
+**真装之前先看第 11 节**：装完服务就处在 `-Intake` 状态（接真实数据、做真实决策、不动车）；
+而且出厂的实例定义**故意过不了校验**——两个 map 26 的值还是 `REPLACE_*` 占位，第一步要从现场取回（第 9 节）。
 
 MVP 那一套用的是 `15-deploy-control-server.ps1`，**两条命令永远不会互相走错**：MVP 的脚本
 不认识并行实例，并行的脚本在读到 MVP 的服务名、安装目录、端口或车号时**直接拒绝**，见第 6 节。
@@ -199,7 +199,9 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
 
 ### 4.4 地图与通道——运行须知，不在代码里
 
-`agv02`／`agv03` 与 `agv01` 在同一张 RIoT map 上。真要让 v2 驱动车跑起来时：
+`agv02`／`agv03` 与 `agv01` 在同一片现场通道里跑。（地图编号上有一处出入没有核清：用户 2026-09-21
+答复 MVP 跑 map 25、v2 跑 map 26；工作区 `CLAUDE.md` 隔离表则写「备用车与 `agv01` 同在 RIoT map 26」。
+配置怎么写见第 9 节；这里只管现场，而现场的通道不管编号是几都是共用的。）真要让 v2 驱动车跑起来时：
 
 - 选 `agv01` **不经过的路段**；
 - 选 `agv01` **空闲的时段**，避开演示与生产高峰；
@@ -427,38 +429,40 @@ v2 实例。
 
 ---
 
-## 9. 地图：v2 跑 map 26，其中两个值要在真装第一步从现场取回
+## 9. 地图：v2 跑 map 26，出厂定义故意装不上
 
-**用户 2026-09-21 答复：「MVP 是跑在 25 上面的，v2 是跑在 26 上的」。** 所以此前记录的
-「`appsettings.json` 写 25、工作区 `CLAUDE.md` 写 26」不是谁记错了，而是两条线用两张不同的
-图，各自在说各自那条线。
+**用户 2026-09-21 答复：「MVP 是跑在 25 上面的，v2 是跑在 26 上的」。** 所以此前记录的「`appsettings.json`
+写 25、工作区 `CLAUDE.md` 写 26」不是谁记错了，而是两条线用两张不同的图，各自在说各自那条线。
 
-v2 要填的五样东西，出处情况不一样：
+实例定义现在这样写：
 
-| 要填的 | MVP（map 25）现值 | v2（map 26）有没有出处 |
+| 键 | 出厂值 | 出处 |
 | --- | --- | --- |
-| `mapId` | 25 | **有**：26（用户答复） |
-| `mapIdentity` | `老厂前线new` | **有**：`老厂前线new_wk`（真机证据 `evidence/field/2026-09-19-B6-map-name-baseline-check/real-riot/fields.json`） |
-| `dispatchZone`／`allowedDispatchZones` | `MAP-25-WIRE_TO_GATE` | 形式可推（`MAP-26-WIRE_TO_GATE`），**没人确认现场真这么叫** |
-| `admissionPolicyDeploymentId` | `MAP-25-WIRE_TO_GATE-20260827` | **没有**：尾巴那个日期是一次现场标定的产物，推不出来 |
-| 站点清单 `task-type-stations.settings.json` | 一整份绑在 25 上 | **没有 26 版** |
+| `routeGraph.mapId`、`journeyRuntime.mapId` | 26 | 用户答复 |
+| `journeyRuntime.mapIdentity` | `老厂前线new_wk` | 真机证据 `evidence/field/2026-09-19-B6-map-name-baseline-check/real-riot/fields.json`（实读过） |
+| `journeyRuntime.dispatchZone`／`allowedDispatchZones` | `REPLACE_WITH_MAP26_DISPATCH_ZONE` | **待现场取回**：形式可推（`MAP-26-WIRE_TO_GATE`），没人确认现场真这么叫 |
+| `journeyRuntime.admissionPolicyDeploymentId` | `REPLACE_WITH_MAP26_ADMISSION_POLICY_DEPLOYMENT_ID` | **待现场取回**：无出处，尾巴那个日期是一次现场标定的产物 |
+| 站点清单 `task-type-stations.settings.json`（在发布包里，不在定义里） | 一整份绑在 25 上 | **要出一份 26 版** |
 
-`tests/` 里出现过 `MAP-26-*`，但那是测试自己编的假数据（同一文件里还有 `MAP-26-DIE-ATTACH` 这种
-我们不做的作业类型），不能当出处。`src/` 里没有任何硬编码的 25，全部来自配置——所以这是纯配置
-问题，不用改代码。
+`tests/` 里出现过 `MAP-26-*`，但那是测试自己编的假数据（同一文件里还有 `MAP-26-DIE-ATTACH` 这种我们
+不做的作业类型），不能当出处。`src/` 里没有任何硬编码的 25，全部来自配置。
 
-**所以实例定义现在仍然写 25，这是占位，不是目标。** 凭空编一组 `MAP-26-*` 标识符比留一个已知
-的待填项更糟：编出来的值格式正确、能过所有检查，错了也不会有任何东西报警。
+**两条检查把「在那之前不要装」从文档搬进了校验**（control-server#262 复审 M3）：
 
-**⚠️ 这意味着按现在的定义装上去，v2 会指向 MVP 那张图。** 校验拦不住这一点——25 对校验来说是
-一个合法的正整数。所以真装的**第一步**就是把这五样换成 26 的值（见第 11 节），在那之前不要装。
+- 定义里任何字符串值还带 `REPLACE_`，拒绝。**所以出厂定义现在过不了校验，这是刻意的**——自测里有一条
+  断言：出厂文件必须**恰好**因这三个占位被拒，不多不少。这和车载端部署拒绝没填完的站点文件是同一个做法。
+- map 25、`老厂前线new`、任何 `MAP-25-*` 标识符，一律拒绝。以前文档里写着「按原样装会指向 MVP 那张图、
+  校验拦不住」，那句话靠的是读文档的人；现在不靠了。
+
+上一轮我选择让定义「暂时保持 25」、在文档里提醒。那个选择的问题是：25 对校验来说是一个合法的正整数，
+**批准的人看到「校验全绿」会以为配置没问题，而那正是配置有问题、校验看不见的一种。**占位值反过来：校验
+一定红，红的理由直接告诉你还差哪两个值。
 
 **真装第一步怎么取值**：从 `factory01` 直查 RIoT（控制端到 RIoT 走 Clash TUN，探测结果不可信；
 `factory01` 那边直连可达，`CONTROL_SERVER_RIOT_CALL_API_KEY` 在 User 与 Machine 两个作用域都有）。
-`mapId`／`mapIdentity` 核对一次即可，`dispatchZone` 与准入策略部署号要取回现场真实值，站点清单
-要出一份 26 版。
+`dispatchZone` 与准入策略部署号取回现场真实值，站点清单出一份 26 版。
 
-校验里有一条「`routeGraph.mapId` 与 `journeyRuntime.mapId` 必须相等」，改的时候不会只改一处。
+校验里还有一条「`routeGraph.mapId` 与 `journeyRuntime.mapId` 必须相等」，改的时候不会只改一处。
 
 ---
 
@@ -484,7 +488,7 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ### 卸载：一项一项拿掉
 
 ```bash
-# 先干跑，它会把要删和要留的每一项都列出来，什么也不删
+# 先干跑。它只读服务器、不写服务器，列出每一项要删和要留的，什么也不删
 pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
   -ControlServerRepository <干净 checkout> -Uninstall -WhatIf
 ```
@@ -495,30 +499,77 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
   -ControlServerRepository <干净 checkout> -Uninstall
 ```
 
-产品卸载脚本 `Uninstall-ControlServerLocal.ps1` 只管服务、安装根和（可选）数据根。并行部署
-留下的其余东西以前**没有任何地方负责清理**，现在由 `Uninstall-ParallelInstanceLocal.ps1` 按
-下表逐项处理。这张表不是手写清单，是 `Get-ParallelInstanceFootprint` 从实例定义算出来的——
-**安装脚本的名字也从同一份清单取**，所以不会出现「装了、但卸载不知道」的东西。
+产品卸载脚本 `Uninstall-ControlServerLocal.ps1` 只管服务、安装根和（可选）数据根。并行部署留下的其余
+东西由 `Uninstall-ParallelInstanceLocal.ps1` 按下表逐项处理。**这张表是从 `Get-ParallelInstanceLayout`
+推出来的，安装脚本的每一个路径和名字也从这同一个函数取**——自测会扫安装脚本，找任何绕开它直接读路径或
+名字的写法（并先证明这个扫描能扫出故意埋进去的两处），所以「装了、但卸载不知道」的东西要么不存在，要么
+会在自测里红。
 
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
+| 服务 `8005 AGV ControlServer V2` + 安装根 | 删 | 调产品卸载脚本。**第一个做，失败即中止全部**，见下 |
 | 计划任务 `8005 AGV ControlServer V2 FakeMesIngest` | 删 | 连同它拉起、还占着端口的替身进程（只杀路径在 V2 替身目录下的） |
-| 服务 `8005 AGV ControlServer V2` + 安装根 | 删 | 调产品卸载脚本 |
 | 防火墙 `8005 AGV ControlServer V2 58105`／`58107` | 删 | MVP 那两条名字不同，不会被碰 |
+| 机器级 `CONTROL_SERVER_V2_ONBOARD_CERTIFICATE_PASSWORD` | 删 | 本实例专用名字；脚本拒绝删 MVP 那个名字 |
 | 替身目录 `…\ControlServer.V2.FakeMesIngest` | 删 | |
 | 包 `D:\zhengyushao\ControlServer.V2` 与 `.previous` | 删 | |
+| 残留的暂存目录 `ControlServer.V2.incoming-*`／`ControlServer.V2.rollback-*` | 删 | 进程被强杀时会留下；通配符带本实例前缀 |
 | 暂存 `D:\zhengyushao\control-server-v2-staging` | 删 | |
-| 机器级 `CONTROL_SERVER_V2_ONBOARD_CERTIFICATE_PASSWORD` | 删 | 本实例专用名字；脚本拒绝删 MVP 那个名字 |
 | 数据根 `C:\ProgramData\8005\ControlServer.V2`（SQLite） | **留** | 带 `-RemoveData` 才删 |
 | 升级备份 `…\ControlServer.V2-backups` | **留** | 同上 |
-| 运维目录 `D:\zhengyushao\control-server-v2-ops`（结果、日志、种子） | **留** | 同上 |
+| 运维目录 `D:\zhengyushao\control-server-v2-ops`（结果、日志、种子、安装时的定义） | **留** | 同上。种子文件被校验要求必须放在这里面 |
 | 用户级 `CONTROL_SERVER_RIOT_CALL_API_KEY` | **永远不删** | MVP 每次安装都读它，删了会让下一次 MVP 部署挂掉 |
 
-三道护栏，按起作用的顺序：实例定义先整份校验一遍（命中 MVP 的服务名、路径、端口就拒绝，
-一项都不删）；每个目录在删之前**再核一次**不与生产路径相等或嵌套（`.previous` 这种派生路径
-不在定义里，派生不等于保证）；MVP 服务指纹事前事后比对。某一项删失败不会中断，最后列出
-「删了哪些、哪些没删掉」，再整体报错——半卸载的状态从一张完整清单诊断，比从第一个异常诊断
-容易得多。
+#### 它按哪一份定义卸载
+
+**安装时记下的那一份。** 安装脚本在动手之前就把它用的定义拷成运维目录里的 `installed-instance.json`
+（首次安装半路失败时也有），卸载默认读它，找不到才退回 `instance.json`。控制端的 `-Uninstall`
+**不往服务器拷任何东西**，干跑和真跑都一样，直接调服务器上上次安装留下的卸载脚本。
+
+这是复审 M2 修的：第一版在询问 `-WhatIf` **之前**就把脚本和 `instance.json` 拷上服务器——`-Uninstall -WhatIf`
+会写服务器（这张票上第二个「干跑开关失效」，第一个是那个粘连的 `return`），而且会**在卸载之前把安装时那份
+定义覆盖成控制端现在这份**。定义在安装和卸载之间改过的话，卸载就会按新路径删、漏掉旧路径。
+
+#### 什么情况下它会停——这一段是 S1 修出来的
+
+复审找到过这张票最严重的一个缺陷：把定义里的路径写成正斜杠（`C:/Program Files/8005 AGV/ControlServer`）、
+或者 `packageRoot` 写成 `D:\zhengyushao\ControlServer.previous`，**校验会通过，卸载的删除清单里会出现 MVP 的
+安装根、生产 SQLite 所在的数据根、MVP 回滚要用的上一代包和生产 MesIngest 目录**。复审在自己机器上用假目录
+实测过，`<根>\.\Prod`、`<根>\x\..\Prod` 这种写法 `Remove-Item` 真的会删掉 `Prod`。三个根因叠在一起：
+
+1. **路径只做了字符串比较**，正斜杠、`.`、`..`、8.3 短名、`\\?\`、UNC 全被判成「不是生产路径」；
+2. **生产路径清单不全**——漏掉的五个目录，就列在这张票自己的探测证据里；
+3. **更强的护栏被更弱的盖过了。** 产品卸载脚本会先把路径规范化再比对，能认出正斜杠写法并抛
+   `Refusing to uninstall the production deployment`。但第一版卸载脚本把这个异常当成普通失败捕获、继续往下，
+   **接下来的目录循环照删不误**。内层那道护栏认出了危险、拒绝了；外层把拒绝当成一个可以跳过的错误，然后自己
+   动手删了。两道护栏组合起来，比只有内层那一道更弱。
+
+现在的做法，每一条都对着一个根因：
+
+- **路径只认一种写法，再用白名单判归属。** 盘符开头、全反斜杠、没有空段、没有 `.`／`..`、没有 `~`、不是 UNC
+  或 `\\?\`、每段不以点或空格结尾（Windows 会悄悄去掉它们，`ControlServer.` 就是 `ControlServer`），最后
+  `GetFullPath` 还得原样交回。然后必须**直接**位于三个已知根目录之一下面，**目录名里带 `V2` 标记**。
+  **白名单是第一道，生产清单降为第二道**（清单已按探测证据补全，且对任何读不懂的写法按「是生产路径」处理）。
+  失效方向对了：白名单漏一个目录，后果是删不掉；黑名单漏一个目录，后果是删错了。
+- **服务那一步只要失败，整个卸载立即中止**，计划任务、防火墙、目录一样都不碰。产品卸载脚本的拒绝是整个卸载
+  里最重要的一条信号。
+- **每删一个目录之前都重新过一遍白名单和生产清单**，包括 `.previous` 这种派生路径和残留暂存目录的每一个匹配。
+  任何一个过不去，目录阶段就停在那里。
+
+删除的顺序和这两条停止条件写在模块函数 `Invoke-ParallelRemovalSequence` 里，动作由卸载脚本注入。这样自测
+可以**不需要一台机器**就证明：「产品卸载脚本以 production 拒绝」之后没有任何别的动作发生；通配符匹配到 MVP
+的暂存目录时，它不会被删、后面的目录也不会被删。自测还在副本里逐一拆掉这些护栏，确认每拆一道，都恰好是对应
+的那几条用例变红（证据 `review2-mutation.txt`）。其中一条值得记住：**只拆掉白名单的 `V2` 标记检查，
+「通配符匹配到 MVP 暂存目录」那条就红了**——因为 `ControlServer.incoming-…` 和生产路径 `ControlServer` 名字不同、
+也不嵌套，**只靠生产清单会放行删除**。白名单不是锦上添花，它在承重。
+
+另外三道护栏照旧：定义先整份校验（复审给的那份复现定义，现在在第一步就被拒，卸载脚本什么清单都不打）；
+MVP 服务指纹事前事后比对；非服务类的单项失败会记下、继续，最后列一张「删了哪些、哪些没删掉」的完整清单。
+
+#### 手工运行要注意
+
+服务器端卸载脚本的 `ConfirmImpact` 是 `High`，手工运行会弹确认。**经非交互的 ssh 运行时，这个确认会把会话
+挂住**——带 `-Confirm:$false`（控制端的 `-Uninstall` 就是这么传的），或者先用 `-WhatIf` 看清单。
 
 卸载的代码路径与回滚一样，**没有在真机上跑过**，因为两者都要先装一次。
 
@@ -556,7 +607,7 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 | 装什么 | 一次 `release.yml` 产出的 v2 联合包（服务端 + 车载端），服务端半边装到 `factory01`；外加一个从同一 commit 构建的 FakeMesIngest |
 | 装到哪 | 第 3 节的表，全部是 MVP 之外的新路径与新端口。2026-09-21 只读探测：八个目录、服务名、任务名、两条防火墙规则**全部不存在**，四个端口空闲且没有被出站连接占着 |
 | 装完的状态 | **`-Intake`**，见上一小节 |
-| **第一步：地图取值** | **装之前**把 `mapId`／`mapIdentity`／`dispatchZone`／`admissionPolicyDeploymentId` 换成 map 26 的值、出一份 26 版站点清单，见第 9 节。现在的定义写的是 25，**按原样装会指向 MVP 那张图** |
+| **第一步：地图取值** | **装之前**从 factory01 直查 RIoT，取回 `dispatchZone` 与 `admissionPolicyDeploymentId` 的 map 26 真实值填进定义，并出一份 26 版站点清单，见第 9 节。`mapId`（26）与 `mapIdentity`（`老厂前线new_wk`）已有出处、已写好。**出厂定义在这两个值填好之前过不了校验，部署命令会在碰服务器之前拒绝**——这是刻意的 |
 | 预计多久 | 取值与改定义不计；产品脚本装一次约几分钟（含服务启动与健康检查），加上 scp 一个百 MB 级的包，按半小时准备 |
 | 会不会动车 | **不会**，`riotCreateDispatch.enabled = false` |
 | 会不会抢真实需求 | **不会**，`MesIngest:baseUrl` 指向本机回环的 FakeMesIngest |
@@ -573,7 +624,10 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 
 1. **先看 MVP**：指纹前后是否一致；再用第 12 节的巡检确认 58005／58007 仍在应答。
 2. 用 `-Uninstall -WhatIf` 看半装实例留下了哪些东西，再 `-Uninstall` 拿掉（默认保留数据根与运维
-   目录，失败现场的结果 JSON 与日志就在 `control-server-v2-ops\results\`）。
+   目录，失败现场的结果 JSON 与日志就在 `control-server-v2-ops\results\`）。卸载按安装脚本**动手前**
+   记下的 `installed-instance.json` 来删，所以半装的实例也有它；包目录此时还不存在，产品卸载脚本
+   从运维目录里控制端送去的那份取（第 10 节）。卸载里服务那一步一旦失败会整体中止，此时照日志处理
+   服务，**不要**手工去删目录——手工删正是 S1 那个缺陷的形状。
 3. 修好原因再重装。首次安装的产品脚本在安装根已存在时会拒绝，所以一定要先卸载干净。
 
 ---
@@ -599,6 +653,9 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 症状 | 先看 |
 | --- | --- |
 | 部署在校验那一步就停了 | 它会把**每一条**拒绝理由都列出来，照着改实例定义。机器还没被碰 |
+| 校验报「is still the placeholder」 | 出厂定义就是这样，刻意的。两个 map 26 的值要先从现场取回填进去，见第 9 节 |
+| 校验说路径「is not in canonical form」或「does not carry the instance marker」 | 路径写成了正斜杠、带 `.`／`..`、不在三个根目录下、或名字里没有 `V2` 标记。照第 10 节「什么情况下它会停」改成唯一接受的那种写法 |
+| 卸载报服务那一步失败、然后抛「Uninstall ABORTED」 | 这是设计：服务那一步一失败，其余一样都不碰。尤其当原因是产品卸载脚本以 production 拒绝时，说明定义里的某个路径指向了生产——**先查定义，不要手工删目录** |
 | 校验报「is not a key this deployment knows」 | 实例定义里有白名单之外的键（拼错，或者产品新加的选项还没登记）。未知键一律拒绝而不是透传，见第 6 节 |
 | **V2 起不来，日志报 bind 失败／地址已被占用** | **先查那个端口有没有被临时连接占着**：`Get-NetTCPConnection -LocalPort <端口>`。58105／58107／58109／58188 都落在临时端口范围（49152–65535）内，Windows 可能把它们分给某条出站连接——MVP 的 58005／58007 有同样的风险，只是一直没撞上。2026-09-21 探测时四个都空闲，**那不保证下个月启动时仍空闲** |
 | v2 实例起得来但不受理任何需求 | 先看替身活着没（`http://127.0.0.1:58188/control/v1/health` 的 `demandCount`）。目录空是**正常默认**，要灌需求见第 5 节 |
