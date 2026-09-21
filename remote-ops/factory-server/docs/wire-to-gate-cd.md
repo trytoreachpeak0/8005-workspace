@@ -7,6 +7,18 @@ ControlServer 的 CI 已经在 `win11-01` 上跑（`.github/workflows/test.yml`�
 
 生效日期 2026-09-02。
 
+> **这份文档讲的是 MVP 那一套**（`ControlServer_MVP`／`protocol-v0.3.0`，驱动 `agv01`，
+> 取真实需求，服务真实客户）。约 2026-10-08 起同一台 `factory01` 上还会跑**第二套**：
+> v2 线（`fp/v2-impl`／`protocol-v2.0.0`）驱动 `agv02`／`agv03`，只吃注入的测试需求，
+> 直到约 10-15 切换那天才接真实需求、同时停掉 MVP。
+>
+> 第二套是**另一套安装目录、另一组端口、另一个服务名**，由
+> [wire-to-gate-parallel-cd.md](wire-to-gate-parallel-cd.md) 和另一条部署命令
+> （`19-deploy-control-server-parallel.ps1`）管。**两条命令不会互相走错**：本文档这条不
+> 认识并行实例，那条在读到 MVP 的服务名、安装目录、端口或车号时直接拒绝部署。
+>
+> 本文档里的一切——目录、端口、服务名——**指的都是 MVP 那一套，第二套一个字节都不碰它**。
+
 ---
 
 ## 1. 三十秒版
@@ -239,6 +251,12 @@ ssh agv01 "Start-Process 'C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe'"   # ← 不要�
 ControlServer。
 
 车上：`C:\8005\OnboardHmi`，上一代在 `C:\8005\OnboardHmi.previous`。
+
+**上面每一行都是 MVP 这一套的。** v2 并行实例用的是 `…\ControlServer.V2`、
+`…\control-server-v2-ops`、`58105`／`58107`、服务名 `8005 AGV ControlServer V2`，完整对照表
+在 [wire-to-gate-parallel-cd.md](wire-to-gate-parallel-cd.md) 第 3 节。两套的数据根、备份根
+和 SQLite 各自独立；机器级的 `CONTROL_SERVER_RIOT_CALL_API_KEY` 与
+`CONTROL_SERVER_ONBOARD_CREDENTIAL` 是**共享**的，由本文档这一套设下，并行实例只读不写。
 
 ---
 
