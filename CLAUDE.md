@@ -597,7 +597,7 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 | MES 需求 | 两版默认都从工厂服务器本机 `127.0.0.1:5088` 的生产 MesIngest 取需求，v2 会抢走真实需求 | v2 实例不接生产 MesIngest，用 `8005-agv-control-server` 的 `tools/ControlServer.FakeMesIngest` 注入测试需求 |
 | 端口与数据库 | 两版默认都监听 `58005`／`58007`，库都在 `%ProgramData%/8005/ControlServer` | v2 实例换端口、换库目录，不用 `C:\Program Files\8005 AGV\ControlServer` 与 `D:\zhengyushao\ControlServer`；**不在 factory01 上跑**，确需在 factory01 上跑先问 |
 | RIoT | 两版连同一个 RIoT（`172.19.206.222:8888`），RIoT 上有 25 台可调度车 | `JourneyRuntime.agvId`／`vehicleKey` 只能是 `agv02` 或 `agv03`（见 `remote-ops/fleet.md`）；绝不对 `agv01` 或其他车建单、发订单命令或急停 |
-| 地图与通道 | 备用车与 `agv01` 同在 RIoT map 26（2026-09-19 用户更正，此前误记为 25） | 选 `agv01` 不经过的路段、`agv01` 空闲的时段，避开演示与生产高峰 |
+| 地图与通道 | MVP 与 `agv01` 在 RIoT map 25（`老厂前线new`），v2 与备用车在 map 26（`老厂前线new_wk`）。2026-09-21 用户更正：09-19 那次「同在 map 26」是误记 | 选 `agv01` 不经过的路段、`agv01` 空闲的时段，避开演示与生产高峰 |
 
 **不碰，要碰先问：**`agv01`；factory01 上 MVP 服务的进程、安装目录、配置与数据库；生产 MesIngest；
 `ControlServer_MVP`、`OnboardHmi_MVP` 分支。
