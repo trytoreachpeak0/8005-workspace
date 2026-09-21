@@ -35,6 +35,15 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
   -ControlServerRepository <同上> -Rollback
 ```
 
+```bash
+# 整套拿掉（默认保留数据；首次安装半路失败时也用它）
+pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
+  -ControlServerRepository <同上> -Uninstall
+```
+
+**真装之前先看第 11 节**：装完服务就处在 `-Intake` 状态（接真实数据、做真实决策、不动车），
+而且实例定义里的地图现在还是占位的 25，第一步要换成 map 26 的现场值。
+
 MVP 那一套用的是 `15-deploy-control-server.ps1`，**两条命令永远不会互相走错**：MVP 的脚本
 不认识并行实例，并行的脚本在读到 MVP 的服务名、安装目录、端口或车号时**直接拒绝**，见第 6 节。
 
@@ -80,9 +89,15 @@ CI 上——任何能改那个仓 workflow 的路径最终都能碰到 `AgvAmhs`
 ## 3. 布局：端口、目录、服务名，全部定死
 
 下表就是 `8005-agv-control-server` 的 `scripts/parallel/instance-factory01-v2.json`，**没有
-一项留到"到时候再定"**。端口选取的依据是 2026-09-21 对 `factory01` 的实测（证据在
-`evidence/deploy/20260921-cs262-parallel-instance/factory01-survey.txt`）：四个端口当时全部
-空闲，MVP 占 58005／58007，生产 MesIngest 占 `0.0.0.0:5088`。
+一项留到"到时候再定"**。依据是 2026-09-21 对 `factory01` 的两次只读探测，证据在
+`8005-agv-control-server` 的 `evidence/deploy/20260921-cs262-parallel-instance/`：
+
+- `factory01-survey.txt`（08:56）：四个端口全部空闲，MVP 占 58005／58007，生产 MesIngest 占
+  `0.0.0.0:5088`；
+- `factory01-survey-paths.txt`（10:20，审查后补）：下表 V2 那一列的八个目录、服务名、计划任务名、
+  两条防火墙规则**全部不存在**；四个端口仍空闲，且当时没有任何连接把它们当作本地端口占用。
+
+第一次探测只看了端口没看目录，所以「目录不冲突」那一半当时并没有证据，第二次补上了。
 
 | 项 | MVP（不要碰） | v2 并行实例 |
 | --- | --- | --- |
@@ -104,9 +119,22 @@ CI 上——任何能改那个仓 workflow 的路径最终都能碰到 `AgvAmhs`
 端口号用 `+100` 的偏移（`580xx` → `581xx`），是为了让运维在 `netstat` 里一眼分得清哪个是
 哪个，而不是记住四个互不相干的数字。
 
-**Dashboard 预留但不装。** 产品脚本支持它（`-DashboardPackagePath`），本票不传，因为
-dashboard 只绑回环、要 `ssh -L` 才看得到，而这台机器的内存是最紧的资源（见第 9 节）。
-58109 仍然写进实例定义并纳入端口冲突检查，是为了将来要装时不必重新找一个不冲突的号。
+**Dashboard：本部署不装，也不支持装。** 产品安装脚本能装它（`-DashboardPackagePath`），但它的
+三个 dashboard 参数默认值——安装目录 `ControlServer.Dashboard`、计划任务名、端口 58009——**全是
+MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。本部署一个都不传，所以不会装；要装的话
+得先把这三样都写进实例定义并显式传给产品脚本，那是另一次改动。实例定义里的 `dashboardPort`
+（58109）目前**没有任何代码使用**，只是纳入了端口冲突检查，留着是为了那次改动不必再找一个
+不冲突的号。另一个不装的理由是内存（见第 11 节）。
+
+**两条与端口有关、容易误解的事实**：
+
+- 四个端口（58105／58107／58109／58188）和 MVP 的 58005／58007 一样，都落在 Windows 的临时端口
+  范围（49152–65535）内。上面「探测时空闲」**不保证下个月启动时仍空闲**——Windows 可能把它们分给
+  某条出站连接。这是继承自 MVP 的风险，不是本票新造的，但监听端口从两个变成了四个。症状与排查见
+  第 12 节。
+- 实例定义里的端口与绑定地址**只在首次安装时生效**。升级沿用已装的 `appsettings.Production.json`
+  （`Update-ControlServerLocal.ps1` 的既有行为），所以改了定义里的端口再升级，端口不会变；要换
+  端口得卸载再装。`-WhatIf` 会打印定义里的端口，同时会提醒这一点。
 
 **绑具体网卡 IP，不要 `0.0.0.0`。** 后者会连带把服务暴露到 Hyper-V 的 `AGV-Internal`
 （`192.168.200.0/24`），而 CI runner 就住在那个网段上。这个坑 MVP 首跑时踩过一次；现在它
@@ -155,6 +183,10 @@ dashboard 只绑回环、要 `ssh -L` 才看得到，而这台机器的内存是
 
 白名单**硬编码在 `ParallelInstance.psm1` 里**，不从被校验的那份配置读。从配置读的白名单不
 是白名单：改车的人同一次按键就把名单一起改了。
+
+**多车名册 `Fleet` 整节拒绝。** `JourneyRuntimeOptions` 另有一个真在用的名册，服务端校验器只要求
+它包含主车，不限制还包含谁，而上面这对检查从来不看名册里面。所以实例定义里出现 `fleet`（任何
+大小写）直接拒绝——并行实例只驱动一台车。背景与「为什么不能只按名字拒绝」见第 6 节。
 
 还有第二道锁，和车号无关：
 
@@ -278,6 +310,32 @@ v2 实例。
 同一条规矩还管着另外两处：`riotCreateDispatch.enabled` 和 `journeyRuntime.enabled` 都必须
 显式写出来，都必须是 JSON 布尔。
 
+### 每一节只认白名单里的键，精确到大小写
+
+实例定义的每一节（顶层、`mesIngest`、`fakeMesIngest`、`routeGraph`、`riotCreateDispatch`、
+`journeyRuntime`）都有一份允许的键名清单，**清单之外的键一律拒绝，而不是原样透传**。
+
+这一条是审查找到的洞逼出来的，而修的过程中又发现了第二个洞：
+
+- **审查找到的**：`JourneyRuntimeOptions` 上有一个真在用的多车名册 `Fleet`，服务端自己的
+  校验器只要求名册**包含**主车那一对，不限制**还能包含谁**。而之前的车号检查只读 `agvId`／
+  `vehicleKey`，叠加又把 `journeyRuntime` 的全部键原样抄进配置——往定义里加一个 `fleet` 数组
+  混进 agv01，校验全绿、叠加照抄、服务端也放行。今天不出事，是因为包里和定义里都恰好没有
+  这一节；而批次 7 的多车工作正朝着用上它的方向走。
+- **修的时候发现的**：读实例定义用的 `ConvertFrom-Json -AsHashtable` **区分大小写**，而 .NET
+  配置**不区分**。所以只拒绝 `fleet` 不够——写成 `Fleet` 就绕过去了；更糟的是同时写
+  `"agvId": "…仓位2"` 和 `"AgvId": "…仓位1"`，按名字读的检查只看得见前一个，配置系统却把两者
+  当成同一个设置。**任何「按名字去读已知键」的检查都只能看见它想到的键**，拒绝它没想到的键
+  才能把剩下的口子一起堵上。
+
+所以现在是三种拒绝，各自说明怎么修：名册（整节拒绝，并行实例只驱动一台车）、已知键的大小写
+变体（删掉重复的那个）、别的未知键（拼错了，或者产品新加的选项还没登记进白名单）。
+
+`Fleet` 是**刻意**不进白名单的那一个。自测里有一条守卫：把白名单里 `journeyRuntime`／
+`routeGraph`／`riotCreateDispatch` 的每个键拿去和对应 C# 选项类的属性逐个比对，C# 那边改名
+的话这里会红，而不是让一个配置键悄悄绑不到任何东西上；同时断言 `Fleet` 在 C# 里存在、在白名单
+里不存在。
+
 还有一条组合检查：**`routeGraph.enabled` 为真而 `journeyRuntime.enabled` 为假会被拒**。路网
 引擎只在 `JourneyRuntimeWorker` 的一轮迭代里刷新，运行时关着的话引擎一次都不会跑——那份配置
 读起来是"引擎开着"，实际什么都不量。
@@ -323,14 +381,20 @@ v2 实例。
 
 ---
 
-## 8. 两处不显然的隔离细节
+## 8. 三处不显然的隔离细节
 
-这两条都是读产品脚本源码才发现的，都会在**第一次升级**时才咬人，所以单独列出来。
+前两条是读产品脚本源码才发现的，都会在**第一次升级**时才咬人；第三条是审查发现的，**两套
+部署时间窗一重叠就会咬人**。
 
 **一、传 `-SkipMachineEnvironmentInjection`，不传 `-CopyUserRiotSecretToMachine`。**
 机器级的 `CONTROL_SERVER_RIOT_CALL_API_KEY` 是 MVP 安装时设下的**共享资源**（实测存在，
 166 字符）。并行实例只读它、不写它——服务自己的注册表 `Environment` 已经带了需要的值。另外
 产品脚本在机器级的 key 与用户级的不一致时会直接 throw，覆写它等于这套部署伸手去改生产那套。
+
+**用户级**的同名变量则两套都会写：产品安装脚本从用户级读 key，所以每次安装（不论哪一套）都
+先把它写进用户级。今天两套用同一把 RIoT 密钥，写的是同一个值，所以无害；**哪天两套要用不同的
+密钥，这里就会互相覆盖**，届时要改成装完还原。安装日志里那一句已经改成照实说「写进了用户级、
+与 MVP 共用」，不再暗示用户级是本实例独占的。
 
 `CONTROL_SERVER_ONBOARD_CREDENTIAL`（机器级，64 字符）同样是**读不写**。两套实例、三台车
 共用同一个静态共享密钥，这是明文期的既有设计（`RELEASE-CANDIDATE.md` 11.1 节），不是这次
@@ -343,37 +407,64 @@ v2 实例。
 （实测目前两个都不存在，所以这段清理对两边都是空操作——但依赖"现在恰好不存在"不是隔离，
 名字分开才是）。
 
+**三、暂存目录的清理只认本实例自己的前缀。**
+两套的包目录都在 `D:\zhengyushao` 下（`ControlServer` 与 `ControlServer.V2`）。安装脚本收工时
+会清掉解包用的暂存目录，原来的写法是在包目录的**父目录**里删所有 `*.incoming-*`——这个通配符
+不带实例前缀，所以 MVP 的 `ControlServer.incoming-<时间>` 和 V2 的 `ControlServer.V2.incoming-<时间>`
+**互相都在对方的命中范围内**。两套部署时间窗重叠时，先收工的那条会把另一条正在解包的目录整个
+删掉。
+
+**而且这个 bug 是从 MVP 的脚本抄过来的**，在复制那一刻就存在了。两边一起改成
+`"<包目录名>.incoming-*"`；自测里用临时目录重现了一遍：旧通配符两个都命中（证明夹具确实重现了
+这个 bug），新通配符从两边各自只命中自己的。四个孪生脚本（MVP 的 `15-deploy-control-server.ps1`
+与 `Install-ControlServerRemote.ps1`，并行的 `19-deploy-control-server-parallel.ps1` 与
+`Install-ParallelInstanceLocal.ps1`）的头注释里都互相点了名：**改一边碰到机器层面的东西时，去看
+另一边**。
+
 安装脚本还会在**动手之前和收工之后各记一次 MVP 服务的指纹**（存在与否、状态、启动类型、
-可执行路径、进程 id），对不上就报错。"我没碰它"是一句值得留下证据的话。
+可执行路径、进程 id），对不上就报错。"我没碰它"是一句值得留下证据的话。**但指纹只比服务、不看
+磁盘**——上面那个暂存目录的 bug 它就抓不到。磁盘这一侧靠的是路径校验与前缀化的清理。
 
 ---
 
-## 9. 一个必须先澄清的矛盾：`mapId` 是 25 还是 26
+## 9. 地图：v2 跑 map 26，其中两个值要在真装第一步从现场取回
 
-两处说法不一致，本票没有权限决定哪个对：
+**用户 2026-09-21 答复：「MVP 是跑在 25 上面的，v2 是跑在 26 上的」。** 所以此前记录的
+「`appsettings.json` 写 25、工作区 `CLAUDE.md` 写 26」不是谁记错了，而是两条线用两张不同的
+图，各自在说各自那条线。
 
-| 出处 | 说法 |
-| --- | --- |
-| `8005-agv-control-server` 的 `src/ControlServer.Host/appsettings.json`（`fp/v2-impl` 顶端） | `mapId: 25`，`mapIdentity: 老厂前线new`，`dispatchZone: MAP-25-WIRE_TO_GATE`，`allowedDispatchZones: ["MAP-25-WIRE_TO_GATE"]`，`admissionPolicyDeploymentId: MAP-25-WIRE_TO_GATE-20260827` |
-| `remote-ops/fleet.md` | agv01 的 `mapId` 25 |
-| 工作区 `CLAUDE.md` 隔离表 | "备用车与 `agv01` 同在 RIoT map **26**（2026-09-19 用户更正，此前误记为 25）" |
+v2 要填的五样东西，出处情况不一样：
 
-实例定义现在填的是 **25**，与 `appsettings.json` 保持一致。选 25 而不是 26 的理由：改成 26
-就得连带编造一整套 `MAP-26-WIRE_TO_GATE` 的 `dispatchZone`、`allowedDispatchZones` 和
-`admissionPolicyDeploymentId`，而那几个值我没有出处——凭空造一组标识符比留下一个已知的矛盾
-更糟。
+| 要填的 | MVP（map 25）现值 | v2（map 26）有没有出处 |
+| --- | --- | --- |
+| `mapId` | 25 | **有**：26（用户答复） |
+| `mapIdentity` | `老厂前线new` | **有**：`老厂前线new_wk`（真机证据 `evidence/field/2026-09-19-B6-map-name-baseline-check/real-riot/fields.json`） |
+| `dispatchZone`／`allowedDispatchZones` | `MAP-25-WIRE_TO_GATE` | 形式可推（`MAP-26-WIRE_TO_GATE`），**没人确认现场真这么叫** |
+| `admissionPolicyDeploymentId` | `MAP-25-WIRE_TO_GATE-20260827` | **没有**：尾巴那个日期是一次现场标定的产物，推不出来 |
+| 站点清单 `task-type-stations.settings.json` | 一整份绑在 25 上 | **没有 26 版** |
 
-校验里加了一条：**`routeGraph.mapId` 与 `journeyRuntime.mapId` 必须相等**，所以改的时候不会
-只改一处。
+`tests/` 里出现过 `MAP-26-*`，但那是测试自己编的假数据（同一文件里还有 `MAP-26-DIE-ATTACH` 这种
+我们不做的作业类型），不能当出处。`src/` 里没有任何硬编码的 25，全部来自配置——所以这是纯配置
+问题，不用改代码。
 
-**第一次真装之前必须澄清这一项**，办法是从 `factory01` 直接查 RIoT（控制端到 RIoT 走 Clash
-TUN，探测结果不可信；`factory01` 那边直连可达，`CONTROL_SERVER_RIOT_CALL_API_KEY` 在 User 和
-Machine 两个作用域都有）。它决定路网引擎会去拉哪张图——填错的话引擎会持有一张与实际调度不同
-的图，而它照样跑得好好的。
+**所以实例定义现在仍然写 25，这是占位，不是目标。** 凭空编一组 `MAP-26-*` 标识符比留一个已知
+的待填项更糟：编出来的值格式正确、能过所有检查，错了也不会有任何东西报警。
+
+**⚠️ 这意味着按现在的定义装上去，v2 会指向 MVP 那张图。** 校验拦不住这一点——25 对校验来说是
+一个合法的正整数。所以真装的**第一步**就是把这五样换成 26 的值（见第 11 节），在那之前不要装。
+
+**真装第一步怎么取值**：从 `factory01` 直查 RIoT（控制端到 RIoT 走 Clash TUN，探测结果不可信；
+`factory01` 那边直连可达，`CONTROL_SERVER_RIOT_CALL_API_KEY` 在 User 与 Machine 两个作用域都有）。
+`mapId`／`mapIdentity` 核对一次即可，`dispatchZone` 与准入策略部署号要取回现场真实值，站点清单
+要出一份 26 版。
+
+校验里有一条「`routeGraph.mapId` 与 `journeyRuntime.mapId` 必须相等」，改的时候不会只改一处。
 
 ---
 
-## 10. 回滚
+## 10. 回滚与卸载
+
+### 回滚：退回上一代
 
 ```bash
 pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
@@ -381,19 +472,55 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ```
 
 形状与 MVP 那套相同：上一代原样留在 `D:\zhengyushao\ControlServer.V2.previous`，回滚是把两个
-目录**对调**（不是复制），所以"回滚一次回滚"就是再跑一遍同一条命令。回滚之后会**重新叠加一次
+目录**对调**（不是复制），所以「回滚一次回滚」就是再跑一遍同一条命令。回滚之后会**重新叠加一次
 配置**——升级会保留现有的 `appsettings.Production.json`，但回滚到一个比某个叠加键更早的代际
 时，不重叠就会丢掉那个键。
 
-**回滚不碰 MVP**，一个字节都不碰；收工前同样比对 MVP 指纹。
-
 **车载端不会跟着回滚。** 两端不协商版本，版本错配的表现是连接被拒而不是一条说明原因的错误
-（`RELEASE-CANDIDATE.md` 8.1 节）。所以 `agv02`／`agv03` 上的车载端要一起退回去，否则它们只会
-停止连接。
+（`RELEASE-CANDIDATE.md` 8.1 节）。`agv02`／`agv03` 上的车载端要一起退回去。
 
-彻底卸载用产品脚本 `Uninstall-ControlServerLocal.ps1`，它要求把服务名、安装根、数据根**显式
-写出来**，而且生产那几个名字要额外带 `-AllowProductionService`——所以卸并行实例不可能误删
-生产那套。
+**首次安装没有上一代**，所以首次安装失败时的退路不是回滚，是下面的卸载。
+
+### 卸载：一项一项拿掉
+
+```bash
+# 先干跑，它会把要删和要留的每一项都列出来，什么也不删
+pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
+  -ControlServerRepository <干净 checkout> -Uninstall -WhatIf
+```
+
+```bash
+# 真卸载（默认保留数据）
+pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
+  -ControlServerRepository <干净 checkout> -Uninstall
+```
+
+产品卸载脚本 `Uninstall-ControlServerLocal.ps1` 只管服务、安装根和（可选）数据根。并行部署
+留下的其余东西以前**没有任何地方负责清理**，现在由 `Uninstall-ParallelInstanceLocal.ps1` 按
+下表逐项处理。这张表不是手写清单，是 `Get-ParallelInstanceFootprint` 从实例定义算出来的——
+**安装脚本的名字也从同一份清单取**，所以不会出现「装了、但卸载不知道」的东西。
+
+| 项 | 默认 | 说明 |
+| --- | --- | --- |
+| 计划任务 `8005 AGV ControlServer V2 FakeMesIngest` | 删 | 连同它拉起、还占着端口的替身进程（只杀路径在 V2 替身目录下的） |
+| 服务 `8005 AGV ControlServer V2` + 安装根 | 删 | 调产品卸载脚本 |
+| 防火墙 `8005 AGV ControlServer V2 58105`／`58107` | 删 | MVP 那两条名字不同，不会被碰 |
+| 替身目录 `…\ControlServer.V2.FakeMesIngest` | 删 | |
+| 包 `D:\zhengyushao\ControlServer.V2` 与 `.previous` | 删 | |
+| 暂存 `D:\zhengyushao\control-server-v2-staging` | 删 | |
+| 机器级 `CONTROL_SERVER_V2_ONBOARD_CERTIFICATE_PASSWORD` | 删 | 本实例专用名字；脚本拒绝删 MVP 那个名字 |
+| 数据根 `C:\ProgramData\8005\ControlServer.V2`（SQLite） | **留** | 带 `-RemoveData` 才删 |
+| 升级备份 `…\ControlServer.V2-backups` | **留** | 同上 |
+| 运维目录 `D:\zhengyushao\control-server-v2-ops`（结果、日志、种子） | **留** | 同上 |
+| 用户级 `CONTROL_SERVER_RIOT_CALL_API_KEY` | **永远不删** | MVP 每次安装都读它，删了会让下一次 MVP 部署挂掉 |
+
+三道护栏，按起作用的顺序：实例定义先整份校验一遍（命中 MVP 的服务名、路径、端口就拒绝，
+一项都不删）；每个目录在删之前**再核一次**不与生产路径相等或嵌套（`.previous` 这种派生路径
+不在定义里，派生不等于保证）；MVP 服务指纹事前事后比对。某一项删失败不会中断，最后列出
+「删了哪些、哪些没删掉」，再整体报错——半卸载的状态从一张完整清单诊断，比从第一个异常诊断
+容易得多。
+
+卸载的代码路径与回滚一样，**没有在真机上跑过**，因为两者都要先装一次。
 
 ---
 
@@ -401,23 +528,53 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 
 **本文档描述的机制已经就绪并验证过，但 `factory01` 上至今没有装过第二套。**
 
-用户 2026-09-20 解除的是"v2 实例不在 `factory01` 上跑"这条**位置限制**，不是**某一次具体安装
+用户 2026-09-20 解除的是「v2 实例不在 `factory01` 上跑」这条**位置限制**，不是**某一次具体安装
 操作的授权**。这两者的区别在本仓是有先例的：车载端部署脚本把包搬上去就停，启动是单独一步，
 因为上位机是会动的生产设备。
 
-申请第一次安装时要一并报上去的东西：
+### 装完是什么状态——请批准的人先看这一条
+
+**这一次安装装完，服务就处在 `-Intake` 状态：接真实数据、做真实决策、不动车。** 具体是：
+
+- `JourneyRuntime.enabled = true`：运行时在跑，每 2 秒一轮，读需求目录、做受理与调度判断，
+  路网引擎按周期拉 RIoT；
+- `RiotCreateDispatch.enabled = false`：**不向 RIoT 下单**。审查从代码核过，这个闸门关着时两条
+  建单路径都直接返回 `CreateDispatchDisabled`；不下单就没有在途单，没有在途单就走不到急停；
+- 需求只来自本机回环的 FakeMesIngest，目录初始为空。
+
+**这和 MVP 那条线不一样，不要按 MVP 的习惯理解。** MVP 是「装」和「开运行时」两条命令、两次决定
+（装完是全关，开运行时要另跑 `Set-JourneyRuntime.ps1 -Intake`）；并行实例是**装完即 Intake**，
+少了中间那个决策点。这样设计是因为本票的目的就是给后面两张票（量路网引擎开销、验硬件极性常量）
+提供一个在跑的环境，而路网引擎只在运行时开着时才刷新。**如果批准的人希望装完是全关的**，把实例
+定义里 `journeyRuntime.enabled` 与 `routeGraph.enabled` 都改成 `false` 再装即可（两者必须同时
+改，只关前者会被校验拒绝），之后单独再开。
+
+### 申请材料
 
 | 项 | 内容 |
 | --- | --- |
 | 装什么 | 一次 `release.yml` 产出的 v2 联合包（服务端 + 车载端），服务端半边装到 `factory01`；外加一个从同一 commit 构建的 FakeMesIngest |
-| 装到哪 | 第 3 节的表，全部是 MVP 之外的新路径与新端口 |
-| 预计多久 | 产品脚本装一次约几分钟（含服务启动与健康检查）；加上 scp 一个百 MB 级的包，按半小时准备 |
-| 会不会动车 | **不会。** `riotCreateDispatch.enabled = false`，不下单就不会有在途单，也就走不到急停。让车动是另一次、要单独授权的操作 |
-| 会不会抢真实需求 | **不会。** `MesIngest:baseUrl` 指向本机回环的 FakeMesIngest，目录初始为空 |
-| 怎么确认没影响 MVP | 安装脚本事前事后各记一次 MVP 服务指纹（状态、启动类型、可执行路径、pid），不一致就报错并中止；另外可在安装前后各跑一次第 12 节的只读巡检 |
-| 出问题怎么退 | `-Rollback`；首次安装没有上一代，所以首次的退路是 `Uninstall-ControlServerLocal.ps1` 显式点名卸掉 V2 那套 |
-| **风险：内存** | 这台机器物理 31.5 GiB、空闲 5.6 GiB，已提交 29.6 / 36.3 GiB，余量 6.7 GiB。MVP 的 `ControlServer.Host` 吃 876 MB 工作集。第二套按同量级估，加 FakeMesIngest 预计再吃 1～1.5 GiB。**装得下，但余量会明显变薄**，同机还跑着 SQL Server（7.7 GiB）、`AGV.Web`、生产 MesIngest |
-| **待澄清** | `mapId` 是 25 还是 26，见第 9 节。建议在申请时一并定下来 |
+| 装到哪 | 第 3 节的表，全部是 MVP 之外的新路径与新端口。2026-09-21 只读探测：八个目录、服务名、任务名、两条防火墙规则**全部不存在**，四个端口空闲且没有被出站连接占着 |
+| 装完的状态 | **`-Intake`**，见上一小节 |
+| **第一步：地图取值** | **装之前**把 `mapId`／`mapIdentity`／`dispatchZone`／`admissionPolicyDeploymentId` 换成 map 26 的值、出一份 26 版站点清单，见第 9 节。现在的定义写的是 25，**按原样装会指向 MVP 那张图** |
+| 预计多久 | 取值与改定义不计；产品脚本装一次约几分钟（含服务启动与健康检查），加上 scp 一个百 MB 级的包，按半小时准备 |
+| 会不会动车 | **不会**，`riotCreateDispatch.enabled = false` |
+| 会不会抢真实需求 | **不会**，`MesIngest:baseUrl` 指向本机回环的 FakeMesIngest |
+| 怎么确认没影响 MVP | 安装脚本事前事后各记一次 MVP 服务指纹（状态、启动类型、可执行路径、pid），不一致就报错；安装前后各跑一次第 12 节的只读巡检。注意指纹只比服务、不比磁盘——磁盘这一侧靠路径校验与前缀化的暂存清理（第 8 节） |
+| **风险：内存** | 物理 31.5 GiB、空闲 5.6 GiB，已提交 29.6／36.3 GiB，余量 6.7 GiB。MVP 的 `ControlServer.Host` 吃 876 MB。第二套加 FakeMesIngest 预计再吃 1～1.5 GiB。装得下，但余量会明显变薄——同机还跑着 SQL Server（7.7 GiB）、`AGV.Web`、生产 MesIngest |
+
+### 装到一半失败怎么办——比「回滚」更手工
+
+安装脚本里**没有跨步骤的自动回滚**。产品安装脚本自己失败时会自我回滚；但它**成功之后**，本脚本
+做的那些事——配置叠加、写 MesIngest token、部署替身、注册计划任务、开防火墙、代际对调——任何
+一步失败，都会留下一个半装的实例，而首次安装此时没有 `.previous` 可以换回去。
+
+脚本在这种情况下会明确打出「没有完成、可能半装」，并把 MVP 指纹的前后值打出来。然后：
+
+1. **先看 MVP**：指纹前后是否一致；再用第 12 节的巡检确认 58005／58007 仍在应答。
+2. 用 `-Uninstall -WhatIf` 看半装实例留下了哪些东西，再 `-Uninstall` 拿掉（默认保留数据根与运维
+   目录，失败现场的结果 JSON 与日志就在 `control-server-v2-ops\results\`）。
+3. 修好原因再重装。首次安装的产品脚本在安装根已存在时会拒绝，所以一定要先卸载干净。
 
 ---
 
@@ -430,7 +587,7 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ssh factory01 "(Get-NetTCPConnection | Where-Object { `$_.LocalPort -ge 49152 }).Count"
 ```
 
-健康时约 1～2%（2026-09-21 实测 261 / 16384）。
+健康时约 1～2%（2026-09-21 实测 261／16384）。
 
 ```bash
 # 两套服务各自的状态
@@ -442,27 +599,62 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 症状 | 先看 |
 | --- | --- |
 | 部署在校验那一步就停了 | 它会把**每一条**拒绝理由都列出来，照着改实例定义。机器还没被碰 |
+| 校验报「is not a key this deployment knows」 | 实例定义里有白名单之外的键（拼错，或者产品新加的选项还没登记）。未知键一律拒绝而不是透传，见第 6 节 |
+| **V2 起不来，日志报 bind 失败／地址已被占用** | **先查那个端口有没有被临时连接占着**：`Get-NetTCPConnection -LocalPort <端口>`。58105／58107／58109／58188 都落在临时端口范围（49152–65535）内，Windows 可能把它们分给某条出站连接——MVP 的 58005／58007 有同样的风险，只是一直没撞上。2026-09-21 探测时四个都空闲，**那不保证下个月启动时仍空闲** |
 | v2 实例起得来但不受理任何需求 | 先看替身活着没（`http://127.0.0.1:58188/control/v1/health` 的 `demandCount`）。目录空是**正常默认**，要灌需求见第 5 节 |
 | 替身日志里有 `SEED FAILED` | 种子文件里那条需求缺必填字段，或 `area` 填成了前缀而不是区号 |
 | 替身的计划任务显示 Ready 而不是 Running | 连续失败 3 次后不再重启。看 `D:\zhengyushao\control-server-v2-ops\logs\fake-mes-ingest.log` |
 | 路网引擎像是没在跑 | 查 `appsettings.Production.json` 里 `RouteGraph.enabled` **和** `JourneyRuntime.enabled` 是不是都为真——只开前者，引擎一次都不会跑 |
+| 改了实例定义里的端口，装完端口没变 | **升级路径沿用已装的 `appsettings.Production.json`**（`Update-ControlServerLocal.ps1` 的既有行为），定义里的端口与绑定地址只在**首次安装**时生效。要换端口得卸载再装。`-WhatIf` 会打印新端口，同时会提醒这一点 |
 | 车上连不上 v2 实例 | 先查 `Find-NetRoute` 是不是 Clash；再查防火墙里有没有 `8005 AGV ControlServer V2 58105` 那两条 |
 | 部署报 "MVP service changed" | **立刻停下**。这条断言就是为了不让任何东西悄悄碰生产那套。把前后两次指纹发出来再判断 |
 
 诊断日志和结果 JSON 在 `D:\zhengyushao\control-server-v2-ops\results\`，一次安装一对。
 
+### 真装时要盯的三件事——推理过、没实测过
+
+这三条是审查提出的疑问，代码里看不出确定答案，也没有在本机实跑的办法。**不是已知故障，是已知
+盲点**，真装时第一次遇到就记下结果：
+
+1. **替身重启之后，服务端怎么看待目录。** 先说实测到的：`historyEpoch` 是种子里写死的常量，
+   **不会变**；`catalogRevision` 在种子文件不变时每次重灌都回到同一个值——本机实跑两次启动的
+   ETag 都是 `W/"catalog-h8f14e45f…-r3"`。所以「种子不变、替身重启」在服务端看来目录身份完全
+   相同，这一种没有问题。
+
+   有问题的是两种情况，代码里看不出服务端的确定反应：
+   - **改了种子文件再重启**：需求条数相同时，得到的是**同一个 epoch、同一个 revision、不同的
+     需求内容**，而 ETag 只由 epoch 与 revision 推导（`FakeMesIngest/README.md`）。服务端若以
+     ETag 判断「目录没变」，会看不到这次换内容。
+   - **运行中用控制面临时加过需求、之后替身重启**：revision 从较高的值**回落**，同一个
+     `demandId` 在回落后的目录里再次出现——会不会被判 `CandidateChanged` 空转或被**重复受理**。
+
+   目录为空时两种都不会触发。**第一次往种子文件里加需求、以及第一次修改种子文件时，都要盯住。**
+   稳妥的做法是改种子之前先把 `historyEpoch` 换一个新值（替身支持 `--FakeMesIngest:Seed:HistoryEpoch=`），
+   让「换了一本目录」在身份上看得出来——这一步本票没做成自动的，因为它会改变替身的启动参数，
+   等第一次真实观察结果出来再定。
+2. **计划任务那一层一次都没实跑过。** 本机实测证明的是「替身死了，包装脚本跟着退出、退出码非 0」
+   ——这一条是方案成立的关键，已验证。但「Windows 看到非 0 退出后真的会按 `-RestartCount 3` 重启」
+   和「`-AtStartup` 触发器真的会在开机时以 SYSTEM 拉起」是推理。真装后找一个 MVP 空闲的时段，
+   手动结束替身进程一次，看任务是否在一分钟内把它拉回来。
+3. **首次安装半路失败的退路**比回滚更手工，已在第 11 节写细。
+
 ---
 
 ## 13. 这套部署不做什么
 
-- **不碰 MVP** 的进程、安装目录、配置与数据库。事前事后各比对一次服务指纹。
+- **不碰 MVP** 的进程、安装目录、配置与数据库。事前事后各比对一次服务指纹；暂存目录的清理
+  限定在本实例自己的前缀下（第 8 节）。
 - **不碰生产 MesIngest，不碰 `SQAGV`。**
-- **不碰 `agv01`。** 配置层面拒绝，不是靠纪律。
-- **不写任何机器级环境变量。** 只读那两个共享的。
+- **不碰 `agv01`。** 配置层面拒绝，不是靠纪律；车辆名册（`Fleet`）整节拒绝，见第 6 节。
+- **不写 MVP 用的机器级环境变量。** 它只读机器级的 `CONTROL_SERVER_RIOT_CALL_API_KEY` 与
+  `CONTROL_SERVER_ONBOARD_CREDENTIAL`，不写。它**会动**的机器级变量只有一个，是它自己专用的
+  `CONTROL_SERVER_V2_ONBOARD_CERTIFICATE_PASSWORD`：升级时产品脚本会删它（目前本来就不存在），
+  卸载时本脚本会删它。**用户级**的 `CONTROL_SERVER_RIOT_CALL_API_KEY` 它会写，而 MVP 每次安装也写
+  同一个变量——今天两套是同一把密钥所以无害，见第 8 节。
 - **不让 runner 直接部署。** 必须经控制端中转。
 - **不启用 `riotCreateDispatch`。** 要开得显式带 `-AllowRiotCreateDispatch`，而那一次运行
   仍然要用户单独授权、现场有人盯着。
 - **不启动车载端。** `agv02`／`agv03` 上的车载端部署与启动是另一条路
   （`remote-ops/onboard-hmi/scripts/`），规矩没变：搬完就停，启动要有人走到车前。
 - **不跑门禁。** `G1`／`G2`／`G3`／`RC` 属于切发布候选的流程，不在部署路径上。
-- **不装 Dashboard。** 端口预留，见第 3 节。
+- **不装 Dashboard，也不支持装。** 见第 3 节。

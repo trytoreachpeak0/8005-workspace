@@ -17,6 +17,12 @@
     the control host keeps a human in the path without making the deployment
     manual.
 
+    TWIN SCRIPT. 19-deploy-control-server-parallel.ps1 deploys the v2 parallel instance to
+    the same machine (control-server#262). It is a separate script on purpose -- this one
+    cannot install the parallel instance and that one refuses the production names -- which
+    also means a fix to one does not reach the other by itself. When a change here touches the
+    machine rather than this deployment, look at the twin too.
+
     The onboard half of the same package goes to the vehicles with
     remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1. Deploy the server
     first: the onboard client needs a reachable projection endpoint before it

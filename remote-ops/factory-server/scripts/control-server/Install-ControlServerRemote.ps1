@@ -13,6 +13,14 @@
     behaviour that RELEASE-CANDIDATE.md sections 4.2 and 4.5 document. Nothing
     here reimplements them.
 
+    TWIN SCRIPT. Since control-server#262 a second ControlServer -- the v2 parallel instance --
+    is installed on the same machine by the control-server repository's
+    scripts/parallel/Install-ParallelInstanceLocal.ps1. The two are separate on purpose, so a
+    fix to one does not reach the other by itself: when a change here touches the machine
+    rather than this deployment (a cleanup glob, a firewall rule, a machine- or user-scope
+    variable), look at that script too. The first such case was the '*.incoming-*' cleanup
+    below, which each copy used to run against the other's staging directory.
+
     What this script adds around them:
 
       * hash verification before anything is unpacked;
@@ -339,6 +347,11 @@ try {
     if ($DeploymentConfigPath -and (Test-Path -LiteralPath $DeploymentConfigPath)) {
         Remove-Item -LiteralPath $DeploymentConfigPath -Force -ErrorAction SilentlyContinue
     }
-    Get-ChildItem -Path (Split-Path -Parent $PackageRoot) -Directory -Filter '*.incoming-*' -ErrorAction SilentlyContinue |
+    # Prefixed with this deployment's own leaf name. The unprefixed '*.incoming-*' this used to
+    # be matched every sibling of the package root, and since control-server#262 the v2
+    # parallel instance keeps its package root beside this one in D:\zhengyushao -- so each
+    # deployment's cleanup deleted the other's staging directory whenever their windows
+    # overlapped. The parallel twin had copied the same line; both were fixed together.
+    Get-ChildItem -Path (Split-Path -Parent $PackageRoot) -Directory -Filter "$(Split-Path -Leaf $PackageRoot).incoming-*" -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }

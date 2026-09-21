@@ -23,6 +23,14 @@
 
     See remote-ops/factory-server/docs/wire-to-gate-parallel-cd.md.
 
+    TWIN SCRIPT. The MVP equivalent is 15-deploy-control-server.ps1, and the server-side twins
+    are control-server/Install-ControlServerRemote.ps1 (MVP) and the control-server
+    repository's scripts/parallel/Install-ParallelInstanceLocal.ps1 (this one). Separate on
+    purpose, so a fix to one does not reach the other by itself: when a change here touches
+    the machine rather than this instance, look at the twin too. The first case was found in
+    review -- both server-side scripts carried the same unprefixed '*.incoming-*' cleanup, and
+    each deleted the other's staging directory.
+
 .PARAMETER RunId
     GitHub Actions release run to deploy. Omit to take the most recent successful one on the
     v2 line.
@@ -44,6 +52,17 @@
     A FakeMesIngest package already built by scripts/parallel/Publish-FakeMesIngest.ps1. Omit
     to build one from -ControlServerRepository.
 
+.PARAMETER Uninstall
+    Remove the parallel instance: the double's task and directory, the V2 firewall rules, the
+    service and install root (through the product uninstaller), both package generations and
+    the staging directory. Every item comes from the same footprint list the installer uses.
+    Data -- the SQLite data root, the upgrade backups, the ops results -- is kept unless
+    -RemoveData. Also the recovery from a half-finished first install, which has no previous
+    generation to roll back to.
+
+.PARAMETER RemoveData
+    With -Uninstall: also remove the data root, the backups and the ops directory.
+
 .PARAMETER WhatIf
     Stage and verify everything, print what would run, and stop before touching the server.
 #>
@@ -57,6 +76,12 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Rollback')]
     [switch] $Rollback,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Uninstall')]
+    [switch] $Uninstall,
+
+    [Parameter(ParameterSetName = 'Uninstall')]
+    [switch] $RemoveData,
 
     [Parameter(Mandatory = $true)]
     [string] $ControlServerRepository,
@@ -128,18 +153,40 @@ Write-Step ("RouteGraph: enabled={0} mapId={1}   RiotCreateDispatch: enabled={2}
 
 function Copy-ParallelScripts {
     <#
-        The three files the server-side installer needs, copied together. The module and the
-        installer are one unit: an installer that ran against a stale module would validate a
+        The files the server-side scripts need, copied together every time. The modules and the
+        scripts are one unit: an installer that ran against a stale module would validate a
         definition by rules the definition was not written to.
     #>
     Invoke-Ssh @("New-Item -ItemType Directory -Force -Path '$opsRoot' | Out-Null")
-    foreach ($name in @('ParallelInstance.psm1', 'Install-ParallelInstanceLocal.ps1', 'Start-FakeMesIngestResident.ps1')) {
+    foreach ($name in @('ParallelInstance.psm1', 'ParallelHost.psm1', 'Install-ParallelInstanceLocal.ps1',
+                         'Uninstall-ParallelInstanceLocal.ps1', 'Start-FakeMesIngestResident.ps1')) {
         & scp -q (Join-Path $parallelScripts $name) "${SshAlias}:$(& $toPosix "$opsRoot\$name")"
         if ($LASTEXITCODE -ne 0) { throw "scp of $name failed (exit $LASTEXITCODE)" }
     }
+    # The product uninstaller, from the same revision. Uninstall-ParallelInstanceLocal.ps1 prefers
+    # the installed package's copy, but a first install that failed half way has no package root
+    # -- and that is the case the uninstaller is the recovery for.
+    & scp -q (Join-Path $repoRoot 'scripts\Uninstall-ControlServerLocal.ps1') "${SshAlias}:$(& $toPosix "$opsRoot\Uninstall-ControlServerLocal.ps1")"
+    if ($LASTEXITCODE -ne 0) { throw "scp of Uninstall-ControlServerLocal.ps1 failed (exit $LASTEXITCODE)" }
     & scp -q $InstanceDefinitionPath "${SshAlias}:$(& $toPosix "$opsRoot\instance.json")"
     if ($LASTEXITCODE -ne 0) { throw "scp of the instance definition failed (exit $LASTEXITCODE)" }
     Write-Step "Parallel scripts and instance definition staged in $opsRoot"
+}
+
+# ----------------------------------------------------------------- uninstall ---
+
+if ($Uninstall) {
+    Copy-ParallelScripts
+    $data = $RemoveData ? ' -RemoveData' : ''
+    if (-not $PSCmdlet.ShouldProcess($SshAlias, 'Uninstall the v2 parallel instance')) {
+        # The server-side script prints the full item list under -WhatIf and removes nothing,
+        # so a dry run shows exactly what a real one would take away.
+        Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Uninstall-ParallelInstanceLocal.ps1`" -InstanceDefinitionPath `"$opsRoot\instance.json`" -ConfirmUninstall -WhatIf$data")
+        return
+    }
+    Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Uninstall-ParallelInstanceLocal.ps1`" -InstanceDefinitionPath `"$opsRoot\instance.json`" -ConfirmUninstall -Confirm:`$false$data")
+    Write-Step 'Uninstall complete. The MVP service was not involved.'
+    return
 }
 
 # ------------------------------------------------------------------ rollback ---
@@ -244,6 +291,10 @@ try {
         Write-Step "Would install service '$($definition['serviceName'])' into $($definition['installRoot'])"
         Write-Step "Would bind: tcp://${listenAddress}:$onboardPort and http://${healthBindAddress}:$healthPort"
         Write-Step "Would keep the MVP at 58005/58007 untouched."
+        # An upgrade keeps the installed appsettings.Production.json (Update-ControlServerLocal.ps1),
+        # so the ports and bind addresses printed above take effect only on a FIRST install. To
+        # move an installed instance, uninstall and install again.
+        Write-Step 'NOTE: on an upgrade the installed bindings are kept; the ports above apply only to a first install.'
         return
     }
 
