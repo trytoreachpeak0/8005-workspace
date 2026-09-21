@@ -254,6 +254,10 @@ Write-Step 'Secrets loaded from the DPAPI store'
 $localStage = Join-Path $env:TEMP "control-server-v2-deploy-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 New-Item -ItemType Directory -Path $localStage -Force -WhatIf:$false | Out-Null
 
+# Set just before deploy-config.json starts its way to the server; from then on the finally below
+# checks the server for it, whatever happened in between (S1 re-review, round 3).
+$configCopyAttempted = $false
+
 try {
     if ($PSCmdlet.ParameterSetName -eq 'Local') {
         $zip = (Resolve-Path -LiteralPath $PackagePath).Path
@@ -360,7 +364,12 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     & scp -q $FakeMesIngestZip "${SshAlias}:$(& $toPosix $remoteFake)"
     if ($LASTEXITCODE -ne 0) { throw "scp of the FakeMesIngest package failed (exit $LASTEXITCODE)" }
 
-    $remoteConfig = "$opsRoot\deploy-config.json"
+    # From the layout, the same function the server's installer takes it from -- never from a
+    # parameter. The after-check in the finally below deletes exactly this one path on factory01.
+    $configLayout = Get-ParallelInstanceLayout -Definition $definition
+    $remoteConfig = $configLayout.DeploymentConfigPath
+    # Before the scp, not after it: a transfer cut half way can leave a partial file.
+    $configCopyAttempted = $true
     & scp -q $configPath "${SshAlias}:$(& $toPosix $remoteConfig)"
     if ($LASTEXITCODE -ne 0) { throw "scp of the deployment config failed (exit $LASTEXITCODE)" }
 
@@ -399,6 +408,28 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     Write-Step '  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SiteAlias agv02'
 
 } finally {
+    # deploy-config.json on the server holds the RIoT call API key and the MesIngest shared secret
+    # in plain text. The installer removes it on every way out -- once its body has started. This
+    # covers the rest: parameter binding or Import-Module failing before that, an ssh session that
+    # dropped, a pwsh process killed (its finally never runs), a pwsh that never started, a scp cut
+    # half way. It deletes on factory01, so it deletes one thing only: deploy-config.json directly
+    # in the layout's ops directory, both computed above from the layout. No -Layout is passed on
+    # purpose: a layout built from the path being checked would accept any path; the directory
+    # rule accepts only <opsRoot>\deploy-config.json. Same function, the server's own module copy.
+    if ($configCopyAttempted) {
+        $check = @(
+            "Import-Module '$opsRoot\ParallelInstance.psm1' -Force"
+            "`$r = Remove-ParallelInstanceDeploymentConfig -Path '$remoteConfig' -FallbackDirectory '$($configLayout.OpsRoot)'"
+            "if (`$r) { 'SECRET_FILE_LEFT_BEHIND: $remoteConfig ' + `$r; exit 3 }"
+            "'deploy-config.json: not on the server'"
+        ) -join '; '
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($check))
+        try {
+            $null = Invoke-Ssh @('pwsh', '-NoProfile', '-EncodedCommand', $encoded)
+        } catch {
+            Write-Warning "SECRET_FILE_LEFT_BEHIND: $remoteConfig on $SshAlias is still there or could not be checked ($($_.Exception.Message)). It holds plaintext secrets; remove it by hand."
+        }
+    }
     if (Test-Path -LiteralPath $localStage) {
         Remove-Item -LiteralPath $localStage -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false
     }
