@@ -314,10 +314,15 @@ DNS 去够公共 NTP——于是 `w32time` 报 `Free-running System Clock`，漂
 一个与车辆本身无关的事实上——对闸门而言是正确行为，对现场而言毫无用处。
 
 已修：厂区服务器兼作 NTP 服务器（`scripts/16-enable-ntp-server.ps1`，`AnnounceFlags=5`
-让它在没有上游可同步时仍宣称自己可靠，否则客户端会忽略它），车上用
-`../../onboard-hmi/scripts/07-fix-clock.ps1` 先 `Set-Date` 粗调再交给 NTP——w32time 自己
-拒绝这么大的跳变（`MaxPosPhaseCorrection`）。修完实测偏差 **+0.0003 秒**，证据年龄从
+让它在没有上游可同步时仍宣称自己可靠，否则客户端会忽略它），车上跑
+`../../onboard-hmi/scripts/07-fix-clock.ps1`。修完实测偏差 **+0.0003 秒**，证据年龄从
 158 天变成 **188 毫秒**。
+
+**但那一版只管一个开机周期。**当时的做法是先 `Set-Date` 人工粗调再交给 NTP，因为 w32time
+拒绝这么大的跳变（`MaxPosPhaseCorrection` 出厂 15 小时）——而人工粗调绕过了上限，NTP 却
+没有，所以一断电跳回 2027，NTP 依然不被允许纠正。2026-09-21 agv01 就是这样复发的。脚本已
+同日改成放开上限并注册开机 resync 计划任务，机器自己能纠回任意大的偏差
+（[workspace#5](https://github.com/trytoreachpeak0/8005-workspace/issues/5)）。
 
 **新车上线前先对表**，这一条比任何配置项都容易被忽略：
 

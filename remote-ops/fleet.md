@@ -46,7 +46,15 @@ COMPUTERNAME 三台都是 `DESKTOP-94OA6CK`，MachineGuid 三台都是
 `RecoveryRequired` / `DEPARTURE_SAFETY_NOT_READY`。
 
 修：[onboard-hmi/scripts/07-fix-clock.ps1](onboard-hmi/scripts/07-fix-clock.ps1)，在车上跑。
-w32time 自己拒绝这么大的修正，所以先 `Set-Date` 粗跳、再交给 NTP 细调。
+
+**它每次断电都会复发，修一次不算修完。**2026-09-21 agv01 两次断电后又读到 2027-02-05
+（快 137 天），09-03 配的 NTP 还在、服务器也还在应答：w32time 测得出偏差，但它的
+`MaxPos/MaxNegPhaseCorrection` 出厂是 15 小时，超过就拒绝纠正并退回 `Local CMOS Clock`，
+所以 09-03 那次其实是 `Set-Date` 人工绕过了上限，只管了一个开机周期。脚本已于 2026-09-21
+改成放开这两个上限（`0xFFFFFFFF`）并注册开机 resync 计划任务，机器从此能自己纠回任意大的
+偏差（[workspace#5](https://github.com/trytoreachpeak0/8005-workspace/issues/5)）。**每台车
+都要跑一次这个新版本，包括时钟当前看起来正常的车。**根子是 RTC 断电不走（多半 CMOS 电池
+没电），那要人到车上换，脚本修不了。
 
 **3. 通道通 ≠ 已部署。**三台车的 SSH 通道都就绪，但只有 agv01 装了车载端。
 

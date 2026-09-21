@@ -320,6 +320,36 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    中了，**要在任何东西读这台机器的时间戳之前修**。原因见
    [`../../fleet.md`](../../fleet.md) 的硬约束 2。
 
+   **这台机器每次断电都会重新跳回 2027，所以这一步在 2026-09-21 之前只管一个开机周期。**
+   那天 agv01 两次断电后又读到 2027-02-05（快 137 天），而 09-03 配的 NTP 一直还在、厂区
+   服务器也一直在应答——`w32tm /stripchart` 明明测得出这 11873082 秒的偏差，机器就是不改。
+   原因是 w32time 自己的两个上限 `MaxPosPhaseCorrection` / `MaxNegPhaseCorrection` 出厂是
+   54000 秒（15 小时），超过就判定"对端或本机不可信"，于是拒绝纠正并退回
+   `Local CMOS Clock`。09-03 那次之所以看起来修好了，是因为 `Set-Date` 是人工粗调、绕过了
+   这个上限，而后续维持交给了一个根本不被允许纠正的 NTP。
+
+   脚本已于 2026-09-21 改过（[workspace#5](https://github.com/trytoreachpeak0/8005-workspace/issues/5)），
+   现在做四件事：指 NTP、把两个上限放开到 `0xFFFFFFFF`、resync、注册开机触发的计划任务
+   `W2G-ClockResyncAtStartup`（SYSTEM 身份，开机后延迟 30 秒，失败每 30 秒重试共 10 次）。
+   放开上限的代价是这台机器从此接受任意大的时间跳变；在一台已知会跳、又没有别的时间源的
+   车载机上这笔账是划算的，它现在的状态是停在错误时间上不动，没有比这更糟的。改完之后
+   **机器自己就能把任意大的偏差纠回来，断电不再需要人上车校时**，`-ReferenceTime` 因此
+   变成可选参数，只在 resync 拉不回来时当兜底。
+
+   ```bash
+   scp remote-ops/onboard-hmi/scripts/07-fix-clock.ps1 <别名>:C:/temp/agv/ && \
+   ssh <别名> "pwsh -ExecutionPolicy Bypass -File C:\temp\agv\07-fix-clock.ps1 -WhatIf"
+   ```
+
+   干跑只打印要做什么，去掉 `-WhatIf` 才真的动机器。**在一台时钟看起来已经正常的车上也要
+   跑**——放开上限和装计划任务，图的就是下一次断电。验收标准是"把时钟改成一个明显错误的值、
+   重启，它自己回得来"，不是"现在读数对"。
+
+   **根子在硬件，上面这些只是兜底。**落点 18 天里几乎没动（09-03 读 2027-02-08，09-21 读
+   2027-02-05），如果 RTC 在断电期间正常走，落点应该跟着往前推 18 天。它没有，说明主板的
+   RTC 停了、上电时固件恢复了一个陈旧的保存值，典型原因是 CMOS 电池没电——那要人到车上换。
+   三台车同一批同一个镜像，agv02、agv03 大概率一样，顺手一起查。
+
 9. **填 `config/site-<别名>.json`**——照 `site.example.json` 建一个，里面全是
    `REPLACE_*`。这一步跟部署走，不跟通道走，细节在第 8 节。注意 `onboardInstanceId`
    和 `expectedVehicleKey` **不能抄别的车的**：服务端靠它们区分车辆，抄了等于两台车
