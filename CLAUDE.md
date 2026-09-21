@@ -594,8 +594,8 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 
 | 资源 | 冲突 | 隔离做法 |
 | --- | --- | --- |
-| MES 需求 | 两版默认都从工厂服务器本机 `127.0.0.1:5088` 的生产 MesIngest 取需求，v2 会抢走真实需求 | v2 实例不接生产 MesIngest，用 `8005-agv-control-server` 的 `tools/ControlServer.FakeMesIngest` 注入测试需求 |
-| 端口与数据库 | 两版默认都监听 `58005`／`58007`，库都在 `%ProgramData%/8005/ControlServer` | v2 实例换端口、换库目录，不用 `C:\Program Files\8005 AGV\ControlServer` 与 `D:\zhengyushao\ControlServer`；**不在 factory01 上跑**，确需在 factory01 上跑先问 |
+| MES 需求 | 两版默认都从工厂服务器本机 `127.0.0.1:5088` 的生产 MesIngest 取需求，v2 会抢走真实需求 | v2 实例不接生产 MesIngest，用 `8005-agv-control-server` 的 `tools/ControlServer.FakeMesIngest` 注入测试需求。**这一条在并行期继续有效，用户 2026-09-20 明确定过**：约 10-08 起 v2 与 MVP 在 factory01 上并行时，v2 仍然只吃注入的测试需求；真实需求要到约 10-15 切换当天才转给 v2，**同时停掉 MVP**。理由是取走就是取走了——任何时刻只允许一个实例认领真实需求，「抢」这件事从根上不存在。要在并行期就吃一部分真实需求，唯一安全的做法是在 MesIngest 那一侧按站点或任务类型分流，那是一个要开发的机制，得单开票 |
+| 端口与数据库 | 两版默认都监听 `58005`／`58007`，库都在 `%ProgramData%/8005/ControlServer` | v2 实例换端口、换库目录，不用 `C:\Program Files\8005 AGV\ControlServer` 与 `D:\zhengyushao\ControlServer`。**「不在 factory01 上跑」这条已由用户 2026-09-20 解除**：约 10-08 起的并行期，v2 实例就跑在 factory01 上（那一天之前的日常开发测试仍然不要占 factory01，没必要）。**解除的只是这一条**，同表其余三条一字未改、仍然全部有效。绑定要绑具体网卡 IP，不要 `0.0.0.0`——后者会把服务连带暴露到 Hyper-V 的 `AGV-Internal`，而 CI runner 就住在那个网段上 |
 | RIoT | 两版连同一个 RIoT（`172.19.206.222:8888`），RIoT 上有 25 台可调度车 | `JourneyRuntime.agvId`／`vehicleKey` 只能是 `agv02` 或 `agv03`（见 `remote-ops/fleet.md`）；绝不对 `agv01` 或其他车建单、发订单命令或急停 |
 | 地图与通道 | MVP 与 `agv01` 在 RIoT map 25（`老厂前线new`），v2 与备用车在 map 26（`老厂前线new_wk`）。2026-09-21 用户更正：09-19 那次「同在 map 26」是误记 | 选 `agv01` 不经过的路段、`agv01` 空闲的时段，避开演示与生产高峰 |
 
@@ -619,7 +619,7 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 
 | 项 | 锁定值 |
 | --- | --- |
-| SDK | 8.0.424，`rollForward: disable` |
+| SDK | 8.0.425，`rollForward: disable` |
 | 运行时目标 | `net8.0`（`8005-mes-ingest` 的 WPF 侧另有 `net8.0-windows`，那是合理的） |
 | 测试栈 | xunit.v3 3.2.2 + Microsoft.NET.Test.Sdk 18.8.1 + xunit.runner.visualstudio 3.1.5 |
 
@@ -726,7 +726,7 @@ own Hyper-V. As of 2026-09-02 there is one guest:
 
 | Alias | Guest | Address | Notes |
 | --- | --- | --- | --- |
-| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, `agvops` local admin, 20 vCPU, 8 GB static, 1920x1080. pwsh 7.6.5, .NET SDK 8.0.424, git 2.55.0.5 |
+| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, `agvops` local admin, 20 vCPU, 8 GB static, 1920x1080. pwsh 7.6.5, .NET SDK 8.0.425, git 2.55.0.5 |
 
 Key-only, via `ProxyJump factory01` — the guest sits on the Internal switch
 `AGV-Internal` (`192.168.200.0/24`) with NAT out, so there is no route to it
