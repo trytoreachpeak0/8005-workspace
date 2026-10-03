@@ -5,7 +5,7 @@
     control host.
 
 .DESCRIPTION
-    Four secrets travel with a WIRE_TO_GATE deployment. They are held here,
+    Five secrets travel with a WIRE_TO_GATE deployment. They are held here,
     encrypted with DPAPI so only the current Windows user on this machine can
     read them back, and assembled into a deployment config at deploy time. They
     never appear on a command line, in a CI log, or in this repository.
@@ -14,6 +14,14 @@
         OnboardCredential      CONTROL_SERVER_ONBOARD_CREDENTIAL
         MesIngestSharedSecret  CONTROL_SERVER_MES_INGEST_SHARED_SECRET
         OperatorId             CONTROL_SERVER_OPERATOR_ID
+        V2FaultRecoveryCredential  CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL
+
+    V2FaultRecoveryCredential belongs to the v2 parallel instance alone
+    (control-server#454): 19-deploy-control-server-parallel.ps1 sends it, and the
+    parallel installer writes it into that service's own registry Environment. It
+    is a value of its own -- the MVP's fault recovery credential, if it has one,
+    is a different secret -- and -Import never fills it: nothing on this machine
+    holds it yet, so it is typed once and kept here.
 
     OnboardCredential is the one shared value: the same static string
     authenticates the onboard client to the server, so both halves of the
@@ -55,7 +63,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
-$keys = @('RiotCallApiKey', 'OnboardCredential', 'MesIngestSharedSecret', 'OperatorId')
+$keys = @('RiotCallApiKey', 'OnboardCredential', 'MesIngestSharedSecret', 'OperatorId', 'V2FaultRecoveryCredential')
 
 $store = @{}
 if (Test-Path -LiteralPath $SecretPath) { $store = Import-Clixml -LiteralPath $SecretPath }
@@ -128,6 +136,7 @@ $hints = @{
     OnboardCredential     = 'Shared onboard credential. The same value goes to the onboard machines.'
     MesIngestSharedSecret = 'MesIngest Bearer token. Required once JourneyRuntime is enabled.'
     OperatorId            = 'Operator identity the onboard client reports.'
+    V2FaultRecoveryCredential = 'v2 parallel instance only: the Host recovery/clearance entry credential. A new value of its own, never the MVP''s; whoever confirms a clearance at the Host entry presents it.'
 }
 
 foreach ($key in $keys) {
