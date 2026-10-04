@@ -436,7 +436,8 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     Write-Step '  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SiteAlias agv02'
 
 } finally {
-    # deploy-config.json on the server holds the RIoT call API key and the MesIngest shared secret
+    # deploy-config.json on the server holds the RIoT call API key, the MesIngest shared secret and,
+    # when the store has it, the v2 fault recovery credential
     # in plain text. The installer removes it on every way out -- once its body has started. This
     # covers the rest: parameter binding or Import-Module failing before that, an ssh session that
     # dropped, a pwsh process killed (its finally never runs), a pwsh that never started, a scp cut
