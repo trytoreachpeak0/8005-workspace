@@ -382,6 +382,43 @@ v2 实例。
 服务，**再读一遍并断言车辆身份与 MesIngest 来源确实是这套实例自己的**。合并丢了任何一个键
 都会在这里报错，而不是留下一个"起得来、健康检查也过、开着真实需求驱动错车"的服务。
 
+**2026-10-03 起（control-server#454）叠加的还有清桩出口要的两节**：`VehicleFaultRecovery`（Host 恢复与清桩入口的开关、
+凭据变量名）和 `FieldOperatorRoles`（现场人员名单路径、车载端入口声明），回读核对也从三个键扩到叠加写的每一个值。在那之前
+这两节只能装完手工合入，而首装会整份重写 `appsettings.Production.json`、重建服务的注册表 `Environment`，手工合入的东西被
+静默冲掉，服务端只告警 2271/2272、充不上照旧 `ORDER_HANG`、车载端也不出清桩入口。详见第 7.1 节。
+
+### 7.1 清桩出口的两节配置与恢复凭据
+
+实例定义里必须显式写这两节，缺了就拒绝（出厂是第一阶段：入口关、未声明车载端入口）：
+
+```json
+"vehicleFaultRecovery": { "enabled": false },
+"fieldOperatorRoles": {
+  "path": "D:\\zhengyushao\\control-server-v2-ops\\field-operator-roles.json",
+  "onboardClearanceEntryDeclared": false
+}
+```
+
+- `fieldOperatorRoles.path` 必须在运维目录里：每次装包都会替换安装目录。文件不存在时安装脚本建一个空名单
+  `{"operators":[]}`（服务端读作「没人有权限」，安全方向），已有的绝不覆盖。名单怎么填见 control-server#411 的模板。
+- **凭据变量名不由定义给。**叠加固定写 `CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL`，定义里写
+  `credentialEnvironmentVariable` 会被拒——免得并行实例指到 MVP 的变量。
+- **凭据的值**存在控制端的 DPAPI 秘密存储里，键名 `V2FaultRecoveryCredential`，用
+  `control-server/Set-ControlServerSecret.ps1` 录入，**与 MVP 的值分开**。这个键是**可选的**：录入时直接回车就跳过，MVP 操作员
+  只来补 MVP 的键时不会被逼着编一个 v2 值——编出来的值会让下面「缺键就拒」那道检查形同虚设。已录入的要换，用
+  `-Replace V2FaultRecoveryCredential`（回车保留原值）。`19-deploy` 有这个键就把它作为
+  `faultRecoveryCredential` 放进 `deploy-config.json`；服务器端安装脚本把它写进**并行实例服务自己的**注册表 `Environment`，
+  不写机器级、不进仓库。
+- **控制端：**定义里 `vehicleFaultRecovery.enabled = true` 而秘密存储里**没有这个键**，`19-deploy` 在下载之前就拒绝——只看控制端
+  存储，不看服务器上已有的那一条。
+- **服务器端**取值顺序：`deploy-config.json` 里有就用它，没有就沿用服务里已有的那一条（在产品脚本运行**之前**读，因为首装会重建
+  `Environment`）。**回滚没有 `deploy-config.json`，只沿用已有的。**入口开着而两处都没有，在停任何东西之前拒绝——服务端自己也会
+  因为缺凭据拒绝启动，但那时旧服务已经停了。经 `19-deploy` 安装或升级时控制端那道检查在前，服务器端这一道主要管回滚和手工运行。
+- 收工时安装脚本打一行 `CLEARANCE_EXIT_READINESS ...`：按服务端 `StationClearanceExit` 的规则，读生效配置、`Environment` 里的
+  变量名（不读值）和名单文件。两节缺失、或入口开着却没有凭据，报 `CLEARANCE_EXIT_BROKEN`，安装算失败；出口不可用（第一阶段
+  名单为空就是这样），打 `CLEARANCE_EXIT_UNAVAILABLE` 警告并列原因码，不算失败。它读的是服务将读的文件，不是运行中进程的
+  判定——服务端没有对外暴露这个状态，只有自己日志里的 2271/2272。
+
 ---
 
 ## 8. 三处不显然的隔离细节
@@ -482,6 +519,40 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 配置**——升级会保留现有的 `appsettings.Production.json`，但回滚到一个比某个叠加键更早的代际
 时，不重叠就会丢掉那个键。
 
+**升级与回滚都会先把旅程运行时关掉（control-server#454）。**服务在的时候，两者都走产品的
+`Update-ControlServerLocal.ps1`，而它的预检要求已装配置里 `JourneyRuntime.enabled` 为 false：它会用保留下来的配置拉起还没验证的
+新版本做启动、存活检查、重启，运行时开着就会在这次检查里取需求、建单。并行实例装完即 `-Intake`（`enabled = true`），所以在这之前，
+首装之后的每一次升级和回滚都会被这道预检拒掉（在停服务之前，机器没被动过）。现在的顺序是：
+
+1. **派车闸门开着就拒绝**（`UPGRADE_REFUSED_DISPATCH_OPEN`）。已装配置里 `RiotCreateDispatch.enabled` 为真时车可能在途，停服务等于
+   中途停掉运行时对它的故障监看。服务器端安装脚本在最开头查一次（记录定义、回滚对调目录、解包之前），停服务前再查一次。要升级
+   或回滚，**先手工关闸门，按这个顺序**（拒绝消息里照抄了这几步）：
+   1. 停止往 FakeMesIngest 注入新需求，等 `agv02`／`agv03` 的最后一张单都 `Completed`；
+   2. 在 factory01 上编辑 **V2 的** `C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`，把
+      `RiotCreateDispatch.enabled` 改成 false。**不是 MVP 的 `C:\Program Files\8005 AGV\ControlServer\appsettings.Production.json`**——
+      两者只差一个 `.V2`，改错了就是动了生产那套、而这套的闸门还开着。用能保持 UTF-8 的编辑器改；用记事本「另存为」可能换掉编码，
+      把中文 `agvId` 存坏；
+   3. 重启服务 **「8005 AGV ControlServer V2」**，不是 MVP 的「8005 AGV ControlServer」。
+
+   只改了文件、没重启也会被拒（`CONFIGURATION_CHANGED_SINCE_START`）：开头检查比较已装配置的修改时间和服务进程的启动时间，文件更新
+   就说明运行中的进程还按旧配置跑、闸门可能还开着。只有 Running 和 Stopped 两种状态才判断：服务正在启停（StartPending、StopPending、
+   ContinuePending、PausePending）、Paused 或状态读不到时直接拒绝（`SERVICE_NOT_SETTLED`），提示稍后再试，不比时间——过渡状态下进程
+   可能还没读完配置。服务是 Running 却读不到进程启动时间（`SERVICE_START_TIME_UNKNOWN`）或读不到文件修改时间时也拒绝。服务是
+   Stopped 时不比时间。
+2. 先停服务，再把文件里的开关置为 false，然后调升级脚本。升级的检查、备份、失败回退都停在 false。
+3. 升级成功后叠加把定义里的值写回去，**包括派车闸门**：`RiotCreateDispatch.enabled` 恢复成实例定义里的值。出厂定义是 false，所以照常
+   关着；定义里是 true（部署时带 `-AllowRiotCreateDispatch`）的话，升级成功后闸门会重新打开。手工关闸门只为放行这一次升级，不改定义。
+
+所有拒绝——派车闸门、配置缺失或读不出、配置改后未重启、缺凭据、回滚没有 `<包目录>.previous\controlserver`——都在记录定义、回滚对调
+目录、解包之前，拒绝消息里的「Nothing was stopped or changed」是真的。回滚还像安装一样检查产品脚本有没有写出结果文件。
+
+升级失败时开关留在 false（安全方向），输出 `JOURNEY_RUNTIME_LEFT_DISABLED`，写明文件里的值和服务状态，实例此时不受理任何需求。
+失败后服务的状态取决于升级脚本在哪一步失败：在它自己的预检里失败，服务停在我们停下的状态；预检之后再失败，升级脚本自己的回退会用
+**旧二进制加 false** 把服务拉起来。**恢复办法是重新部署当前在跑的那个 commit（或修好的新包），不要用 `-Rollback` 来恢复开关**：
+安装模式失败时代际对调还没发生，这时再跑 `-Rollback`，装上的是 `.previous`，也就是更早一代，车载端版本可能对不上。
+
+回滚还会沿用服务里已有的恢复凭据（第 7.1 节）。
+
 **车载端不会跟着回滚。** 两端不协商版本，版本错配的表现是连接被拒而不是一条说明原因的错误
 （`RELEASE-CANDIDATE.md` 8.1 节）。`agv02`／`agv03` 上的车载端要一起退回去。
 
@@ -581,7 +652,7 @@ S1 的聚焦复审又找出这两条里的两个漏洞，都已补上（control-
 - **装着密钥的配置文件只认一个路径。** 安装脚本原来在收尾时删掉调用方给的任何路径，不查是不是文件、在不在运维目录下。
   现在只认 `<运维目录>\deploy-config.json`（控制端本来就只传这个），必须是普通文件，开工前就校验；删的时候路径从布局
   取，不从参数取。
-- **从拷上服务器那一刻起，每一条退出路径都清掉它。** 这个文件里是 RIoT 调用密钥和 MesIngest 共享密钥的明文。原来只有
+- **从拷上服务器那一刻起，每一条退出路径都清掉它。** 这个文件里是 RIoT 调用密钥、MesIngest 共享密钥和（有的话）V2 恢复凭据的明文。原来只有
   主流程的 `finally` 会删它，而定义校验、配置路径校验、管理员检查都在主流程之前，任何一个失败，文件就带着密钥留在
   服务器上。现在分两段兜住：
   - 安装脚本从第一个检查之前就开一个外层 `try/finally`，从里面任何地方退出都会去删。已经算出布局时，只删布局里的
@@ -666,7 +737,9 @@ MVP 服务指纹事前事后比对；非服务类的单项失败会记下、继�
   路网引擎按周期拉 RIoT；
 - `RiotCreateDispatch.enabled = false`：**不向 RIoT 下单**。审查从代码核过，这个闸门关着时两条
   建单路径都直接返回 `CreateDispatchDisabled`；不下单就没有在途单，没有在途单就走不到急停；
-- 需求只来自本机回环的 FakeMesIngest，目录初始为空。
+- 需求只来自本机回环的 FakeMesIngest，目录初始为空；
+- 清桩出口按出厂定义是第一阶段：Host 恢复入口关、名单为空、未声明车载端入口，收工时会打
+  `CLEARANCE_EXIT_UNAVAILABLE` 警告——这是预期，不是失败（第 7.1 节）。
 
 **这和 MVP 那条线不一样，不要按 MVP 的习惯理解。** MVP 是「装」和「开运行时」两条命令、两次决定
 （装完是全关，开运行时要另跑 `Set-JourneyRuntime.ps1 -Intake`）；并行实例是**装完即 Intake**，
@@ -743,6 +816,18 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 路网引擎像是没在跑 | 查 `appsettings.Production.json` 里 `RouteGraph.enabled` **和** `JourneyRuntime.enabled` 是不是都为真——只开前者，引擎一次都不会跑 |
 | 改了实例定义里的端口，装完端口没变 | **升级路径沿用已装的 `appsettings.Production.json`**（`Update-ControlServerLocal.ps1` 的既有行为），定义里的端口与绑定地址只在**首次安装**时生效。要换端口得卸载再装。`-WhatIf` 会打印新端口，同时会提醒这一点 |
 | 车上连不上 v2 实例 | 先查 `Find-NetRoute` 是不是 Clash；再查防火墙里有没有 `8005 AGV ControlServer V2 58105` 那两条 |
+| 输出里有 `CLEARANCE_EXIT_UNAVAILABLE` | 清桩出口不可用，后面列着原因码。第一阶段（入口关、名单为空）就是这样，**是预期**。不是第一阶段时：`FIELD_OPERATOR_ROSTER_EMPTY` 填名单（每台车的操作员号各一条，必须写 `operatorId`），`STATION_CLEARANCE_ENTRY_NOT_OFFERED`／`CHARGING_RECOVERY_ENTRY_NOT_OFFERED` 看定义里的 `vehicleFaultRecovery.enabled` 与凭据（第 7.1 节） |
+| 安装报 `CLEARANCE_EXIT_BROKEN` | 生效配置里缺了那两节，或入口开着而服务 `Environment` 里没有 `CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL`。后者先跑 `Set-ControlServerSecret.ps1` 录入 `V2FaultRecoveryCredential` 再重装 |
+| 部署一开始就报「'V2FaultRecoveryCredential' is missing」 | 定义里开了恢复入口，但控制端秘密存储里没有这个键（第 7.1 节）。机器还没被碰；用 `Set-ControlServerSecret.ps1` 录入后重跑 |
+| 服务器端报「there is no value for CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL」 | 定义里开了恢复入口，`deploy-config.json` 里没有凭据、服务里也没有（多见于回滚或手工运行）。机器还没被动过 |
+| 升级或回滚一开始就报 `UPGRADE_REFUSED_DISPATCH_OPEN` | 已装配置的派车闸门开着，车可能在途。照第 10 节的三步关闸门：先停注入新需求、等 `agv02`／`agv03` 都 `Completed`；再改 **`C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`**（不是 MVP 的 `...\ControlServer\`，不要用记事本另存为）；再重启 **「8005 AGV ControlServer V2」**（不是「8005 AGV ControlServer」）。机器还没被动过 |
+| 一开始就报 `CONFIGURATION_CHANGED_SINCE_START` | V2 的已装配置在服务进程启动之后被改过，进程还按旧配置跑。多半是关闸门时改了文件、忘了重启。重启「8005 AGV ControlServer V2」再跑。机器还没被动过 |
+| 一开始就报 `SERVICE_NOT_SETTLED` | V2 服务正在启动或停止（或处于 Paused、状态读不到）。等它稳定在 Running 或 Stopped 再跑。机器还没被动过 |
+| 一开始就报 `SERVICE_START_TIME_UNKNOWN` 或 `CONFIGURATION_WRITE_TIME_UNKNOWN` | V2 服务是 Running，却读不到它的进程启动时间（进程在吗？），或读不到已装配置的修改时间。查明再跑。机器还没被动过 |
+| 回滚一开始就报「No previous generation to roll back to」 | `D:\zhengyushao\ControlServer.V2.previous\controlserver` 不存在，没有可退的上一代。首次安装后的第一次升级之前就是这样。机器还没被动过 |
+| 一开始就报 `INSTALLED_CONFIGURATION_MISSING` 或 `INSTALLED_CONFIGURATION_UNREADABLE` | 服务在，但安装目录里的 `appsettings.Production.json` 不在或读不出来。任何一次安装或回滚都不会留下这种状态，**先查明原因**（被手工删了？备份根下最近一次升级的备份里有没有？），弄清之前不要重跑，更不要用 `-Rollback` 试——以前这里会先对调包目录再失败。机器还没被动过 |
+| 部署报「has no 'vehicleFaultRecovery' section」 | `-ControlServerRepository` 指向的 checkout 早于 control-server#454。换一个包含它的 checkout |
+| 升级或回滚失败，输出里有 `JOURNEY_RUNTIME_LEFT_DISABLED` | 设计如此：升级前关掉的运行时开关留在 false，实例不派车。升级脚本在自己的预检里失败（比如包清单不对、输出路径已存在）时服务停着；预检之后失败时它的回退用旧二进制加 false 把服务拉起来。按失败原因处理后，**重新部署当前在跑的那个 commit（或修好的新包）**，成功后叠加会写回定义里的值。**不要用 `-Rollback` 来恢复开关**：安装失败时代际对调还没发生，`-Rollback` 会装上更早一代，车载端可能对不上（第 10 节） |
 | 部署报 "MVP service changed" | **立刻停下**。这条断言就是为了不让任何东西悄悄碰生产那套。把前后两次指纹发出来再判断 |
 
 诊断日志和结果 JSON 在 `D:\zhengyushao\control-server-v2-ops\results\`，一次安装一对。

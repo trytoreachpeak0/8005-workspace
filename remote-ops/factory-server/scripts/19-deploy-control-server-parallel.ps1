@@ -146,6 +146,13 @@ if ($Uninstall) {
     Write-Step "Uninstall: using opsRoot $($definition['opsRoot']) from $InstanceDefinitionPath; the server asserts its own installed definition."
 } else {
     $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch:$AllowRiotCreateDispatch
+    # A checkout from before control-server#454 validates a definition without the clearance exit
+    # sections and deploys an instance that silently has no exit. Say so instead.
+    foreach ($section in @('vehicleFaultRecovery', 'fieldOperatorRoles')) {
+        if (-not $definition.Contains($section)) {
+            throw "$InstanceDefinitionPath has no '$section' section. -ControlServerRepository is older than control-server#454; deploy from a checkout that has it."
+        }
+    }
     Write-Step "Instance definition accepted: $($definition['instanceId']) (from $InstanceDefinitionPath)"
 }
 
@@ -162,6 +169,12 @@ Write-Step "Vehicle: $($definition['journeyRuntime']['agvId']) ($($definition['j
 Write-Step ("RouteGraph: enabled={0} mapId={1}   RiotCreateDispatch: enabled={2}" -f
     $definition['routeGraph']['enabled'], $definition['routeGraph']['mapId'],
     $definition['riotCreateDispatch']['enabled'])
+if (-not $Uninstall) {
+    # control-server#454: the two sections the manual station clearance exit needs, from the definition.
+    Write-Step ("Clearance exit: VehicleFaultRecovery enabled={0}   FieldOperatorRoles roster={1} onboardEntryDeclared={2}" -f
+        $definition['vehicleFaultRecovery']['enabled'], $definition['fieldOperatorRoles']['path'],
+        $definition['fieldOperatorRoles']['onboardClearanceEntryDeclared'])
+}
 
 function Copy-ParallelScripts {
     <#
@@ -240,12 +253,22 @@ foreach ($key in @('RiotCallApiKey', 'OnboardCredential')) {
     }
 }
 $plain = @{}
-foreach ($key in @('RiotCallApiKey', 'MesIngestSharedSecret')) {
+foreach ($key in @('RiotCallApiKey', 'MesIngestSharedSecret', 'V2FaultRecoveryCredential')) {
     if ($secrets.ContainsKey($key) -and $secrets[$key]) {
         $plain[$key] = [System.Net.NetworkCredential]::new('', $secrets[$key]).Password
     }
 }
-Write-Step 'Secrets loaded from the DPAPI store'
+# control-server#454. The parallel instance's own fault recovery credential, written into its
+# service Environment as CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL -- never the MVP's value. With
+# the Host entry on it is required, and refused here before anything is downloaded; with it off it
+# is sent when present, so turning the entry on later needs no new secret on the server. The server
+# makes the same check again, and a rollback carries over what the service already holds.
+if ($definition['vehicleFaultRecovery']['enabled'] -eq $true -and -not $plain.ContainsKey('V2FaultRecoveryCredential')) {
+    throw ("vehicleFaultRecovery.enabled is true, but 'V2FaultRecoveryCredential' is missing from $SecretPath. " +
+        'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
+}
+Write-Step ("Secrets loaded from the DPAPI store (V2FaultRecoveryCredential {0})" -f
+    ($plain.ContainsKey('V2FaultRecoveryCredential') ? 'present, will be sent' : 'absent; the Host recovery entry is off'))
 
 # ------------------------------------------------------------------- package ---
 
@@ -310,6 +333,11 @@ try {
     $config = [ordered]@{
         riotCallApiKey = $plain['RiotCallApiKey']
         mesIngestSharedSecret = $plain['MesIngestSharedSecret']
+    }
+    # Only when there is one: Install-ParallelInstanceLocal.ps1 treats an absent field as "carry over
+    # what the service holds", and an empty string the same way.
+    if ($plain.ContainsKey('V2FaultRecoveryCredential')) {
+        $config['faultRecoveryCredential'] = $plain['V2FaultRecoveryCredential']
     }
     $configPath = Join-Path $localStage 'deploy-config.json'
     ConvertTo-Json -InputObject $config -Depth 5 |
@@ -408,7 +436,8 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     Write-Step '  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SiteAlias agv02'
 
 } finally {
-    # deploy-config.json on the server holds the RIoT call API key and the MesIngest shared secret
+    # deploy-config.json on the server holds the RIoT call API key, the MesIngest shared secret and,
+    # when the store has it, the v2 fault recovery credential
     # in plain text. The installer removes it on every way out -- once its body has started. This
     # covers the rest: parameter binding or Import-Module failing before that, an ssh session that
     # dropped, a pwsh process killed (its finally never runs), a pwsh that never started, a scp cut
