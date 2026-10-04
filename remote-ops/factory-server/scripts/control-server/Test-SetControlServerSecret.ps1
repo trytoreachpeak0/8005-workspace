@@ -42,8 +42,36 @@ foreach ($name in @('Get-SecretPromptPlan', 'Update-SecretStore', 'Format-Secret
     . ([scriptblock]::Create($definition.Extent.Text))
 }
 
-$required = @('RiotCallApiKey', 'OnboardCredential', 'MesIngestSharedSecret', 'OperatorId')
-$optional = @('V2FaultRecoveryCredential')
+# The key lists come from the script, not from here (incremental review, item 6): a test that writes
+# its own lists keeps passing when the script moves V2 back to required (W1) or makes -Import fill it
+# (W2).
+function Get-AssignedStrings {
+    param([string] $Variable)
+    $assignment = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq $Variable }, $true))
+    if ($assignment.Count -ne 1) { throw "expected one assignment of $Variable in $source, found $($assignment.Count)" }
+    return @($assignment[0].Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object Value)
+}
+$required = @(Get-AssignedStrings '$required')
+$optional = @(Get-AssignedStrings '$optional')
+# What -Import fills: the Key of every pair it walks, and every key it assigns into $store directly.
+$importBlock = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -ceq '$Import' }, $true)
+if ($null -eq $importBlock) { throw "no 'if (`$Import)' block in $source" }
+$imported = @(
+    $importBlock.Clauses[0].Item2.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true) | ForEach-Object {
+        foreach ($pair in $_.KeyValuePairs) { if ($pair.Item1.Extent.Text -eq 'Key') { $pair.Item2.Extent.Text.Trim("'", '"', ' ') } } }
+    $importBlock.Clauses[0].Item2.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $n.Left -is [System.Management.Automation.Language.IndexExpressionAst] -and $n.Left.Target.Extent.Text -eq '$store' }, $true) |
+        ForEach-Object { $_.Left.Index.Extent.Text.Trim("'", '"') } | Where-Object { $_ -notmatch '^\$' }
+) | Select-Object -Unique
+
+Write-Host 'Key lists read from Set-ControlServerSecret.ps1' -ForegroundColor Cyan
+Write-Result -Ok ($optional -contains 'V2FaultRecoveryCredential' -and $required -notcontains 'V2FaultRecoveryCredential') `
+    -Name 'V2FaultRecoveryCredential is optional, not required (W1)' -Detail ("required: " + ($required -join ',') + "; optional: " + ($optional -join ','))
+Write-Result -Ok (@('RiotCallApiKey', 'OnboardCredential', 'MesIngestSharedSecret', 'OperatorId' | Where-Object { $required -notcontains $_ }).Count -eq 0) `
+    -Name 'the four MVP keys stay required' -Detail ("required: " + ($required -join ','))
+Write-Result -Ok ($imported.Count -ge 3 -and $imported -notcontains 'V2FaultRecoveryCredential') `
+    -Name '-Import never fills V2FaultRecoveryCredential (W2)' -Detail ("-Import fills: " + ($imported -join ','))
+Write-Host ''
 $secure = { param([string] $Text) $Text ? (ConvertTo-SecureString $Text -AsPlainText -Force) : [securestring]::new() }
 $plainOf = { param($Value) [System.Net.NetworkCredential]::new('', $Value).Password }
 function New-MvpStore { $s = @{}; foreach ($k in $required) { $s[$k] = & $secure "value-of-$k" }; $s }
