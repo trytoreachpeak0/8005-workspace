@@ -535,8 +535,10 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
    3. 重启服务 **「8005 AGV ControlServer V2」**，不是 MVP 的「8005 AGV ControlServer」。
 
    只改了文件、没重启也会被拒（`CONFIGURATION_CHANGED_SINCE_START`）：开头检查比较已装配置的修改时间和服务进程的启动时间，文件更新
-   就说明运行中的进程还按旧配置跑、闸门可能还开着。服务不是 Stopped 却读不到进程启动时间（`SERVICE_START_TIME_UNKNOWN`）或读不到
-   文件修改时间时也拒绝。服务是 Stopped 时不比时间。
+   就说明运行中的进程还按旧配置跑、闸门可能还开着。只有 Running 和 Stopped 两种状态才判断：服务正在启停（StartPending、StopPending、
+   ContinuePending、PausePending）、Paused 或状态读不到时直接拒绝（`SERVICE_NOT_SETTLED`），提示稍后再试，不比时间——过渡状态下进程
+   可能还没读完配置。服务是 Running 却读不到进程启动时间（`SERVICE_START_TIME_UNKNOWN`）或读不到文件修改时间时也拒绝。服务是
+   Stopped 时不比时间。
 2. 先停服务，再把文件里的开关置为 false，然后调升级脚本。升级的检查、备份、失败回退都停在 false。
 3. 升级成功后叠加把定义里的值写回去，**包括派车闸门**：`RiotCreateDispatch.enabled` 恢复成实例定义里的值。出厂定义是 false，所以照常
    关着；定义里是 true（部署时带 `-AllowRiotCreateDispatch`）的话，升级成功后闸门会重新打开。手工关闸门只为放行这一次升级，不改定义。
@@ -820,7 +822,8 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 服务器端报「there is no value for CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL」 | 定义里开了恢复入口，`deploy-config.json` 里没有凭据、服务里也没有（多见于回滚或手工运行）。机器还没被动过 |
 | 升级或回滚一开始就报 `UPGRADE_REFUSED_DISPATCH_OPEN` | 已装配置的派车闸门开着，车可能在途。照第 10 节的三步关闸门：先停注入新需求、等 `agv02`／`agv03` 都 `Completed`；再改 **`C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`**（不是 MVP 的 `...\ControlServer\`，不要用记事本另存为）；再重启 **「8005 AGV ControlServer V2」**（不是「8005 AGV ControlServer」）。机器还没被动过 |
 | 一开始就报 `CONFIGURATION_CHANGED_SINCE_START` | V2 的已装配置在服务进程启动之后被改过，进程还按旧配置跑。多半是关闸门时改了文件、忘了重启。重启「8005 AGV ControlServer V2」再跑。机器还没被动过 |
-| 一开始就报 `SERVICE_START_TIME_UNKNOWN` 或 `CONFIGURATION_WRITE_TIME_UNKNOWN` | V2 服务不是 Stopped，却读不到它的进程启动时间（进程在吗？），或读不到已装配置的修改时间。查明再跑。机器还没被动过 |
+| 一开始就报 `SERVICE_NOT_SETTLED` | V2 服务正在启动或停止（或处于 Paused、状态读不到）。等它稳定在 Running 或 Stopped 再跑。机器还没被动过 |
+| 一开始就报 `SERVICE_START_TIME_UNKNOWN` 或 `CONFIGURATION_WRITE_TIME_UNKNOWN` | V2 服务是 Running，却读不到它的进程启动时间（进程在吗？），或读不到已装配置的修改时间。查明再跑。机器还没被动过 |
 | 回滚一开始就报「No previous generation to roll back to」 | `D:\zhengyushao\ControlServer.V2.previous\controlserver` 不存在，没有可退的上一代。首次安装后的第一次升级之前就是这样。机器还没被动过 |
 | 一开始就报 `INSTALLED_CONFIGURATION_MISSING` 或 `INSTALLED_CONFIGURATION_UNREADABLE` | 服务在，但安装目录里的 `appsettings.Production.json` 不在或读不出来。任何一次安装或回滚都不会留下这种状态，**先查明原因**（被手工删了？备份根下最近一次升级的备份里有没有？），弄清之前不要重跑，更不要用 `-Rollback` 试——以前这里会先对调包目录再失败。机器还没被动过 |
 | 部署报「has no 'vehicleFaultRecovery' section」 | `-ControlServerRepository` 指向的 checkout 早于 control-server#454。换一个包含它的 checkout |
