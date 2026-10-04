@@ -12,6 +12,15 @@
     '8005 AGV ControlServer V2'. This script replaces that: it copies the server-side half from the
     control-server repository and runs it over ssh.
 
+    Where it goes on the server. Into its own directory per commit, <opsRoot>\dispatch-gate\<commit>: the
+    gate script and the two modules it imports, nothing else. Not into <opsRoot> itself, where
+    19-deploy-control-server-parallel.ps1 keeps the installer, the uninstaller and the same two modules as
+    one unit -- an uninstaller from one revision running on modules from another would validate and clean
+    up by rules it was not written to, and the deploy's secret-file clean-up uses the module there too
+    (control-server#472 review S4). So this script never changes what 19 deployed, and 19 needs no part
+    in it. The cost is one small directory per commit used; they are removed with opsRoot (-Uninstall
+    -RemoveData). The checkout must be clean, so the directory name says what is in it.
+
     AUTHORIZATION. Running it for real changes a live service on the server that carries production:
     it stops and starts the V2 service. Run it only when the user has authorized it for that occasion
     -- in practice right before an authorized v2 upgrade or rollback. -WhatIf is read-only and needs no
@@ -40,15 +49,16 @@
 
 .PARAMETER ControlServerRepository
     A clean 8005-agv-control-server checkout or worktree that has control-server#472. The server-side
-    script and both modules are copied from it, so what runs is that revision.
+    script and both modules are copied from it into <opsRoot>\dispatch-gate\<its HEAD commit>, so what
+    runs is that revision. A dirty checkout is refused.
 
 .PARAMETER InstanceDefinitionPath
     Only its opsRoot is used, to find the server-side scripts; the server takes everything else from
     the definition it recorded at install. Default: the repository's scripts/parallel/instance-factory01-v2.json.
 
 .PARAMETER WhatIf
-    Read-only: copies nothing, runs the server-side script with -WhatIf if it is already there (it prints
-    what the journey check says now) and stops.
+    Read-only: copies nothing, runs the server-side script with -WhatIf if this commit's copy is already
+    there (it prints what the journey check says now) and stops.
 
 .EXAMPLE
     pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 -State Closed -ControlServerRepository <checkout> -WhatIf
@@ -88,6 +98,12 @@ $serverScript = 'Set-ParallelDispatchGateLocal.ps1'
 if (-not (Test-Path -LiteralPath (Join-Path $parallelScripts $serverScript) -PathType Leaf)) {
     throw "No scripts/parallel/$serverScript in $repoRoot. -ControlServerRepository is older than control-server#472; use a checkout that has it."
 }
+# Clean, so that the commit the server-side directory is named after is what was copied into it.
+$dirty = & git -C $repoRoot status --porcelain 2>&1
+if ($LASTEXITCODE -ne 0) { throw "git status failed in $repoRoot (exit $LASTEXITCODE): $dirty" }
+if ($dirty) { throw "$repoRoot has uncommitted changes; commit or discard them first. Nothing was copied or changed.`n$($dirty -join "`n")" }
+$commit = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw "Cannot read the HEAD commit of $repoRoot ('$commit')." }
 Import-Module (Join-Path $parallelScripts 'ParallelInstance.psm1') -Force
 
 if (-not $InstanceDefinitionPath) {
@@ -99,10 +115,12 @@ $definition = Read-ParallelInstanceDefinition -Path $InstanceDefinitionPath
 $opsRoot = [string] $definition['opsRoot']
 $opsProblem = Test-ParallelInstanceOwnedPath -Path $opsRoot
 if ($opsProblem) { throw "opsRoot in $InstanceDefinitionPath $opsProblem. Nothing was changed." }
-$remoteScript = "$opsRoot\$serverScript"
-$switch = "-State $State"
+$gateRoot = "$opsRoot\dispatch-gate\$commit"
+$remoteScript = "$gateRoot\$serverScript"
+# The installed definition stays where the installer recorded it, beside 19's unit; the gate script is told where.
+$switch = "-State $State -InstanceDefinitionPath `"$opsRoot\installed-instance.json`""
 
-Write-Step "Target: $SshAlias  v2 parallel instance, server-side script $remoteScript"
+Write-Step "Target: $SshAlias  v2 parallel instance, server-side script $remoteScript (control-server $commit)"
 Write-Step "Requested: RiotCreateDispatch.enabled=$($State -eq 'Open' ? 'true' : 'false') (the server resolves the V2 service and file from installed-instance.json)"
 
 if (-not $PSCmdlet.ShouldProcess($SshAlias, "Set the v2 parallel instance's RIoT dispatch gate $State and restart its service")) {
@@ -111,16 +129,17 @@ if (-not $PSCmdlet.ShouldProcess($SshAlias, "Set the v2 parallel instance's RIoT
     if ("$present".Trim() -eq 'True') {
         Invoke-Ssh @("pwsh -NoProfile -File `"$remoteScript`" $switch -WhatIf")
     } else {
-        Write-Step "WhatIf: no $remoteScript on $SshAlias yet; a real run copies it from $parallelScripts first."
+        Write-Step "WhatIf: no $remoteScript on $SshAlias yet; a real run copies it there from $parallelScripts first."
     }
     return
 }
 
+Invoke-Ssh @("New-Item -ItemType Directory -Force -Path '$gateRoot' | Out-Null")
 foreach ($name in @('ParallelInstance.psm1', 'ParallelHost.psm1', $serverScript)) {
-    & scp -q (Join-Path $parallelScripts $name) "${SshAlias}:$(& $toPosix "$opsRoot\$name")"
+    & scp -q (Join-Path $parallelScripts $name) "${SshAlias}:$(& $toPosix "$gateRoot\$name")"
     if ($LASTEXITCODE -ne 0) { throw "scp of $name failed (exit $LASTEXITCODE). The gate was not changed." }
 }
-Write-Step "Server-side script and modules staged in $opsRoot"
+Write-Step "Server-side script and modules staged in $gateRoot (what 19 deployed in $opsRoot is untouched)"
 
 Invoke-Ssh @("pwsh -NoProfile -File `"$remoteScript`" $switch -Confirm:`$false")
 Write-Step "Done. The MVP service was not involved."

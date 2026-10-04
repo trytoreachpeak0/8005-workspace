@@ -580,8 +580,14 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 ```
 
 **真跑会停、启一个在线服务，只在用户为那一次授权之后运行**，通常就是紧接着一次已授权的 v2 升级或回滚之前。它不碰 MVP 的服务、
-文件和数据库。控制端只做两件事：把 control-server 仓里的 `Set-ParallelDispatchGateLocal.ps1` 与两个模块复制到 `opsRoot`，再 ssh
-过去执行它。注意这两个模块就是安装脚本用的那两个，复制会替换服务器上的旧版，和 `19-deploy-control-server-parallel.ps1` 每次部署做的一样。
+文件和数据库。控制端只做两件事：把 control-server 仓里的 `Set-ParallelDispatchGateLocal.ps1` 与它用的两个模块，复制到
+`opsRoot\dispatch-gate\<commit>` 这个**按 commit 区分的子目录**，再 ssh 过去执行它，并告诉它定义在 `opsRoot\installed-instance.json`。
+`-ControlServerRepository` 必须是干净的 checkout，否则直接拒绝，这样子目录名就能说明里面装的是哪个版本。
+
+为什么不直接放进 `opsRoot`：`19-deploy-control-server-parallel.ps1` 把安装脚本、卸载脚本和这两个模块当成**一个整体**放在 `opsRoot`
+里。要是 20 号用一个较新的 checkout 把模块覆盖进去，之后再跑 19 号的 `-Uninstall`，就成了旧卸载脚本配新模块；部署时清理秘密文件用的
+也是服务器上那份模块。放进单独的子目录，20 号就永远不会改动 19 号部署的东西，19 号也不用为闸门做任何改动。代价是每用一个新 commit
+跑一次，就多留一个小目录；它们随 `opsRoot` 一起删（`-Uninstall -RemoveData`）。
 
 服务器端的步骤与拒绝（逻辑在 `ParallelHost.psm1` 的 `Invoke-ParallelDispatchGateChange`，自测在 `Test-ParallelInstance.ps1`）：
 
@@ -602,7 +608,8 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
      建的所有单（后续停靠、重建、充电段的单不记在旅程行上）。
    - 库读不出、表缺失、时间读不出，**一律拒绝**（`GATE_STATE_UNREADABLE`）。
 5. **停服务，再读一次**。这一次才作数：服务停了就不会再建单，读完到写之间不可能再冒出新单。这一次被拒，脚本会按原样把服务拉起来，
-   拒绝消息以 `AFTER_STOP` 开头并写明「配置没改、服务重启过一次」。
+   拒绝消息以 `AFTER_STOP` 开头，写明「配置没改、服务停过一次」，并照实说服务拉起后是不是回到了 Running（没回到就点名它现在的状态）。
+   服务本来就是 Stopped 的，脚本不碰它，拒绝消息也就没有 `AFTER_STOP` 前缀。
 6. **写开关**：找节不区分大小写，写成 UTF-8 无 BOM；回读开关必须是写进去的布尔值，**其余每个值必须与写之前一模一样**，这一条就是
    中文 `agvId` 没被存坏的证明。写失败就把原文件逐字节放回、核对、拉起服务，报 `GATE_WRITE_FAILED`，闸门保持原状。
 7. **启动服务**，要求它是 Running，且进程启动时间晚于文件修改时间（都按 UTC 比），否则报 `GATE_RESTART_UNVERIFIED`。服务本来是
@@ -611,7 +618,18 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 前后各取一次 MVP 服务的指纹，有任何变化就报错。
 
 **已知限制。** 用这个脚本关的闸门，开的时候不会被挡：关的时候要求没有在途旅程，之后接的旅程都建不了单。要是闸门是绕过脚本、
-在旅程跑到一半时手工关的，那个旅程已经发出过的单会挡住开闸。这是判不清时一律拒绝的结果，要先查清那张单的状态再处理。
+在旅程跑到一半时手工关的，那个旅程已经发出过的单会挡住开闸。这是判不清时一律拒绝的结果，而且**不会自己解除**：闸门关着，那个旅程
+就永远走不到 `Completed`。拒绝消息里写了出路，就是下面的手工开闸。
+
+#### 手工开闸（只在脚本因 `GATE_OPEN_REFUSED_ORDER_SENT` 拒绝、且查清之后）
+
+1. 到 RIoT 上确认拒绝消息里点名的车**没有在跑的单**。这一步是开闸前唯一能替代脚本判断的东西，不能跳过。
+2. 在 factory01 上编辑 **V2 的** `C:\Program Files\8005 AGV\ControlServer.V2ppsettings.Production.json`，把
+   `RiotCreateDispatch.enabled` 改成 true。**不是 MVP 的 `C:\Program Files\8005 AGV\ControlServerppsettings.Production.json`**；
+   用能保持 UTF-8 的编辑器改，不要用记事本「另存为」，免得把中文 `agvId` 存坏。
+3. 只重启服务 **「8005 AGV ControlServer V2」**，不碰 MVP 的「8005 AGV ControlServer」。
+
+这三步同样是改动在线服务，要用户为那一次授权。开闸后，在等闸门的旅程会立刻建单，车会动。
 
 ### 卸载：一项一项拿掉
 
