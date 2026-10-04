@@ -806,6 +806,7 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 部署一开始就报「'V2FaultRecoveryCredential' is missing」 | 定义里开了恢复入口，但控制端秘密存储里没有这个键（第 7.1 节）。机器还没被碰；用 `Set-ControlServerSecret.ps1` 录入后重跑 |
 | 服务器端报「there is no value for CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL」 | 定义里开了恢复入口，`deploy-config.json` 里没有凭据、服务里也没有（多见于回滚或手工运行）。机器还没被动过 |
 | 升级或回滚一开始就报 `UPGRADE_REFUSED_DISPATCH_OPEN` | 已装配置的派车闸门开着，车可能在途。先关闸门、重启服务、等 `agv02`／`agv03` 都 `Completed`，再跑（第 10 节）。机器还没被动过 |
+| 一开始就报 `INSTALLED_CONFIGURATION_MISSING` 或 `INSTALLED_CONFIGURATION_UNREADABLE` | 服务在，但安装目录里的 `appsettings.Production.json` 不在或读不出来。任何一次安装或回滚都不会留下这种状态，**先查明原因**（被手工删了？备份根下最近一次升级的备份里有没有？），弄清之前不要重跑，更不要用 `-Rollback` 试——以前这里会先对调包目录再失败。机器还没被动过 |
 | 部署报「has no 'vehicleFaultRecovery' section」 | `-ControlServerRepository` 指向的 checkout 早于 control-server#454。换一个包含它的 checkout |
 | 升级或回滚失败，输出里有 `JOURNEY_RUNTIME_LEFT_DISABLED` | 设计如此：升级前关掉的运行时开关留在 false，实例不派车。升级脚本在自己的预检里失败（比如包清单不对、输出路径已存在）时服务停着；预检之后失败时它的回退用旧二进制加 false 把服务拉起来。按失败原因处理后，**重新部署当前在跑的那个 commit（或修好的新包）**，成功后叠加会写回定义里的值。**不要用 `-Rollback` 来恢复开关**：安装失败时代际对调还没发生，`-Rollback` 会装上更早一代，车载端可能对不上（第 10 节） |
 | 部署报 "MVP service changed" | **立刻停下**。这条断言就是为了不让任何东西悄悄碰生产那套。把前后两次指纹发出来再判断 |
