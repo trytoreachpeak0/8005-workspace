@@ -36,6 +36,12 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ```
 
 ```bash
+# 升级或回滚前先关派车闸门（需要用户单独授权那一次；加 -WhatIf 是只读的预演）
+pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 `
+  -State Closed -ControlServerRepository <同上>
+```
+
+```bash
 # 整套拿掉（默认保留数据；首次安装半路失败时也用它）
 pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
   -ControlServerRepository <同上> -Uninstall
@@ -526,7 +532,8 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 
 1. **派车闸门开着就拒绝**（`UPGRADE_REFUSED_DISPATCH_OPEN`）。已装配置里 `RiotCreateDispatch.enabled` 为真时车可能在途，停服务等于
    中途停掉运行时对它的故障监看。服务器端安装脚本在最开头查一次（记录定义、回滚对调目录、解包之前），停服务前再查一次。要升级
-   或回滚，**先手工关闸门，按这个顺序**（拒绝消息里照抄了这几步）：
+   或回滚，**先用 `20-set-control-server-parallel-dispatch-gate.ps1 -State Closed` 关闸门**（见下面「关、开派车闸门」）；
+   脚本跑不了时才手工关，**按这个顺序**（拒绝消息里照抄了这几步）：
    1. 停止往 FakeMesIngest 注入新需求，等 `agv02`／`agv03` 的最后一张单都 `Completed`；
    2. 在 factory01 上编辑 **V2 的** `C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`，把
       `RiotCreateDispatch.enabled` 改成 false。**不是 MVP 的 `C:\Program Files\8005 AGV\ControlServer\appsettings.Production.json`**——
@@ -557,6 +564,54 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 （`RELEASE-CANDIDATE.md` 8.1 节）。`agv02`／`agv03` 上的车载端要一起退回去。
 
 **首次安装没有上一代**，所以首次安装失败时的退路不是回滚，是下面的卸载。
+
+### 关、开派车闸门（control-server#472）
+
+```bash
+# 先预演：只读，不复制、不停服务、不写文件；服务器上已有脚本时，打印旅程检查此刻的结论
+pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 `
+  -State Closed -ControlServerRepository <干净 checkout> -WhatIf
+```
+
+```bash
+# 真关（需要用户单独授权那一次）；升级成功后要重新开，就把 Closed 换成 Open
+pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 `
+  -State Closed -ControlServerRepository <同上>
+```
+
+**真跑会停、启一个在线服务，只在用户为那一次授权之后运行**，通常就是紧接着一次已授权的 v2 升级或回滚之前。它不碰 MVP 的服务、
+文件和数据库。控制端只做两件事：把 control-server 仓里的 `Set-ParallelDispatchGateLocal.ps1` 与两个模块复制到 `opsRoot`，再 ssh
+过去执行它。注意这两个模块就是安装脚本用的那两个，复制会替换服务器上的旧版，和 `19-deploy-control-server-parallel.ps1` 每次部署做的一样。
+
+服务器端的步骤与拒绝（逻辑在 `ParallelHost.psm1` 的 `Invoke-ParallelDispatchGateChange`，自测在 `Test-ParallelInstance.ps1`）：
+
+1. **只认 v2。** 服务名和路径都取自安装时记录的 `installed-instance.json`，经 `Get-ParallelInstanceLayout` 算出，定义先过安装时的
+   同一道断言：MVP 的服务名、目录、端口一律拒绝。服务名是 MVP 的、或配置／数据库路径落在生产路径里，再拒一次（`GATE_REFUSED_PRODUCTION`）。
+   没有 V2 服务就拒绝（`GATE_SERVICE_MISSING`）。
+2. **安装脚本开头那几道检查原样复用**（`Get-ParallelPreInstallRefusal`）：配置缺失或读不出、服务在启停中、Running 却读不到进程
+   启动时间、配置在进程启动之后被改过，都拒绝。闸门开着这一条在这里不算拒绝，因为关的就是它。
+3. 已经是要的状态：什么都不碰，直接说明。
+4. **读 v2 自己的 SQLite 库判断有没有车在跑单**，只读打开（`Mode=ReadOnly`），库路径取自已装配置的 `ConnectionStrings:ControlServer`，
+   必须落在 v2 的数据目录里。不用看板接口，是因为实读过：`/api/dashboard/*` 每个接口都只返回在途旅程的一部分（等待中的、有阻塞原因的、
+   装货阶段的），一辆正常行驶、没有阻塞原因的车在接口上看不见。
+   - **关**：有任何一个旅程不是 `Completed`（`Blocked` 也算在途），就拒绝（`GATE_CLOSE_REFUSED_IN_FLIGHT`），提示先停注入、等车跑完。
+   - **开**：只拒绝「单已经发给 RIoT、或可能已经发出」的旅程（`GATE_OPEN_REFUSED_ORDER_SENT`）。闸门关着时服务端建不了单
+     （返回 `CreateDispatchDisabled`，什么也不写），这时存在的旅程都在等这道闸门；要是因为它们就拒绝开闸，就永远开不了，只能改库。
+     「没发过」的判法照搬服务端自己的定义（`WireToGateStore.IsNeverSentAsync`）：`PENDING_RECONCILIATION` 且没有建单尝试、没有单号；
+     或 `RESULT_UNKNOWN` 但只是因为建单前的查询都没回音。旅程的单包括它行上记的取货段、送门段，以及同一辆车在这个旅程创建之后
+     建的所有单（后续停靠、重建、充电段的单不记在旅程行上）。
+   - 库读不出、表缺失、时间读不出，**一律拒绝**（`GATE_STATE_UNREADABLE`）。
+5. **停服务，再读一次**。这一次才作数：服务停了就不会再建单，读完到写之间不可能再冒出新单。这一次被拒，脚本会按原样把服务拉起来，
+   拒绝消息以 `AFTER_STOP` 开头并写明「配置没改、服务重启过一次」。
+6. **写开关**：找节不区分大小写，写成 UTF-8 无 BOM；回读开关必须是写进去的布尔值，**其余每个值必须与写之前一模一样**，这一条就是
+   中文 `agvId` 没被存坏的证明。写失败就把原文件逐字节放回、核对、拉起服务，报 `GATE_WRITE_FAILED`，闸门保持原状。
+7. **启动服务**，要求它是 Running，且进程启动时间晚于文件修改时间（都按 UTC 比），否则报 `GATE_RESTART_UNVERIFIED`。服务本来是
+   Stopped 的，就只写文件、不启动，下次启动时读到。
+
+前后各取一次 MVP 服务的指纹，有任何变化就报错。
+
+**已知限制。** 用这个脚本关的闸门，开的时候不会被挡：关的时候要求没有在途旅程，之后接的旅程都建不了单。要是闸门是绕过脚本、
+在旅程跑到一半时手工关的，那个旅程已经发出过的单会挡住开闸。这是判不清时一律拒绝的结果，要先查清那张单的状态再处理。
 
 ### 卸载：一项一项拿掉
 
@@ -820,7 +875,7 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 安装报 `CLEARANCE_EXIT_BROKEN` | 生效配置里缺了那两节，或入口开着而服务 `Environment` 里没有 `CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL`。后者先跑 `Set-ControlServerSecret.ps1` 录入 `V2FaultRecoveryCredential` 再重装 |
 | 部署一开始就报「'V2FaultRecoveryCredential' is missing」 | 定义里开了恢复入口，但控制端秘密存储里没有这个键（第 7.1 节）。机器还没被碰；用 `Set-ControlServerSecret.ps1` 录入后重跑 |
 | 服务器端报「there is no value for CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL」 | 定义里开了恢复入口，`deploy-config.json` 里没有凭据、服务里也没有（多见于回滚或手工运行）。机器还没被动过 |
-| 升级或回滚一开始就报 `UPGRADE_REFUSED_DISPATCH_OPEN` | 已装配置的派车闸门开着，车可能在途。照第 10 节的三步关闸门：先停注入新需求、等 `agv02`／`agv03` 都 `Completed`；再改 **`C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`**（不是 MVP 的 `...\ControlServer\`，不要用记事本另存为）；再重启 **「8005 AGV ControlServer V2」**（不是「8005 AGV ControlServer」）。机器还没被动过 |
+| 升级或回滚一开始就报 `UPGRADE_REFUSED_DISPATCH_OPEN` | 已装配置的派车闸门开着，车可能在途。经用户授权后用 `20-set-control-server-parallel-dispatch-gate.ps1 -State Closed` 关（第 10 节「关、开派车闸门」）；脚本跑不了时才照第 10 节的三步手工关：先停注入新需求、等 `agv02`／`agv03` 都 `Completed`；再改 **`C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`**（不是 MVP 的 `...\ControlServer\`，不要用记事本另存为）；再重启 **「8005 AGV ControlServer V2」**（不是「8005 AGV ControlServer」）。机器还没被动过 |
 | 一开始就报 `CONFIGURATION_CHANGED_SINCE_START` | V2 的已装配置在服务进程启动之后被改过，进程还按旧配置跑。多半是关闸门时改了文件、忘了重启。重启「8005 AGV ControlServer V2」再跑。机器还没被动过 |
 | 一开始就报 `SERVICE_NOT_SETTLED` | V2 服务正在启动或停止（或处于 Paused、状态读不到）。等它稳定在 Running 或 Stopped 再跑。机器还没被动过 |
 | 一开始就报 `SERVICE_START_TIME_UNKNOWN` 或 `CONFIGURATION_WRITE_TIME_UNKNOWN` | V2 服务是 Running，却读不到它的进程启动时间（进程在吗？），或读不到已装配置的修改时间。查明再跑。机器还没被动过 |
