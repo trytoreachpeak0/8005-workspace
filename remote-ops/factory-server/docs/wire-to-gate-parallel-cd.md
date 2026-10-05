@@ -568,7 +568,7 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ### 关、开派车闸门（control-server#472）
 
 ```bash
-# 先预演：只读，不复制、不停服务、不写文件；服务器上已有脚本时，打印旅程检查此刻的结论
+# 先预演：不停服务、不写配置；会先把这个 commit 的脚本副本放进它自己的子目录，再打印旅程检查此刻的结论
 pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 `
   -State Closed -ControlServerRepository <干净 checkout> -WhatIf
 ```
@@ -583,6 +583,10 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 文件和数据库。控制端只做两件事：把 control-server 仓里的 `Set-ParallelDispatchGateLocal.ps1` 与它用的两个模块，复制到
 `opsRoot\dispatch-gate\<commit>` 这个**按 commit 区分的子目录**，再 ssh 过去执行它，并告诉它定义在 `opsRoot\installed-instance.json`。
 `-ControlServerRepository` 必须是干净的 checkout，否则直接拒绝，这样子目录名就能说明里面装的是哪个版本。
+
+预演（`-WhatIf`）也会先复制这份副本，再让服务器端脚本以 `-WhatIf` 只读地跑一遍。不复制的话，对一个新 commit 来说服务器上还没有脚本，
+「先预演」这一步就什么也看不到。复制不算对实例的改动：它只往这个 commit 自己的子目录里加文件，服务、配置、MVP 和 19 号的文件都不读它，
+同一个 commit 再复制一次写进去的也是同样的字节。预演扣下的是真正的改动：改开关和重启服务。
 
 为什么不直接放进 `opsRoot`：`19-deploy-control-server-parallel.ps1` 把安装脚本、卸载脚本和这两个模块当成**一个整体**放在 `opsRoot`
 里。要是 20 号用一个较新的 checkout 把模块覆盖进去，之后再跑 19 号的 `-Uninstall`，就成了旧卸载脚本配新模块；部署时清理秘密文件用的
@@ -624,8 +628,8 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 #### 手工开闸（只在脚本因 `GATE_OPEN_REFUSED_ORDER_SENT` 拒绝、且查清之后）
 
 1. 到 RIoT 上确认拒绝消息里点名的车**没有在跑的单**。这一步是开闸前唯一能替代脚本判断的东西，不能跳过。
-2. 在 factory01 上编辑 **V2 的** `C:\Program Files\8005 AGV\ControlServer.V2ppsettings.Production.json`，把
-   `RiotCreateDispatch.enabled` 改成 true。**不是 MVP 的 `C:\Program Files\8005 AGV\ControlServerppsettings.Production.json`**；
+2. 在 factory01 上编辑 **V2 的** `C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`，把
+   `RiotCreateDispatch.enabled` 改成 true。**不是 MVP 的 `C:\Program Files\8005 AGV\ControlServer\appsettings.Production.json`**；
    用能保持 UTF-8 的编辑器改，不要用记事本「另存为」，免得把中文 `agvId` 存坏。
 3. 只重启服务 **「8005 AGV ControlServer V2」**，不碰 MVP 的「8005 AGV ControlServer」。
 

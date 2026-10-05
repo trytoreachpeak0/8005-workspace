@@ -57,8 +57,14 @@
     the definition it recorded at install. Default: the repository's scripts/parallel/instance-factory01-v2.json.
 
 .PARAMETER WhatIf
-    Read-only: copies nothing, runs the server-side script with -WhatIf if this commit's copy is already
-    there (it prints what the journey check says now) and stops.
+    The dry run: stages this commit's copy in <opsRoot>\dispatch-gate\<commit> (the same staging a real
+    run does), then runs it with -WhatIf, which prints what the journey check says now, and stops. It
+    stops, starts and writes nothing of the instance. Staging is done even here on purpose: without it a
+    dry run of a new commit would have nothing to run, and the step "dry run first" would show nothing.
+    Staging only adds files under this commit's own directory -- nothing the service, its configuration,
+    the MVP or 19-deploy-control-server-parallel.ps1 reads -- and staging the same commit again writes
+    the same bytes. So it is not counted as a change for ShouldProcess; what -WhatIf withholds is the
+    gate change and the restart.
 
 .EXAMPLE
     pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 -State Closed -ControlServerRepository <checkout> -WhatIf
@@ -123,23 +129,20 @@ $switch = "-State $State -InstanceDefinitionPath `"$opsRoot\installed-instance.j
 Write-Step "Target: $SshAlias  v2 parallel instance, server-side script $remoteScript (control-server $commit)"
 Write-Step "Requested: RiotCreateDispatch.enabled=$($State -eq 'Open' ? 'true' : 'false') (the server resolves the V2 service and file from installed-instance.json)"
 
-if (-not $PSCmdlet.ShouldProcess($SshAlias, "Set the v2 parallel instance's RIoT dispatch gate $State and restart its service")) {
-    # Nothing is copied on this path: a dry run must not replace the server's scripts.
-    $present = & ssh $SshAlias "pwsh -NoProfile -Command `"Test-Path -LiteralPath '$remoteScript' -PathType Leaf`"" 2>&1
-    if ("$present".Trim() -eq 'True') {
-        Invoke-Ssh @("pwsh -NoProfile -File `"$remoteScript`" $switch -WhatIf")
-    } else {
-        Write-Step "WhatIf: no $remoteScript on $SshAlias yet; a real run copies it there from $parallelScripts first."
-    }
-    return
-}
-
+# Staged on both paths, the dry run included (see .PARAMETER WhatIf): only this commit's own directory is
+# written, and nothing the instance, the MVP or 19's unit in opsRoot reads.
 Invoke-Ssh @("New-Item -ItemType Directory -Force -Path '$gateRoot' | Out-Null")
 foreach ($name in @('ParallelInstance.psm1', 'ParallelHost.psm1', $serverScript)) {
     & scp -q (Join-Path $parallelScripts $name) "${SshAlias}:$(& $toPosix "$gateRoot\$name")"
     if ($LASTEXITCODE -ne 0) { throw "scp of $name failed (exit $LASTEXITCODE). The gate was not changed." }
 }
 Write-Step "Server-side script and modules staged in $gateRoot (what 19 deployed in $opsRoot is untouched)"
+
+if (-not $PSCmdlet.ShouldProcess($SshAlias, "Set the v2 parallel instance's RIoT dispatch gate $State and restart its service")) {
+    # The server-side script's own -WhatIf branch reads only; Test-ParallelInstance.ps1 pins that it does.
+    Invoke-Ssh @("pwsh -NoProfile -File `"$remoteScript`" $switch -WhatIf")
+    return
+}
 
 Invoke-Ssh @("pwsh -NoProfile -File `"$remoteScript`" $switch -Confirm:`$false")
 Write-Step "Done. The MVP service was not involved."
