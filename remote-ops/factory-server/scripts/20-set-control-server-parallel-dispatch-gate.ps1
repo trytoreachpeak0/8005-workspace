@@ -23,8 +23,11 @@
 
     AUTHORIZATION. Running it for real changes a live service on the server that carries production:
     it stops and starts the V2 service. Run it only when the user has authorized it for that occasion
-    -- in practice right before an authorized v2 upgrade or rollback. -WhatIf is read-only and needs no
-    authorization. It never touches the MVP service, its files or its database.
+    -- in practice right before an authorized v2 upgrade or rollback. -WhatIf copies this commit's copy
+    into <opsRoot>\dispatch-gate\<commit> and changes nothing else; it needs no authorization. On a server
+    where the instance was never installed, that dry run leaves the directory dispatch-gate\<commit>
+    behind, used by nothing (the server-side script then refuses for want of installed-instance.json);
+    remove it by hand if it matters. It never touches the MVP service, its files or its database.
 
     What the server-side half (the control-server repository's scripts/parallel/Set-ParallelDispatchGateLocal.ps1,
     logic in ParallelHost.psm1's Invoke-ParallelDispatchGateChange) does, and refuses:

@@ -36,7 +36,7 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ```
 
 ```bash
-# 升级或回滚前先关派车闸门（需要用户单独授权那一次；加 -WhatIf 是只读的预演）
+# 升级或回滚前先关派车闸门（需要用户单独授权那一次）；加 -WhatIf 是预演：把本 commit 的副本复制进 dispatch-gate\<commit>，此外什么都不改，不需要授权
 pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 `
   -State Closed -ControlServerRepository <同上>
 ```
@@ -586,7 +586,9 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 
 预演（`-WhatIf`）也会先复制这份副本，再让服务器端脚本以 `-WhatIf` 只读地跑一遍。不复制的话，对一个新 commit 来说服务器上还没有脚本，
 「先预演」这一步就什么也看不到。复制不算对实例的改动：它只往这个 commit 自己的子目录里加文件，服务、配置、MVP 和 19 号的文件都不读它，
-同一个 commit 再复制一次写进去的也是同样的字节。预演扣下的是真正的改动：改开关和重启服务。
+同一个 commit 再复制一次写进去的也是同样的字节。预演扣下的是真正的改动：改开关和重启服务。对一台还没装过实例的机器预演，
+服务器端脚本会因为没有 `installed-instance.json` 而拒绝，但 `dispatch-gate\<commit>` 这个目录已经建好、留在那里，没有任何东西用它，
+在意的话手工删掉即可。
 
 为什么不直接放进 `opsRoot`：`19-deploy-control-server-parallel.ps1` 把安装脚本、卸载脚本和这两个模块当成**一个整体**放在 `opsRoot`
 里。要是 20 号用一个较新的 checkout 把模块覆盖进去，之后再跑 19 号的 `-Uninstall`，就成了旧卸载脚本配新模块；部署时清理秘密文件用的
