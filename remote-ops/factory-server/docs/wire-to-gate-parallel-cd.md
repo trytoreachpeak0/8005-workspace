@@ -270,9 +270,21 @@ up`），也就是 pwsh 连主机都没初始化。10-08 用户逐次授权，�
 
 所以触发器、重启策略、裸名都不是原因；**出问题的是「SYSTEM 任务里的 pwsh 去跑
 `C:\Program Files\8005 AGV\ControlServer.V2.FakeMesIngest\` 下那个脚本、带 `-ExecutablePath
-"<替身 exe>"` 那组参数」**，同样的 pwsh 去跑 D:\ 下的小脚本却正常。再往下是脚本位置、命令行里
-的 exe 路径还是工作目录，没有分；机器上跑着火绒（`HipsDaemon`），按命令行拦截的可能最大，但没
-有直接证据。同一形态在 vm01（Win11）上是能起来的，**所以 vm01 的绿证明不了 factory01**。
+"<替身 exe>"` 那组参数」**，同样的 pwsh 去跑 D:\ 下的小脚本却正常。同一形态在 vm01（Win11）上
+是能起来的，**所以 vm01 的绿证明不了 factory01**。
+
+**拦它的是火绒，已由火绒安全日志确认**（用户 10-08 在 factory01 现场查看，转述，截图未入库）：
+10-08 共 3 条，17:54:59、18:28:05、19:14:24，正好是 R1、R2、R3；类别「系统防护／系统加固」，
+「svchost.exe 触犯敏感动作防护规则，已阻止」，防护项目「**利用 PowerShell 执行可疑脚本**」，执行文件
+`C:\Program Files\PowerShell\7\pwsh.exe`，命令行就是上面那个任务的 `pwsh.exe -NoProfile -ExecutionPolicy
+Bypass -File "C:\Program Files\8005 AGV\ControlServer.V2.FakeMesIngest\Start-FakeMesIngestResident.ps1"
+-ExecutablePa…`，操作进程 `svchost.exe -k netsvcs`（Task Scheduler），父进程 `services.exe`。Y-T1／T2
+与 R4 都不在日志里。
+
+**所以：factory01 的火绒规则「利用 PowerShell 执行可疑脚本」会拦截由计划任务拉起、去跑程序目录下
+脚本的 pwsh。以后在 factory01 上不要用这种形态（计划任务 → pwsh → 程序目录里的脚本），也不要为此
+在火绒里给 pwsh 加信任**——那等于给这台生产机上任何「计划任务拉起的 pwsh 脚本」开口子。需要计划
+任务时，让任务直接执行目标程序。
 
 **代价：替身重启之后不再自动重灌种子。**机器重启或任务重启后，目录回到替身自带的空目录，
 直到有人手动重灌（见下）。种子今天是空的，所以第一阶段没有实际差别；要往种子里加需求、又要
