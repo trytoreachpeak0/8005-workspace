@@ -232,8 +232,10 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
    问题是同一种形状的失效。
 3. **它默认拒绝在非回环地址上监听**（这一条是**优点**，必须保持）。
 
-**结论：它不适合"就这么放那儿跑"，但适合"包一层"。** 我没有去改这个工具，包了一层，理由
-是改它等于让一个测试替身长出生产特性，而需要的那三件事在外面做得到：
+**结论：它不适合"就这么放那儿跑"，但适合"包一层"。** 我没有去改这个工具，理由是改它等于
+让一个测试替身长出生产特性，而需要的那几件事在外面做得到。
+
+**2026-10-08 起（control-server#512）计划任务直接执行替身 exe，不再经过 pwsh 包装脚本**：
 
 ```
 计划任务 "8005 AGV ControlServer V2 FakeMesIngest"
@@ -241,32 +243,60 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
   ├─ 账户：SYSTEM，最高权限，无时间限制
   ├─ 失败重启：3 次，每次间隔 1 分钟
   ├─ MultipleInstances: IgnoreNew（手动再点一次不会起第二个）
-  └─ 动作：pwsh -File Start-FakeMesIngestResident.ps1
-             ├─ 起替身（回环，显式传 listenAddress，不靠默认值）
-             ├─ 轮询 /control/v1/health 直到 200（用 Invoke-WebRequest，不用 curl.exe）
-             ├─ POST /control/v1/reset，拿到本轮的 runId
-             ├─ 按种子文件逐条 PUT 需求
-             ├─ 把目录读回来数一遍，和种子文件对不上就在日志里警告
-             └─ Wait-Process —— 脚本活多久 = 替身活多久
+  └─ 动作：ControlServer.FakeMesIngest.exe --FakeMesIngest:listenAddress=127.0.0.1 --FakeMesIngest:port=58188
+             （回环显式传，不靠默认值；任务盯的就是替身进程本身）
+
+安装器（Install-ParallelInstanceLocal.ps1）在任务拉起之后、在自己的 ssh 会话里：
+  ├─ 轮询 /control/v1/health 直到 200（用 Invoke-WebRequest，不用 curl.exe），120 秒超时
+  ├─ POST /control/v1/reset，拿到本轮的 runId
+  ├─ 按种子文件逐条 PUT 需求
+  └─ 把目录读回来数一遍，和种子文件对不上就让安装失败
 ```
 
-**"脚本活多久 = 替身活多久"是这个方案成立的关键**，不是顺手写的。计划任务的重启策略作用
-在它自己启动的那个进程上，也就是这个包装脚本。如果替身死了而包装脚本还活着，任务在 Windows
-看来"仍在运行"，永远不会重启，机器上就只剩一个空壳。实测确认过：杀掉替身，包装脚本 2 秒内
-退出，退出码非 0，端口释放（证据第三节）。
+**为什么改。**原来的动作是 `pwsh -File Start-FakeMesIngestResident.ps1`（包装脚本起替身、灌
+种子、常驻）。10-07 第一次真装时，这个任务注册并启动之后什么都没发生：`LastTaskResult` 是 -1，
+日志目录没有建出来，PowerShellCore/Operational 里也没有那个 pwsh 的 40961（`console is starting
+up`），也就是 pwsh 连主机都没初始化。10-08 用户逐次授权，在 factory01 上做了几组对照（证据在
+`8005-agv-control-server` 的 `evidence/cs512/`）：
+
+| 组 | 动作 | 设置 | 结果 |
+| --- | --- | --- | --- |
+| Y-T1 | 绝对路径 pwsh，`-Command "exit 7"` | 无触发器、无重启 | 正常，退出码 7，有 40961 |
+| Y-T2 | 绝对路径 pwsh，`-ExecutionPolicy Bypass -File` D:\ 下的小脚本 | 同上 | 正常，退出码 9，脚本写出了文件 |
+| R1 | 10-07 原样的任务（裸名 `pwsh.exe`） | 安装器全套 | -1，无 40961 |
+| R2 | 同 R1，只把 `pwsh.exe` 换成绝对路径 | 安装器全套 | -1，无 40961 |
+| R3 | 同 R2 的动作 | 无触发器、无重启（同 Y） | -1，无 40961 |
+| R4 | 替身 exe 本身（现行形态） | 安装器全套 | 约 3 秒回 health，进程属 SYSTEM，灌种子成功 |
+
+所以触发器、重启策略、裸名都不是原因；**出问题的是「SYSTEM 任务里的 pwsh 去跑
+`C:\Program Files\8005 AGV\ControlServer.V2.FakeMesIngest\` 下那个脚本、带 `-ExecutablePath
+"<替身 exe>"` 那组参数」**，同样的 pwsh 去跑 D:\ 下的小脚本却正常。再往下是脚本位置、命令行里
+的 exe 路径还是工作目录，没有分；机器上跑着火绒（`HipsDaemon`），按命令行拦截的可能最大，但没
+有直接证据。同一形态在 vm01（Win11）上是能起来的，**所以 vm01 的绿证明不了 factory01**。
+
+**代价：替身重启之后不再自动重灌种子。**机器重启或任务重启后，目录回到替身自带的空目录，
+直到有人手动重灌（见下）。种子今天是空的，所以第一阶段没有实际差别；要往种子里加需求、又要
+"启动即重灌"，得让替身自己读种子文件，那是 control-server#519。替身的 stdout／stderr 也不再
+落文件，诊断看 health、任务结果与安装器的超时报告（任务状态、`LastTaskResult`、替身进程在不在、
+Application 日志里点名替身 exe 的 1000／1026）。
 
 **种子文件是权威状态。** `D:\zhengyushao\control-server-v2-ops\fake-mes-ingest-seed.json`，
 安装时创建成空目录（`{"demands": []}`）——**空是刻意的**，一个自带需求的替身会让"没有任何
-需求被受理"这条断言无法成立。要灌测试需求就往这个文件里加，然后重启那个计划任务：
+需求被受理"这条断言无法成立。要灌测试需求就往这个文件里加，然后在运维目录里重灌（替身不用
+重启；先 `reset` 再照种子灌一遍，所以重灌之后目录一定是种子文件描述的样子）：
 
 ```bash
-ssh factory01 "Stop-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIngest'; Start-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIngest'"
+ssh factory01 "pwsh -NoProfile -File D:\zhengyushao\control-server-v2-ops\Start-FakeMesIngestResident.ps1"
 ```
 
-每次启动都先 `reset` 再照种子灌一遍，所以**重启之后目录一定回到种子文件描述的样子**，这
-正是对上面第 2 条缺陷的解法。一条需求至少要给 `demandId`、`sublot`、`area`、`eqp`、
+`Start-FakeMesIngestResident.ps1` 保留旧名字是因为 `19-deploy-control-server-parallel.ps1` 按这个
+名字拷贝它；它现在只做重灌，参数从运维目录的 `installed-instance.json` 读。**机器重启之后也要跑
+这一条**，否则目录是空的。一条需求至少要给 `demandId`、`sublot`、`area`、`eqp`、
 `package`；`area` 要填站点名里解析得出的区号（`N1-3_N1-7` 拆成 `N1-3` 与 `N1-7`，填 `N1` 会
 判 `AREA_STATION_NOT_FOUND`）。
+
+**`LastTaskResult` 可以看，`LastRunTime` 别拿来推时序。**10-08 在 factory01 上实测它比真实启动
+时间晚约 30 秒，10-07 那次又显示得比注册时间还早 31 秒。
 
 ### 怎么停
 
@@ -288,8 +318,9 @@ v2 实例。
 ### 三条这个方案的已知限制，写在这里免得以后当成故障
 
 - **`-RestartCount 3` 意味着连续失败 3 次之后任务就不再重启了**（这是照搬 dashboard 的设置，
-  不是本票新定的）。连续三次失败通常意味着环境问题，自动重启也修不好；日志在
-  `D:\zhengyushao\control-server-v2-ops\logs\fake-mes-ingest.log`。
+  不是本票新定的）。连续三次失败通常意味着环境问题，自动重启也修不好。替身自己的输出不落
+  文件（control-server#512 之后），`D:\zhengyushao\control-server-v2-ops\logs\fake-mes-ingest.log`
+  里只有灌种子的记录。
 - **它是 self-contained 发布的，不随发布包走。** 版本对齐靠"从同一个 commit 构建"：
   `Publish-FakeMesIngest.ps1` 要求仓库干净并把 commit 记进 manifest。契约发现是逐字段比对
   的，两边不同源就会 `CONTRACT_VERSION_MISMATCH`，目录根本不会被读。
@@ -913,7 +944,8 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | **V2 起不来，日志报 bind 失败／地址已被占用** | **先查那个端口有没有被临时连接占着**：`Get-NetTCPConnection -LocalPort <端口>`。58105／58107／58109／58188 都落在临时端口范围（49152–65535）内，Windows 可能把它们分给某条出站连接——MVP 的 58005／58007 有同样的风险，只是一直没撞上。2026-09-21 探测时四个都空闲，**那不保证下个月启动时仍空闲** |
 | v2 实例起得来但不受理任何需求 | 先看替身活着没（`http://127.0.0.1:58188/control/v1/health` 的 `demandCount`）。目录空是**正常默认**，要灌需求见第 5 节 |
 | 替身日志里有 `SEED FAILED` | 种子文件里那条需求缺必填字段，或 `area` 填成了前缀而不是区号 |
-| 替身的计划任务显示 Ready 而不是 Running | 连续失败 3 次后不再重启。看 `D:\zhengyushao\control-server-v2-ops\logs\fake-mes-ingest.log` |
+| 替身的计划任务显示 Ready 而不是 Running | 连续失败 3 次后不再重启。看 `Get-ScheduledTaskInfo` 的 `LastTaskResult`（不要看 `LastRunTime`，第 5 节）和 Application 日志里点名 `ControlServer.FakeMesIngest.exe` 的 1000／1026；替身自己的输出不落文件 |
+| 替身活着，但 v2 实例看到的目录是空的 | 机器或任务重启过：现行形态下重启不会自动重灌种子。跑第 5 节那条 `Start-FakeMesIngestResident.ps1` 重灌（control-server#519 会让它自动） |
 | 路网引擎像是没在跑 | 查 `appsettings.Production.json` 里 `RouteGraph.enabled` **和** `JourneyRuntime.enabled` 是不是都为真——只开前者，引擎一次都不会跑 |
 | 改了实例定义里的端口，装完端口没变 | **升级路径沿用已装的 `appsettings.Production.json`**（`Update-ControlServerLocal.ps1` 的既有行为），定义里的端口与绑定地址只在**首次安装**时生效。要换端口得卸载再装。`-WhatIf` 会打印新端口，同时会提醒这一点 |
 | 车上连不上 v2 实例 | 先查 `Find-NetRoute` 是不是 Clash；再查防火墙里有没有 `8005 AGV ControlServer V2 58105` 那两条 |
@@ -958,6 +990,12 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
    ——这一条是方案成立的关键，已验证。但「Windows 看到非 0 退出后真的会按 `-RestartCount 3` 重启」
    和「`-AtStartup` 触发器真的会在开机时以 SYSTEM 拉起」是推理。真装后找一个 MVP 空闲的时段，
    手动结束替身进程一次，看任务是否在一分钟内把它拉回来。
+
+   **10-07 第一次实跑就出事了**：包装脚本那个形态在 factory01 上根本起不来（第 5 节「为什么改」，
+   control-server#512）。现行形态（任务直接执行替身 exe）10-08 在 factory01 上用临时任务实测过一次
+   「手动启动 → SYSTEM 拉起 → health → 灌种子」，**「开机触发」与「失败后重启」仍然没实跑过**；
+   另外 `RestartOnFailure` 是否也管「进程以非零码退出」（还是只管启动失败），我没有核实，仍是上面那条
+   要真装后验的推理。
 3. **首次安装半路失败的退路**比回滚更手工，已在第 11 节写细。
 
 ---
