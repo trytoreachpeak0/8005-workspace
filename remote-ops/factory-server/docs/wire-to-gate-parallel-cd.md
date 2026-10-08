@@ -9,7 +9,7 @@
 
 本文档讲第二套：装在哪、占哪些端口、怎么起、怎么退，以及它凭什么不会碰到第一套。
 
-**机制已就绪，第一次真实安装尚未发生。** 见最后一节。
+**第一次真实安装发生在 2026-10-07，结果是半装**（FakeMesIngest 的计划任务起不来，control-server#512），现状见第 11 节开头。
 
 生效日期 2026-09-21（control-server#262）。
 
@@ -48,7 +48,7 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ```
 
 **真装之前先看第 11 节**：装完服务就处在 `-Intake` 状态（接真实数据、做真实决策、不动车）；
-而且出厂的实例定义**故意过不了校验**——两个 map 26 的值还是 `REPLACE_*` 占位，第一步要从现场取回（第 9 节）。
+map 26 的三个值已在 control-server#411 填好（第 9 节），出厂定义现在能过校验。
 
 MVP 那一套用的是 `15-deploy-control-server.ps1`，**两条命令永远不会互相走错**：MVP 的脚本
 不认识并行实例，并行的脚本在读到 MVP 的服务名、安装目录、端口或车号时**直接拒绝**，见第 6 节。
@@ -473,7 +473,7 @@ v2 实例。
 
 ---
 
-## 9. 地图：v2 跑 map 26，出厂定义故意装不上
+## 9. 地图：v2 跑 map 26
 
 **用户 2026-09-21 答复：「MVP 是跑在 25 上面的，v2 是跑在 26 上的」。** 所以此前记录的「`appsettings.json`
 写 25、工作区 `CLAUDE.md` 写 26」，是两条线用两张不同的图：`appsettings.json` 写的是 MVP 那条线的 25。
@@ -485,17 +485,21 @@ v2 实例。
 | --- | --- | --- |
 | `routeGraph.mapId`、`journeyRuntime.mapId` | 26 | 用户答复 |
 | `journeyRuntime.mapIdentity` | `老厂前线new_wk` | 真机证据 `evidence/field/2026-09-19-B6-map-name-baseline-check/real-riot/fields.json`（实读过） |
-| `journeyRuntime.dispatchZone`／`allowedDispatchZones` | `REPLACE_WITH_MAP26_DISPATCH_ZONE` | **待现场取回**：形式可推（`MAP-26-WIRE_TO_GATE`），没人确认现场真这么叫 |
-| `journeyRuntime.admissionPolicyDeploymentId` | `REPLACE_WITH_MAP26_ADMISSION_POLICY_DEPLOYMENT_ID` | **待现场取回**：无出处，尾巴那个日期是一次现场标定的产物 |
-| 站点清单 `task-type-stations.settings.json`（在发布包里，不在定义里） | 一整份绑在 25 上 | **要出一份 26 版** |
+| `journeyRuntime.dispatchZone`／`allowedDispatchZones` | `WIRE` | 用户 2026-09-18 定：`8005-agv-control-server` 的 `evidence/field/2026-09-18-B4-site-prerequisites/03-area-assignment-table.md` 第 58、122 行。区域分配表的 `dispatch_zone` 全部是 `WIRE`，实例必须配成同一个值，否则那张表导入会报 `DISPATCH_ZONE_NOT_FOUND` |
+| `journeyRuntime.admissionPolicyDeploymentId` | `MAP-26-WIRE_TO_GATE-20261007` | 调度 2026-10-07 定，格式沿用 map 25 的 `MAP-25-WIRE_TO_GATE-20260827`。这是部署标签，不是业务参数 |
+| 站点清单 `task-type-stations.settings.json`（在发布包里，不在定义里） | 一整份绑在 25 上 | **开运行时之前要出一份 26 版** |
+
+**这三个值都不在 RIoT 里。**调度区名存在本实例自己的库里，准入策略部署号是服务端写库时带的标签。本节原先写着
+「从 factory01 直查 RIoT 取回」，那是错的；2026-10-07 首装前查代码时发现（control-server#411），没有为此去查 RIoT。
+三个值由 control-server#411 填进出厂定义。
 
 `tests/` 里出现过 `MAP-26-*`，但那是测试自己编的假数据（同一文件里还有 `MAP-26-DIE-ATTACH` 这种我们
 不做的作业类型），不能当出处。`src/` 里没有任何硬编码的 25，全部来自配置。
 
 **两条检查把「在那之前不要装」从文档搬进了校验**（control-server#262 复审 M3）：
 
-- 定义里任何字符串值还带 `REPLACE_`，拒绝。**所以出厂定义现在过不了校验，这是刻意的**——自测里有一条
-  断言：出厂文件必须**恰好**因这三个占位被拒，不多不少。这和车载端部署拒绝没填完的站点文件是同一个做法。
+- 定义里任何字符串值还带 `REPLACE_`，拒绝。control-server#411 之前出厂定义因此过不了校验，这是刻意的；
+  三个值填好之后，自测改为断言出厂文件原样通过。这条检查留着，防的是以后有人再写占位。
 - map 25、`老厂前线new`、任何 `MAP-25-*` 标识符，一律拒绝。以前文档里写着「按原样装会指向 MVP 那张图、
   校验拦不住」，那句话靠的是读文档的人；现在不靠了。
 
@@ -503,9 +507,8 @@ v2 实例。
 **批准的人看到「校验全绿」会以为配置没问题，而那正是配置有问题、校验看不见的一种。**占位值反过来：校验
 一定红，红的理由直接告诉你还差哪两个值。
 
-**真装第一步怎么取值**：从 `factory01` 直查 RIoT（控制端到 RIoT 走 Clash TUN，探测结果不可信；
-`factory01` 那边直连可达，`CONTROL_SERVER_RIOT_CALL_API_KEY` 在 User 与 Machine 两个作用域都有）。
-`dispatchZone` 与准入策略部署号取回现场真实值，站点清单出一份 26 版。
+**站点清单与准入策略只在 `JourneyRuntime.enabled=true` 时才被读取。**`TaskTypeStationStartup` 在运行时关着时直接返回；
+准入策略在 `JourneyRuntimeEngine` 的一轮迭代里写库。所以运行时关着的实例用不到它们。**开运行时之前，必须先出 26 版站点清单。**
 
 校验里还有一条「`routeGraph.mapId` 与 `journeyRuntime.mapId` 必须相等」，改的时候不会只改一处。
 
@@ -800,9 +803,22 @@ MVP 服务指纹事前事后比对；非服务类的单项失败会记下、继�
 
 ---
 
-## 11. 第一次真实安装：还没做，要单独申请
+## 11. 第一次真实安装
 
-**本文档描述的机制已经就绪并验证过，但 `factory01` 上至今没有装过第二套。**
+### 现状（2026-10-08）：半装
+
+2026-10-07 经用户授权（control-server#411）第一次真装，用的覆盖定义把 `journeyRuntime.enabled` 与 `routeGraph.enabled`
+都设成 `false`，也就是装完全关，不是下面说的 `-Intake`。
+
+- 产品安装脚本 PASS，配置覆盖层已合入并回读核对，服务 `8005 AGV ControlServer V2` 在运行，监听 `172.19.205.222:58105`／`:58107`。
+- 随后 FakeMesIngest 的计划任务在 120 秒内没有应答健康检查，任务返回 `-1`，日志目录都没建出来（control-server#512）。
+  失败点之后的两步都没有执行：防火墙规则没有建，包也没有移入 `D:\zhengyushao\ControlServer.V2`。所以升级和 `-Rollback` 都走不通，
+  补装要先 `-Uninstall`。卸载默认保留数据根，库里的内容会留下。
+- 经调度批准先导入、后补装：充电策略已在这个库里导入、批准、激活，名册导入的是置空版。记录在 `8005-agv-control-server` 的
+  `evidence/field/2026-10-03-B9-charging-roster-and-policy/SUMMARY.md` 第八节。
+- MVP 服务前后指纹一致。
+
+下面是首装之前写的申请材料，留作记录。
 
 用户 2026-09-20 解除的是「v2 实例不在 `factory01` 上跑」这条**位置限制**，不是**某一次具体安装
 操作的授权**。这两者的区别在本仓是有先例的：车载端部署脚本把包搬上去就停，启动是单独一步，
@@ -834,7 +850,7 @@ MVP 服务指纹事前事后比对；非服务类的单项失败会记下、继�
 | 装什么 | 一次 `release.yml` 产出的 v2 联合包（服务端 + 车载端），服务端半边装到 `factory01`；外加一个从同一 commit 构建的 FakeMesIngest |
 | 装到哪 | 第 3 节的表，全部是 MVP 之外的新路径与新端口。2026-09-21 只读探测：八个目录、服务名、任务名、两条防火墙规则**全部不存在**，四个端口空闲且没有被出站连接占着 |
 | 装完的状态 | **`-Intake`**，见上一小节 |
-| **第一步：地图取值** | **装之前**从 factory01 直查 RIoT，取回 `dispatchZone` 与 `admissionPolicyDeploymentId` 的 map 26 真实值填进定义，并出一份 26 版站点清单，见第 9 节。`mapId`（26）与 `mapIdentity`（`老厂前线new_wk`）已有出处、已写好。**出厂定义在这两个值填好之前过不了校验，部署命令会在碰服务器之前拒绝**——这是刻意的 |
+| **第一步：地图取值** | 已由 control-server#411 填好：`dispatchZone`＝`WIRE`、`admissionPolicyDeploymentId`＝`MAP-26-WIRE_TO_GATE-20261007`，出处见第 9 节。它们不在 RIoT 里，不需要查 RIoT。26 版站点清单还没有出，**开运行时之前要备好** |
 | **第二步：列出另外两个根的子目录** | **装之前**列出 `C:\Program Files\8005 AGV` 与 `C:\ProgramData\8005` 下的全部子目录，确认没有「名字带 `v2` 字样、却不属于本实例」的目录。原因：路径白名单认的是「直接位于这三个根之一下、名字带 `V2` 标记」，如果那里本来就有一个别人的 `…v2…` 目录，白名单挡不住它，只能靠生产清单兜。第三个根 `D:\zhengyushao` 的子目录已在 2026-09-21 探测里列过（`factory01-survey-paths.txt`）；这两个没有列过，因为**看它们就是读 MVP 的安装目录**，属于要先问用户的一类。和第一步取值放在一起，请用户一并授权（control-server#262 S1 复审疑问 1） |
 | 预计多久 | 取值与改定义不计；产品脚本装一次约几分钟（含服务启动与健康检查），加上 scp 一个百 MB 级的包，按半小时准备 |
 | 会不会动车 | **不会**，`riotCreateDispatch.enabled = false` |
