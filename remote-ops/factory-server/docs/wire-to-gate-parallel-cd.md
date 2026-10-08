@@ -47,8 +47,8 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
   -ControlServerRepository <同上> -Uninstall
 ```
 
-**真装之前先看第 11 节**：装完服务就处在 `-Intake` 状态（接真实数据、做真实决策、不动车）；
-map 26 的三个值已在 control-server#411 填好（第 9 节），出厂定义现在能过校验。
+**真装之前先看第 11 节**：出厂定义装完是全关的（`journeyRuntime.enabled` 与 `routeGraph.enabled` 都是 `false`，control-server#411 起）。
+map 26 的三个值已在 control-server#411 填好（第 9 节），出厂定义能过校验，也能原样装；开运行时是以后单独授权的一步，前提是 26 版站点清单。
 
 MVP 那一套用的是 `15-deploy-control-server.ps1`，**两条命令永远不会互相走错**：MVP 的脚本
 不认识并行实例，并行的脚本在读到 MVP 的服务名、安装目录、端口或车号时**直接拒绝**，见第 6 节。
@@ -530,7 +530,7 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 
 **升级与回滚都会先把旅程运行时关掉（control-server#454）。**服务在的时候，两者都走产品的
 `Update-ControlServerLocal.ps1`，而它的预检要求已装配置里 `JourneyRuntime.enabled` 为 false：它会用保留下来的配置拉起还没验证的
-新版本做启动、存活检查、重启，运行时开着就会在这次检查里取需求、建单。并行实例装完即 `-Intake`（`enabled = true`），所以在这之前，
+新版本做启动、存活检查、重启，运行时开着就会在这次检查里取需求、建单。当时出厂定义装完即 `-Intake`（`enabled = true`；control-server#411 起出厂改为 `false`，以后开了运行时又是 `true`），所以在这之前，
 首装之后的每一次升级和回滚都会被这道预检拒掉（在停服务之前，机器没被动过）。现在的顺序是：
 
 1. **派车闸门开着就拒绝**（`UPGRADE_REFUSED_DISPATCH_OPEN`）。已装配置里 `RiotCreateDispatch.enabled` 为真时车可能在途，停服务等于
@@ -826,7 +826,12 @@ MVP 服务指纹事前事后比对；非服务类的单项失败会记下、继�
 
 ### 装完是什么状态——请批准的人先看这一条
 
-**这一次安装装完，服务就处在 `-Intake` 状态：接真实数据、做真实决策、不动车。** 具体是：
+**出厂定义现在装完是全关的**（control-server#411 审查 S2）：`journeyRuntime.enabled` 与 `routeGraph.enabled` 都是 `false`。
+原因是包里的站点清单 `task-type-stations.settings.json` 仍绑 map 25，运行时开着时它的图号与 `JourneyRuntime:mapId`（26）对不上，
+Host 会以 `BindingMapMismatch` 拒绝启动，照原样装会半装。**打开运行时是以后单独授权的一步，前提是 26 版站点清单已经进包**；
+打开之后就是下面描述的 `-Intake` 状态。
+
+下面是最初设计的「装完即 `-Intake`」，留作打开运行时之后的说明：
 
 - `JourneyRuntime.enabled = true`：运行时在跑，每 2 秒一轮，读需求目录、做受理与调度判断，
   路网引擎按周期拉 RIoT；
@@ -849,7 +854,7 @@ MVP 服务指纹事前事后比对；非服务类的单项失败会记下、继�
 | --- | --- |
 | 装什么 | 一次 `release.yml` 产出的 v2 联合包（服务端 + 车载端），服务端半边装到 `factory01`；外加一个从同一 commit 构建的 FakeMesIngest |
 | 装到哪 | 第 3 节的表，全部是 MVP 之外的新路径与新端口。2026-09-21 只读探测：八个目录、服务名、任务名、两条防火墙规则**全部不存在**，四个端口空闲且没有被出站连接占着 |
-| 装完的状态 | **`-Intake`**，见上一小节 |
+| 装完的状态 | 首装前写的是 **`-Intake`**；control-server#411 起出厂改为全关，见上一小节 |
 | **第一步：地图取值** | 已由 control-server#411 填好：`dispatchZone`＝`WIRE`、`admissionPolicyDeploymentId`＝`MAP-26-WIRE_TO_GATE-20261007`，出处见第 9 节。它们不在 RIoT 里，不需要查 RIoT。26 版站点清单还没有出，**开运行时之前要备好** |
 | **第二步：列出另外两个根的子目录** | **装之前**列出 `C:\Program Files\8005 AGV` 与 `C:\ProgramData\8005` 下的全部子目录，确认没有「名字带 `v2` 字样、却不属于本实例」的目录。原因：路径白名单认的是「直接位于这三个根之一下、名字带 `V2` 标记」，如果那里本来就有一个别人的 `…v2…` 目录，白名单挡不住它，只能靠生产清单兜。第三个根 `D:\zhengyushao` 的子目录已在 2026-09-21 探测里列过（`factory01-survey-paths.txt`）；这两个没有列过，因为**看它们就是读 MVP 的安装目录**，属于要先问用户的一类。和第一步取值放在一起，请用户一并授权（control-server#262 S1 复审疑问 1） |
 | 预计多久 | 取值与改定义不计；产品脚本装一次约几分钟（含服务启动与健康检查），加上 scp 一个百 MB 级的包，按半小时准备 |
@@ -897,7 +902,8 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 症状 | 先看 |
 | --- | --- |
 | 部署在校验那一步就停了 | 它会把**每一条**拒绝理由都列出来，照着改实例定义。机器还没被碰 |
-| 校验报「is still the placeholder」 | 出厂定义就是这样，刻意的。两个 map 26 的值要先从现场取回填进去，见第 9 节 |
+| 校验报「is still the placeholder」 | 定义里有值还是 `REPLACE_*` 占位。出厂定义自 control-server#411 起已不带占位；见到这一条，说明有人用了旧定义，或者新写了占位。按第 9 节填真值（map 26 的那三个值不在 RIoT 里，出处见第 9 节） |
+| V2 起不来，日志报 `BindingMapMismatch` | 运行时开着，而包里的站点清单仍绑 map 25。出厂定义两个开关都是 `false` 就是为了避开这一点；开运行时之前先出 26 版站点清单（第 9、11 节） |
 | 校验说路径「is not in canonical form」或「does not carry the instance marker」 | 路径写成了正斜杠、带 `.`／`..`、不在三个根目录下、或名字里没有 `V2` 标记。照第 10 节「什么情况下它会停」改成唯一接受的那种写法 |
 | 卸载报服务那一步失败、然后抛「Uninstall ABORTED」 | 这是设计：服务那一步一失败，其余一样都不碰。尤其当原因是产品卸载脚本以 production 拒绝时，说明定义里的某个路径指向了生产——**先查定义，不要手工删目录**。如果原因是「returned without writing its result file」或「exit code N」，说明产品卸载脚本中途停了，它的输出就打在这句报错上面 |
 | 安装一开始就报「-DeploymentConfigPath is '…'; the only accepted path is '…'」 | 传给服务器端安装脚本的配置文件路径不是 `<运维目录>\deploy-config.json`。正常经控制端的 `19-deploy` 不会出现；手工运行时照报错里给的路径传 |
