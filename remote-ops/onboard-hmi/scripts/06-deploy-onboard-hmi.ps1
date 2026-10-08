@@ -48,6 +48,14 @@
 .PARAMETER SshAlias
     Which vehicle. One alias per car; the site file is named after it.
 
+.PARAMETER OnboardPort
+    The ControlServer's NDJSON port, written into wireToGate.port. The default
+    58005 is the MVP service's port and equals the template's own value, so an
+    agv01 deployment renders exactly what it always did. A vehicle served by the
+    v2 parallel instance needs that instance's port (58105 on factory01) --
+    until 2026-10-08 this parameter was declared and never used, so every
+    deployment pointed the client at 58005 whatever was passed.
+
 .PARAMETER Force
     Stop the onboard client and deploy over it. Refuses by default: a running
     client means the vehicle may be mid-journey. The stop happens after the
@@ -276,6 +284,18 @@ try {
     $config.agvId = $site.agvId
     $config.onboardInstanceId = $site.onboardInstanceId
 
+    # The template carries no placeholder for the port, only the MVP's 58005,
+    # so the string replacement above cannot reach it. Set it as a number and
+    # read it back: a string "58105" would fail the client's integer binding.
+    if (-not ($config.wireToGate.PSObject.Properties.Name -contains 'port')) {
+        throw 'The template has no wireToGate.port; refusing to add a key the client may not read.'
+    }
+    $config.wireToGate.port = $OnboardPort
+    if ($config.wireToGate.port -isnot [int] -or $config.wireToGate.port -ne $OnboardPort) {
+        throw "wireToGate.port reads back as '$($config.wireToGate.port)', not $OnboardPort."
+    }
+    Write-Step "wireToGate endpoint: $($config.wireToGate.host):$($config.wireToGate.port)"
+
     # OnboardSettings.IsPlaceholderValue, reproduced exactly. Note that the two
     # sample identities are themselves placeholders: a site file copied from the
     # example and left with agvId AGV-8005-01 renders a configuration that looks
@@ -428,6 +448,13 @@ if (Test-Path -LiteralPath `$previous) { Remove-Item -LiteralPath `$previous -Re
 if (Test-Path -LiteralPath `$root) { Move-Item -LiteralPath `$root -Destination `$previous }
 Move-Item -LiteralPath `$incoming -Destination `$root
 "placed: `$root"
+
+# Read the placed configuration back on the vehicle itself: the endpoint the
+# client will dial is the one fact a wrong deployment gets wrong silently.
+`$placed = Get-Content -Raw -LiteralPath (Join-Path `$root 'appsettings.json') | ConvertFrom-Json
+`$endpoint = '{0}:{1}' -f `$placed.wireToGate.host, `$placed.wireToGate.port
+if (`$endpoint -ne '${ControlServerHost}:$OnboardPort') { throw "Placed wireToGate endpoint is `$endpoint, expected ${ControlServerHost}:$OnboardPort." }
+"wireToGate endpoint read back: `$endpoint"
 
 [Environment]::SetEnvironmentVariable('CONTROL_SERVER_ONBOARD_CREDENTIAL', '$($plain['OnboardCredential'])', 'Machine')
 [Environment]::SetEnvironmentVariable('CONTROL_SERVER_OPERATOR_ID', '$($plain['OperatorId'])', 'Machine')
