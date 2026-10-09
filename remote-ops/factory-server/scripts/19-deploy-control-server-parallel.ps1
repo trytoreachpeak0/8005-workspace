@@ -50,7 +50,10 @@
 
 .PARAMETER FakeMesIngestZip
     A FakeMesIngest package already built by scripts/parallel/Publish-FakeMesIngest.ps1. Omit
-    to build one from -ControlServerRepository.
+    to build one from -ControlServerRepository. 'fake' mode only: with a definition whose
+    mesIngest.source is 'production' (control-server#535; scripts/parallel/
+    instance-factory01-v2.production-mes.json) no double is built, copied or registered, and
+    passing this is refused.
 
 .PARAMETER Uninstall
     Remove the parallel instance: the double's task and directory, the V2 firewall rules, the
@@ -156,6 +159,26 @@ if ($Uninstall) {
     Write-Step "Instance definition accepted: $($definition['instanceId']) (from $InstanceDefinitionPath)"
 }
 
+# control-server#535. Where the instance's demand comes from: 'fake' (its own FakeMesIngest double,
+# the default) or 'production' (the production MesIngest, STAGING_TO_WIRE only -- the user's
+# 2026-10-09 decision). The module decides, from the same definition; a checkout older than #535 has
+# no such property and only knows 'fake' (its whitelist refuses a 'source' key outright).
+$mesIngestSource = 'fake'
+if (-not $Uninstall) {
+    $sourceProperty = (Get-ParallelInstanceLayout -Definition $definition).PSObject.Properties['MesIngestSource']
+    $mesIngestSource = ${sourceProperty}?.Value ?? 'fake'
+    $productionSource = $mesIngestSource -ceq 'production'
+    $mesIngestAudit = (Get-Command Format-ParallelMesIngestAudit -ErrorAction SilentlyContinue) ?
+        (Format-ParallelMesIngestAudit -Definition $definition) : "MES_INGEST_SOURCE=fake baseUrl=$($definition['mesIngest']['baseUrl'])"
+    Write-Step $mesIngestAudit
+    if ($productionSource) {
+        Write-Warning $mesIngestAudit
+        if ($FakeMesIngestZip) {
+            throw "-FakeMesIngestZip was passed, but $InstanceDefinitionPath reads the production MesIngest and installs no double. Nothing was downloaded or copied."
+        }
+    }
+}
+
 $opsRoot = [string] $definition['opsRoot']
 $stagingRoot = [string] $definition['stagingRoot']
 $packageRoot = [string] $definition['packageRoot']
@@ -198,6 +221,42 @@ function Copy-ParallelScripts {
     Write-Step "Parallel scripts and instance definition staged in $opsRoot"
 }
 
+function Assert-MesIngestSourceReported {
+    <#
+        control-server#535. The server-side installer reads the overlay back and asserts that the
+        MesIngest origin is this definition's own (wire-to-gate-parallel-cd.md section 7); this checks,
+        per mode, that what it reports agrees with what the control host meant to deploy:
+          * the MES_INGEST_SOURCE result line names this mode and this baseUrl;
+          * 'production': allowedWorkTypes is STAGING_TO_WIRE alone, and no FAKE_MES_INGEST line;
+          * 'fake', on an install: the FAKE_MES_INGEST line is there (a rollback never printed one).
+        A checkout older than #535 prints no MES_INGEST_SOURCE line and is only ever 'fake'.
+    #>
+    param([object[]] $Output, [switch] $Rollback)
+    $lines = @($Output | ForEach-Object { "$_".Trim() })
+    $fakeLines = @($lines | Where-Object { $_.StartsWith('FAKE_MES_INGEST=', [StringComparison]::Ordinal) })
+    if ($null -eq $sourceProperty) {
+        if (-not $Rollback -and $fakeLines.Count -eq 0) { throw 'The installer reported no FAKE_MES_INGEST line.' }
+        Write-Step 'MesIngest source: fake (control-server checkout older than #535)'
+        return
+    }
+    $prefix = "MES_INGEST_SOURCE=$mesIngestSource baseUrl=$($definition['mesIngest']['baseUrl']) "
+    $audit = @($lines | Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) })
+    if ($audit.Count -eq 0) {
+        throw "MES_INGEST_SOURCE_MISMATCH: the installer reported no line starting '$prefix'. What it did report: $(@($lines | Where-Object { $_ -match 'MES_INGEST' }) -join ' | ')"
+    }
+    if ($productionSource) {
+        if (-not $audit[-1].Contains('allowedWorkTypes=STAGING_TO_WIRE ')) {
+            throw "MES_INGEST_SOURCE_MISMATCH: production mode, but the installer reported '$($audit[-1])'."
+        }
+        if ($fakeLines.Count -gt 0) {
+            throw "MES_INGEST_SOURCE_MISMATCH: production mode, but the installer also reported $($fakeLines -join ', ')."
+        }
+    } elseif (-not $Rollback -and $fakeLines.Count -eq 0) {
+        throw 'MES_INGEST_SOURCE_MISMATCH: fake mode, but the installer reported no FAKE_MES_INGEST line.'
+    }
+    Write-Step "MesIngest source confirmed by the server: $($audit[-1])"
+}
+
 # ----------------------------------------------------------------- uninstall ---
 
 if ($Uninstall) {
@@ -234,7 +293,8 @@ if ($Rollback) {
     if (-not $PSCmdlet.ShouldProcess($SshAlias, 'Roll back the v2 parallel instance to its previous package')) { return }
     Copy-ParallelScripts
     $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
-    Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
+    $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
+    Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
     Write-Step 'Rollback complete. The MVP service was not involved.'
     Write-Step 'The onboard half was NOT rolled back. The two ends do not negotiate versions --'
     Write-Step 'roll agv02/agv03 back too, or they will simply stop connecting.'
@@ -265,6 +325,12 @@ foreach ($key in @('RiotCallApiKey', 'MesIngestSharedSecret', 'V2FaultRecoveryCr
 # makes the same check again, and a rollback carries over what the service already holds.
 if ($definition['vehicleFaultRecovery']['enabled'] -eq $true -and -not $plain.ContainsKey('V2FaultRecoveryCredential')) {
     throw ("vehicleFaultRecovery.enabled is true, but 'V2FaultRecoveryCredential' is missing from $SecretPath. " +
+        'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
+}
+# control-server#535. Reading the production MesIngest needs its Bearer token; without it every read
+# is 401 and nothing is dispatched. Refused here, before anything is downloaded; the server checks again.
+if ($productionSource -and -not $plain.ContainsKey('MesIngestSharedSecret')) {
+    throw ("mesIngest.source is 'production', but 'MesIngestSharedSecret' is missing from $SecretPath. " +
         'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
 }
 Write-Step ("Secrets loaded from the DPAPI store (V2FaultRecoveryCredential {0})" -f
@@ -316,17 +382,22 @@ try {
 
     # ------------------------------------------------------- FakeMesIngest ---
 
-    if (-not $FakeMesIngestZip) {
-        $fakeOutput = Join-Path $localStage 'fake-mes-ingest'
-        Write-Step 'Building FakeMesIngest from the control-server repository'
-        & pwsh -NoProfile -File (Join-Path $parallelScripts 'Publish-FakeMesIngest.ps1') -OutputPath $fakeOutput
-        if ($LASTEXITCODE -ne 0) { throw "Publish-FakeMesIngest.ps1 failed (exit $LASTEXITCODE)" }
-        $FakeMesIngestZip = "$fakeOutput.zip"
+    # 'fake' mode only (control-server#535): 'production' builds, copies and registers no double.
+    if ($productionSource) {
+        Write-Step 'No FakeMesIngest: mesIngest.source is production'
+    } else {
+        if (-not $FakeMesIngestZip) {
+            $fakeOutput = Join-Path $localStage 'fake-mes-ingest'
+            Write-Step 'Building FakeMesIngest from the control-server repository'
+            & pwsh -NoProfile -File (Join-Path $parallelScripts 'Publish-FakeMesIngest.ps1') -OutputPath $fakeOutput
+            if ($LASTEXITCODE -ne 0) { throw "Publish-FakeMesIngest.ps1 failed (exit $LASTEXITCODE)" }
+            $FakeMesIngestZip = "$fakeOutput.zip"
+        }
+        if (-not (Test-Path -LiteralPath $FakeMesIngestZip -PathType Leaf)) {
+            throw "FakeMesIngest package not found: $FakeMesIngestZip"
+        }
+        Write-Step "FakeMesIngest package: $FakeMesIngestZip"
     }
-    if (-not (Test-Path -LiteralPath $FakeMesIngestZip -PathType Leaf)) {
-        throw "FakeMesIngest package not found: $FakeMesIngestZip"
-    }
-    Write-Step "FakeMesIngest package: $FakeMesIngestZip"
 
     # -------------------------------------------------------------- config ---
 
@@ -388,9 +459,13 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     & scp -q $zip "${SshAlias}:$(& $toPosix $remoteZip)"
     if ($LASTEXITCODE -ne 0) { throw "scp of the package failed (exit $LASTEXITCODE)" }
 
-    $remoteFake = "$stagingRoot\fake-mes-ingest.zip"
-    & scp -q $FakeMesIngestZip "${SshAlias}:$(& $toPosix $remoteFake)"
-    if ($LASTEXITCODE -ne 0) { throw "scp of the FakeMesIngest package failed (exit $LASTEXITCODE)" }
+    $fakeArgument = ''
+    if (-not $productionSource) {
+        $remoteFake = "$stagingRoot\fake-mes-ingest.zip"
+        & scp -q $FakeMesIngestZip "${SshAlias}:$(& $toPosix $remoteFake)"
+        if ($LASTEXITCODE -ne 0) { throw "scp of the FakeMesIngest package failed (exit $LASTEXITCODE)" }
+        $fakeArgument = "-FakeMesIngestZip `"$remoteFake`" "
+    }
 
     # From the layout, the same function the server's installer takes it from -- never from a
     # parameter. The after-check in the finally below deletes exactly this one path on factory01.
@@ -405,10 +480,11 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
 
     Write-Step 'Running the parallel installer on the server'
     $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
-    Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" " +
+    $installOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" " +
         "-PackageZip `"$remoteZip`" -ExpectedSha256 $actual " +
-        "-DeploymentConfigPath `"$remoteConfig`" -FakeMesIngestZip `"$remoteFake`" " +
+        "-DeploymentConfigPath `"$remoteConfig`" $fakeArgument" +
         "-InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
+    Assert-MesIngestSourceReported -Output $installOutput
 
     # --------------------------------------------------------------- check ---
 

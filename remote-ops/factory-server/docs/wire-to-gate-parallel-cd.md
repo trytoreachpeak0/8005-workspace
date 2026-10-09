@@ -4,8 +4,9 @@
 
 - **MVP 那一套**（`ControlServer_MVP`／`protocol-v0.3.0`）继续驱动 `agv01`，服务真实客户，
   取真实需求。它由 [wire-to-gate-cd.md](wire-to-gate-cd.md) 管，本文档**不碰它一个字节**。
-- **v2 这一套**（`fp/v2-impl`／`protocol-v2.0.0`）驱动 `agv02`／`agv03`，**只吃注入的测试
-  需求**，直到约 10-15 切换那天才接真实需求、同时停掉 MVP。
+- **v2 这一套**（`fp/v2-impl`／`protocol-v2.0.0`）驱动 `agv02`／`agv03`。默认（`fake` 模式）**只吃注入的测试
+  需求**；**2026-10-09 起**可以换成 `production` 模式读生产 MesIngest，但**只做 `STAGING_TO_WIRE`**，
+  MVP 继续只做 `WIRE_TO_GATE`（第 4.1 节，control-server#535）。整体割接仍按原计划另行进行。
 
 本文档讲第二套：装在哪、占哪些端口、怎么起、怎么退，以及它凭什么不会碰到第一套。
 
@@ -27,6 +28,13 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 # 真装（需要用户单独授权那一次）
 pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
   -ControlServerRepository <同上>
+```
+
+```bash
+# 生产来源模式：读生产 MesIngest，只做 STAGING_TO_WIRE（第 4.1 节；装之前先关派车闸门）
+pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
+  -ControlServerRepository <同上> `
+  -InstanceDefinitionPath <同上>/scripts/parallel/instance-factory01-v2.production-mes.json
 ```
 
 ```bash
@@ -152,16 +160,43 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
 
 工作区 `CLAUDE.md` 的隔离表列了四样，下面是每一样在这套部署里的具体做法。
 
-### 4.1 MES 需求——不接生产 MesIngest，全程吃注入的
+### 4.1 MES 需求——两种模式：`fake`（缺省）与 `production`（只做 `STAGING_TO_WIRE`）
 
-两版默认都从 `127.0.0.1:5088` 取需求，**而一条需求被谁认领了，在另一边看来就是不存在**。
-所以 v2 在整个并行期都只读 `tools/ControlServer.FakeMesIngest` 这个替身，真实需求要到约
-10-15 切换当天才转给 v2、同时停掉 MVP。
+两版默认都从 `127.0.0.1:5088` 取需求。实例定义的 `mesIngest.source` 决定 v2 从哪里取：
 
-怎么常驻见第 5 节。配置上由两道拦着：
+| 模式 | 取需求 | 配置上怎么拦 |
+| --- | --- | --- |
+| `fake`（不写 `source` 就是它；出厂 `instance-factory01-v2.json`） | `tools/ControlServer.FakeMesIngest` 这个替身，常驻方式见第 5 节 | `mesIngest.baseUrl` 必须是**回环**地址，且**端口不能是 5088**；`fakeMesIngest` 必填，`fakeMesIngest.port` 必须与 `baseUrl` 里的端口一致（防止改了一处忘了另一处）。与 control-server#535 之前一字不差 |
+| `production`（`instance-factory01-v2.production-mes.json`） | 本机生产 MesIngest | `baseUrl` 必须**恰好**是 `http://127.0.0.1:5088`；`fakeMesIngest` **写了就拒**；`journeyRuntime.allowedWorkTypes` 必须**恰好**是 `["STAGING_TO_WIRE"]`，含 `WIRE_TO_GATE` 时单独报「会和 MVP 抢同一批料」；控制端密钥库里必须有 `MesIngestSharedSecret` |
 
-- `mesIngest.baseUrl` 必须是**回环**地址，且**端口不能是 5088**；
-- `fakeMesIngest.port` 必须与 `baseUrl` 里的端口一致（防止改了一处忘了另一处）。
+**为什么能放开，为什么只放开这么多。**2026-10-09 用户批准（客户要求 10-10 起用 v2 跑
+`STAGING_TO_WIRE`，受控试运行：逐单开闸、人跟车）。依据是读代码得到的两条事实：
+
+1. MVP（含 `agv01` 的现场线）在受理之前写死只做 `WIRE_TO_GATE`；v2 的 `WorkTypeScopeCriterion`
+   在受理之前把不在 `allowedWorkTypes` 里的类型判 `OUT_OF_SCOPE_WORK_TYPE`。
+2. MesIngest 只有 GET、没有认领，两端都不写回 MES——**两边看到的是同一份目录**。
+
+所以分流**只靠两边的任务类型不相交**。这一节原来写的理由「一条需求被谁认领了，在另一边看来就是
+不存在」**按代码并不成立**：一条需求被一边拿走后，另一边仍然看得见。这也是为什么 `production`
+模式把任务类型写死在 `ParallelInstance.psm1` 里校验，而不是从定义文件里读——出厂定义的
+`allowedWorkTypes` 含全部六种（包括 `WIRE_TO_GATE`），**只把 `baseUrl` 换成 5088 就会和 MVP 抢同一批料**，
+而那正是这一模式拒绝的配置。
+
+`production` 模式下部署链的不同之处：
+
+- **19 不构建、不上传替身，安装器不注册替身任务**；传了 `-FakeMesIngestZip` 两边都直接拒。
+- **共享密钥是必需的。**生产 MesIngest 对每个请求都要 Bearer；缺了，v2 的每次读取都是 401、不派车。
+  这是安全方向，但看起来像装好了什么都不做，所以 19 在下载之前、安装器在改任何东西之前就拒。
+  写进 V2 服务 `Environment` 后安装器会读回核对（`MES_INGEST_SECRET_NOT_WRITTEN`）。
+- **醒目审计**：安装与回滚都打一行 `MES_INGEST_SOURCE=production baseUrl=... allowedWorkTypes=STAGING_TO_WIRE ...`，
+  在 `production` 下以 Warning 打出；结果行里再打一次，19 按模式断言它（第 7 节）。
+- **从 `fake` 换成 `production`**：安装器在记录新定义之前，先撤掉上一次安装留下的替身（计划任务、
+  进程、目录）。否则 `installed-instance.json` 换成新定义之后就再没有东西指向它，卸载会找不到。
+- **从 `production` 换回 `fake`**：用出厂定义完整装一次（会重新构建并装替身）。不要用 `-Rollback`：
+  回滚只换包，替身目录已经被撤掉了，`fake` 定义下的回滚会因找不到替身可执行文件而失败。
+- **卸载、关闸两种模式都能走**；`production` 下的部署足迹里没有计划任务和替身目录。
+
+整体割接（停 MVP、v2 接全部任务类型）不在这里，仍按原计划。
 
 ### 4.2 端口与数据库——换端口、换库目录
 
@@ -221,6 +256,8 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
 ---
 
 ## 5. FakeMesIngest 怎么在一台生产服务器上连续跑一周
+
+（只适用于 `fake` 模式。`production` 模式不装替身，见第 4.1 节。）
 
 这是本票最需要说清楚的一件事，因为 **`ControlServer.FakeMesIngest` 今天是个开发期工具，
 它的三个性质都不适合无人值守常驻**：
@@ -434,6 +471,12 @@ v2 实例。
 `MesIngest`、`JourneyRuntime`、`RouteGraph`、`RiotCreateDispatch` 四节合并上去，写回，重启
 服务，**再读一遍并断言车辆身份与 MesIngest 来源确实是这套实例自己的**。合并丢了任何一个键
 都会在这里报错，而不是留下一个"起得来、健康检查也过、开着真实需求驱动错车"的服务。
+
+**2026-10-09 起（control-server#535）这条回读按模式成立**：回读比对的是定义里写的 `baseUrl`，`fake` 下是
+替身端口，`production` 下是 `http://127.0.0.1:5088`。19 在安装器返回之后再按模式核一次它报回来的
+`MES_INGEST_SOURCE=` 结果行：模式与 `baseUrl` 必须是控制端要装的那一个；`production` 下任务类型只能是
+`STAGING_TO_WIRE`、不得出现 `FAKE_MES_INGEST=` 行；`fake` 安装必须有 `FAKE_MES_INGEST=` 行。对不上报
+`MES_INGEST_SOURCE_MISMATCH`。
 
 **2026-10-03 起（control-server#454）叠加的还有清桩出口要的两节**：`VehicleFaultRecovery`（Host 恢复与清桩入口的开关、
 凭据变量名）和 `FieldOperatorRoles`（现场人员名单路径、车载端入口声明），回读核对也从三个键扩到叠加写的每一个值。在那之前
@@ -1020,7 +1063,8 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 
 - **不碰 MVP** 的进程、安装目录、配置与数据库。事前事后各比对一次服务指纹；暂存目录的清理
   限定在本实例自己的前缀下（第 8 节）。
-- **不碰生产 MesIngest，不碰 `SQAGV`。**
+- **不改生产 MesIngest，不碰 `SQAGV`。**`production` 模式（第 4.1 节）只经 HTTP GET 读生产 MesIngest，
+  不改它的服务、配置与数据库；`fake` 模式连读都不读。
 - **不碰 `agv01`。** 配置层面拒绝，不是靠纪律；车辆名册（`Fleet`）整节拒绝，见第 6 节。
 - **不写 MVP 用的机器级环境变量。** 它只读机器级的 `CONTROL_SERVER_RIOT_CALL_API_KEY` 与
   `CONTROL_SERVER_ONBOARD_CREDENTIAL`，不写。它**会动**的机器级变量只有一个，是它自己专用的
