@@ -190,6 +190,13 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
   写进 V2 服务 `Environment` 后安装器会读回核对（`MES_INGEST_SECRET_NOT_WRITTEN`）。
 - **醒目审计**：安装与回滚都打一行 `MES_INGEST_SOURCE=production baseUrl=... allowedWorkTypes=STAGING_TO_WIRE ...`，
   在 `production` 下以 Warning 打出；结果行里再打一次，19 按模式断言它（第 7 节）。
+- **核的是 Host 实际绑定的值，不是定义**（control-server#535 审查 M1/M2）。.NET 配置跨文件按下标合并数组：
+  叠加层写 `["STAGING_TO_WIRE"]`、包内 `appsettings.json` 写六项时，生效的曾是「第一项被换掉的六项」，
+  `WIRE_TO_GATE` 照样放行，而定义、叠加文件、审计行都说只有一项。修法在产品里：Host 对 `allowedWorkTypes`、
+  `allowedDispatchZones` 取最后一个写了它的配置层的整份列表，并在启动后记一条 `EFFECTIVE_CONFIGURATION` 事件。
+  安装器在安装与回滚之后从 Host 自己的日志里找本次进程启动以来的这条事件、与定义逐项比对，打出
+  `EFFECTIVE_CONFIGURATION=...` 结果行；19 再核一次。`production` 下读不到或不一致都算失败
+  （`EFFECTIVE_CONFIGURATION_UNREAD`／`EFFECTIVE_CONFIGURATION_MISMATCH`）；`fake` 下读不到只警告，因为 #535 之前的包不记这条。
 - **从 `fake` 换成 `production`**：安装器在记录新定义之前，先撤掉上一次安装留下的替身（计划任务、
   进程、目录）。否则 `installed-instance.json` 换成新定义之后就再没有东西指向它，卸载会找不到。
 - **从 `production` 换回 `fake`**：用出厂定义完整装一次（会重新构建并装替身）。不要用 `-Rollback`：
@@ -477,6 +484,10 @@ v2 实例。
 `MES_INGEST_SOURCE=` 结果行：模式与 `baseUrl` 必须是控制端要装的那一个；`production` 下任务类型只能是
 `STAGING_TO_WIRE`、不得出现 `FAKE_MES_INGEST=` 行；`fake` 安装必须有 `FAKE_MES_INGEST=` 行。对不上报
 `MES_INGEST_SOURCE_MISMATCH`。
+
+**但这条回读读的是叠加文件，证明不了 Host 实际绑定了什么**（control-server#535 审查 M1）：数组跨文件按下标合并，
+文件里写对了、生效的却可能不对。所以另有一步读 Host 自己记下的 `EFFECTIVE_CONFIGURATION` 事件（第 4.1 节），
+19 核它报回的 `EFFECTIVE_CONFIGURATION=` 行与定义逐字相同；`production` 下没有这一行也算失败。
 
 **2026-10-03 起（control-server#454）叠加的还有清桩出口要的两节**：`VehicleFaultRecovery`（Host 恢复与清桩入口的开关、
 凭据变量名）和 `FieldOperatorRoles`（现场人员名单路径、车载端入口声明），回读核对也从三个键扩到叠加写的每一个值。在那之前

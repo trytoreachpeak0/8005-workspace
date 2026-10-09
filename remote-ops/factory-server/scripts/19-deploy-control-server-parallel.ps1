@@ -255,6 +255,28 @@ function Assert-MesIngestSourceReported {
         throw 'MES_INGEST_SOURCE_MISMATCH: fake mode, but the installer reported no FAKE_MES_INGEST line.'
     }
     Write-Step "MesIngest source confirmed by the server: $($audit[-1])"
+
+    # control-server#535 review M2. The line above is built from the definition; this one is what the Host
+    # really bound, read back by the installer from the Host's own log. M1 was a definition saying
+    # STAGING_TO_WIRE and a Host binding six types, so this is the line that proves the mode.
+    $journey = $definition['journeyRuntime']
+    $expectedEffective = "EFFECTIVE_CONFIGURATION=allowedWorkTypes=$(@($journey['allowedWorkTypes']) -join ',') " +
+        "allowedDispatchZones=$(@($journey['allowedDispatchZones']) -join ',') mesIngestBaseUrl=$($definition['mesIngest']['baseUrl'])"
+    $effective = @($lines | Where-Object { $_.StartsWith('EFFECTIVE_CONFIGURATION=', [StringComparison]::Ordinal) })
+    if ($effective.Count -eq 0) {
+        if ($productionSource) {
+            throw 'EFFECTIVE_CONFIGURATION_UNREAD: the installer reported no EFFECTIVE_CONFIGURATION line, so what the Host really bound is unknown.'
+        }
+        Write-Warning 'The installer reported no EFFECTIVE_CONFIGURATION line (a package older than control-server#535 does not log it); fake mode, reported, not refused.'
+        return
+    }
+    if ($effective[-1] -cne $expectedEffective) {
+        throw "EFFECTIVE_CONFIGURATION_MISMATCH: the Host bound '$($effective[-1])', the definition says '$expectedEffective'."
+    }
+    if ($productionSource -and -not $effective[-1].StartsWith('EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE ', [StringComparison]::Ordinal)) {
+        throw "EFFECTIVE_CONFIGURATION_MISMATCH: production mode, but the Host bound '$($effective[-1])'."
+    }
+    Write-Step "What the Host bound, confirmed by the server: $($effective[-1])"
 }
 
 # ----------------------------------------------------------------- uninstall ---
