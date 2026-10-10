@@ -21,7 +21,12 @@
       * -Rollback without -AdmissionPolicyVersionOverride: refused, the message says what to pass;
         with it: accepted, the override value and reason printed and read back from the derived copy;
         an override not above the definition's own version: refused;
-      * a package without release-manifest.json, or without components.controlServer.commit: refused;
+      * an edit git status cannot see (skip-worktree, assume-unchanged, or same size and write time):
+        refused by the marks check or the content hash of every file sent;
+      * the version on the server (installed-instance.json, read through an 'ssh' double): an install
+        below it, or a rollback not above it, refused; ssh failing or an unreadable file refused;
+      * a package without release-manifest.json at its root (absent, or only in a subdirectory), or
+        without components.controlServer.commit: refused;
       * no -RunId/-PackagePath: the release run is looked up by the clone's commit, not "latest", and
         a lookup that finds none, or one built from another commit, is refused.
     Plus ParseFile with zero errors for the deploy script and for this file: the AST walk below would
@@ -126,12 +131,32 @@ try {
         "$hash *$(Split-Path -Leaf $zip)" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
         return $zip
     }
-    function New-Manifest { param([string] $Commit) @{ schemaVersion = 1; components = @{ controlServer = @{ commit = $Commit; branch = 'fp/v2-impl' } } } }
+    $onboardCommit = '0123456789abcdef0123456789abcdef01234567'
+    function New-Manifest { param([string] $Commit) @{ schemaVersion = 1; components = @{ controlServer = @{ commit = $Commit; branch = 'fp/v2-impl' }; onboardHmi = @{ commit = $onboardCommit } } } }
 
     $samePackage = New-Package -Name 'same' -Manifest (New-Manifest $head)
     $otherPackage = New-Package -Name 'other' -Manifest (New-Manifest $other)
     $noManifestPackage = New-Package -Name 'nomanifest' -Manifest $null
     $noCommitPackage = New-Package -Name 'nocommit' -Manifest @{ schemaVersion = 1; components = @{ controlServer = @{ branch = 'fp/v2-impl' } } }
+    # The manifest only in a subdirectory of the zip: not the one release.yml puts at its root.
+    $nestedRoot = Join-Path $work 'pkg-nested'
+    New-Item -ItemType Directory -Path (Join-Path $nestedRoot 'sub') -Force | Out-Null
+    ConvertTo-Json -InputObject (New-Manifest $head) -Depth 6 | Set-Content -LiteralPath (Join-Path $nestedRoot 'sub\release-manifest.json') -Encoding utf8NoBOM
+    $nestedPackage = Join-Path $work 'WireToGate-nested.zip'
+    Compress-Archive -Path (Join-Path $nestedRoot '*') -DestinationPath $nestedPackage -Force
+    "$((Get-FileHash -LiteralPath $nestedPackage -Algorithm SHA256).Hash.ToLowerInvariant()) *WireToGate-nested.zip" | Set-Content -LiteralPath "$nestedPackage.sha256" -Encoding ascii
+
+    # The 'ssh' double, for the one read-only ssh made before ShouldProcess: reading the installed
+    # definition's version. Answers $global:SshAnswer with exit $global:SshExit; every call recorded.
+    # Default: no installed-instance.json (a first install).
+    $global:SshCalls = [System.Collections.Generic.List[string]]::new()
+    $global:SshAnswer = 'INSTALLED_DEFINITION=ABSENT'
+    $global:SshExit = 0
+    function global:ssh {
+        $global:SshCalls.Add($args -join ' ')
+        $global:LASTEXITCODE = $global:SshExit
+        return $global:SshAnswer
+    }
 
     # The 'gh' double. Defined globally so the script's '& gh' finds it before gh.exe; every call is
     # recorded, 'run list' answers from $global:GhRuns, 'run download' copies $global:GhPackage.
@@ -177,10 +202,15 @@ try {
         $lines = [System.Collections.Generic.List[string]]::new()
         $err = $null
         $global:GhCalls.Clear()
+        $global:SshCalls.Clear()
         try {
             & { & $ScriptPath @Parameters } *>&1 | ForEach-Object { $lines.Add("$_") }
         } catch {
             $err = $_.Exception.Message
+        } finally {
+            # Each case that wants another installed state sets it just before its call.
+            $global:SshAnswer = 'INSTALLED_DEFINITION=ABSENT'
+            $global:SshExit = 0
         }
         return [pscustomobject]@{ Lines = $lines.ToArray(); Text = ($lines -join "`n"); Error = $err }
     }
@@ -194,8 +224,13 @@ try {
     # 1. Same commit.
     $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
     Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains('WhatIf: stopping before the server is touched') -and
-            $run.Text.Contains("PACKAGE_COMMIT_MATCHES_CLONE=$head")) `
-        -Name 'package built from the clone''s commit: accepted, and the output names the commit' -Detail (Get-Detail $run)
+            $run.Text.Contains("PACKAGE_COMMIT_MATCHES_CLONE=$head") -and $run.Text.Contains("Package onboard commit: $onboardCommit")) `
+        -Name 'package built from the clone''s commit: accepted, and the output names the commit and the onboard commit' -Detail (Get-Detail $run)
+    # R7 (review): the version line the deployment record is written from.
+    Write-Result -Ok ($run.Text.Contains("ADMISSION_POLICY_VERSION=$definitionVersion -- write it into the deployment record")) `
+        -Name 'the output carries ADMISSION_POLICY_VERSION=<n> for the deployment record' -Detail (Get-Detail $run)
+    Write-Result -Ok ($global:SshCalls.Count -eq 1 -and $run.Text.Contains('INSTALLED_ADMISSION_POLICY_VERSION=none')) `
+        -Name 'one read-only ssh for the installed version; none installed reads as a first install' -Detail ("ssh: $($global:SshCalls -join ' / ')`n        " + (Get-Detail $run))
 
     # 2. Different commit.
     $run = Invoke-Deploy ($common + @{ PackagePath = $otherPackage })
@@ -223,6 +258,49 @@ try {
     Remove-Item -LiteralPath $stray
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('tools/Stray.cs')) `
         -Name 'untracked file elsewhere in the clone (FakeMesIngest is built from it): refused' -Detail (Get-Detail $run)
+
+    # 3c. Edits git status does not report (review): behind skip-worktree, behind assume-unchanged,
+    # and with no mark at all -- same length, write time put back, so the stat data still matches.
+    $versionPattern = '("admissionPolicyVersion"\s*:\s*)\d+'
+    $originalBytes = [IO.File]::ReadAllBytes($definitionPath)
+    $original = [IO.File]::ReadAllText($definitionPath)
+    Invoke-Git $clone @('update-index', '--skip-worktree', 'scripts/parallel/instance-factory01-v2.json') | Out-Null
+    [IO.File]::WriteAllText($definitionPath, ($original -replace $versionPattern, '${1}9'))
+    $statusSeen = "$(Invoke-Git $clone @('status', '--porcelain'))".Trim()
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Invoke-Git $clone @('update-index', '--no-skip-worktree', 'scripts/parallel/instance-factory01-v2.json') | Out-Null
+    Invoke-Git $clone @('checkout', '--', 'scripts/parallel/instance-factory01-v2.json') | Out-Null
+    Write-Result -Ok ($statusSeen -eq '' -and $null -ne $run.Error -and $run.Error.Contains('CLONE_NOT_CLEAN') -and $run.Error.Contains('skip-worktree')) `
+        -Name 'definition edited behind --skip-worktree (git status empty): refused' -Detail ("status: '$statusSeen'`n        " + (Get-Detail $run))
+
+    $module = Join-Path $clone 'scripts\parallel\ParallelInstance.psm1'
+    Invoke-Git $clone @('update-index', '--assume-unchanged', 'scripts/parallel/ParallelInstance.psm1') | Out-Null
+    Add-Content -LiteralPath $module -Value '# edited behind assume-unchanged' -Encoding utf8NoBOM
+    $statusSeen = "$(Invoke-Git $clone @('status', '--porcelain'))".Trim()
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Invoke-Git $clone @('update-index', '--no-assume-unchanged', 'scripts/parallel/ParallelInstance.psm1') | Out-Null
+    Invoke-Git $clone @('checkout', '--', 'scripts/parallel/ParallelInstance.psm1') | Out-Null
+    Write-Result -Ok ($statusSeen -eq '' -and $null -ne $run.Error -and $run.Error.Contains('CLONE_NOT_CLEAN') -and $run.Error.Contains('assume-unchanged')) `
+        -Name 'module edited behind --assume-unchanged (git status empty): refused' -Detail ("status: '$statusSeen'`n        " + (Get-Detail $run))
+
+    # The write time is moved an hour back and the index refreshed first, so the entry is not
+    # "racily clean" (a file as new as the index is re-hashed by git status, which would see it).
+    $writeTime = (Get-Date).ToUniversalTime().AddHours(-1)
+    (Get-Item -LiteralPath $definitionPath).LastWriteTimeUtc = $writeTime
+    Invoke-Git $clone @('update-index', '--refresh') | Out-Null
+    $edited = $original -replace $versionPattern, '${1}9'
+    [IO.File]::WriteAllText($definitionPath, $edited)
+    (Get-Item -LiteralPath $definitionPath).LastWriteTimeUtc = $writeTime
+    $statusSeen = "$(Invoke-Git $clone @('status', '--porcelain'))".Trim()
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Invoke-Git $clone @('checkout', '--', 'scripts/parallel/instance-factory01-v2.json') | Out-Null
+    [IO.File]::WriteAllBytes($definitionPath, $originalBytes)
+    Write-Result -Ok ($edited.Length -eq $original.Length -and $statusSeen -eq '' -and $null -ne $run.Error -and
+            $run.Error.Contains('CLONE_NOT_CLEAN') -and $run.Error.Contains('differs from HEAD')) `
+        -Name 'definition edited with no mark, same size and write time (git status empty): refused by content hash' -Detail ("status: '$statusSeen'`n        " + (Get-Detail $run))
+    if ("$(Invoke-Git $clone @('status', '--porcelain'))".Trim() -ne '' -or "$(Invoke-Git $clone @('diff', '--stat', 'HEAD'))".Trim() -ne '') {
+        throw 'fixture clone not restored after the hash case'
+    }
 
     # 4. Definition outside the clone.
     $outsideDefinition = Join-Path $outside 'instance-factory01-v2.json'
@@ -257,6 +335,28 @@ try {
     $run = Invoke-Deploy ($common + @{ Rollback = $true; AdmissionPolicyVersionOverride = $definitionVersion })
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('ADMISSION_POLICY_VERSION_OVERRIDE_NOT_ABOVE_DEFINITION')) `
         -Name "-Rollback with an override equal to the definition's own version: refused" -Detail (Get-Detail $run)
+
+    # R6 (review): a rollback still sends the clone's scripts, so it is held to a clean clone too.
+    # The edit is to a tracked file that is not sent, so only the clean check can see it (the
+    # content check of the sent files would catch an edit to one of them on its own).
+    $notSent = Join-Path $clone 'tools\README.md'
+    Add-Content -LiteralPath $notSent -Value 'local edit' -Encoding utf8NoBOM
+    $run = Invoke-Deploy ($common + @{ Rollback = $true; AdmissionPolicyVersionOverride = $override })
+    Invoke-Git $clone @('checkout', '--', 'tools/README.md') | Out-Null
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('CLONE_NOT_CLEAN')) `
+        -Name "-Rollback -AdmissionPolicyVersionOverride $override from a dirty clone: refused" -Detail (Get-Detail $run)
+
+    # The installed version on the server (review, item 2): a rollback must go above it.
+    $global:SshAnswer = "INSTALLED_DEFINITION=PRESENT version=$override"
+    $run = Invoke-Deploy ($common + @{ Rollback = $true; AdmissionPolicyVersionOverride = $override })
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('ADMISSION_POLICY_VERSION_BELOW_INSTALLED') -and
+            $run.Error.Contains("-AdmissionPolicyVersionOverride $($override + 1)")) `
+        -Name "-Rollback with override $override when $override is installed (rolling back a rollback with the same N): refused, says $($override + 1)" -Detail (Get-Detail $run)
+    $global:SshAnswer = "INSTALLED_DEFINITION=PRESENT version=$definitionVersion"
+    $run = Invoke-Deploy ($common + @{ Rollback = $true; AdmissionPolicyVersionOverride = $override })
+    Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains("INSTALLED_ADMISSION_POLICY_VERSION=$definitionVersion") -and
+            $run.Text.Contains('WhatIf: rollback stops before the server is touched.')) `
+        -Name "-Rollback with override $override when $definitionVersion is installed: accepted, installed version printed" -Detail (Get-Detail $run)
     $common['FakeMesIngestZip'] = $fakeMesZip
 
     # 5b. An install may raise the version too (re-installing after a rollback), and still needs the same commit.
@@ -267,6 +367,30 @@ try {
     $run = Invoke-Deploy ($common + @{ PackagePath = $otherPackage; AdmissionPolicyVersionOverride = $override + 1 })
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains($other)) `
         -Name 'install with an override and a package from another commit: still refused' -Detail (Get-Detail $run)
+
+    # 5d. An install after a rollback (review, item 2): the factory version is below what is installed.
+    $global:SshAnswer = "INSTALLED_DEFINITION=PRESENT version=$override"
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('ADMISSION_POLICY_VERSION_BELOW_INSTALLED') -and
+            $run.Error.Contains("-AdmissionPolicyVersionOverride $($override + 1)")) `
+        -Name "install without an override when $override is installed (after a rollback): refused, says $($override + 1)" -Detail (Get-Detail $run)
+    $global:SshAnswer = "INSTALLED_DEFINITION=PRESENT version=$definitionVersion"
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains("INSTALLED_ADMISSION_POLICY_VERSION=$definitionVersion")) `
+        -Name 'install with the version already installed (same seed again): accepted' -Detail (Get-Detail $run)
+    $global:SshAnswer = "INSTALLED_DEFINITION=PRESENT version=$override"
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage; AdmissionPolicyVersionOverride = $override + 1 })
+    Write-Result -Ok ($null -eq $run.Error) `
+        -Name "install with override $($override + 1) when $override is installed: accepted" -Detail (Get-Detail $run)
+    $global:SshExit = 255
+    $global:SshAnswer = 'ssh: Could not resolve hostname'
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('INSTALLED_VERSION_UNREAD')) `
+        -Name 'installed version unreadable (ssh fails): refused' -Detail (Get-Detail $run)
+    $global:SshAnswer = 'INSTALLED_DEFINITION=UNREADABLE bad json'
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('INSTALLED_VERSION_UNREAD')) `
+        -Name 'installed definition present but unreadable: refused' -Detail (Get-Detail $run)
 
     # 5c. A refusal after the derived copy exists but before the install's try (here: the secret
     # store lacks a key) still removes the copy, and the refusal reaches the caller unchanged.
@@ -283,6 +407,10 @@ try {
     $run = Invoke-Deploy ($common + @{ PackagePath = $noManifestPackage })
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('release-manifest.json')) `
         -Name 'package without release-manifest.json: refused' -Detail (Get-Detail $run)
+    # R2 (review): a manifest in a subdirectory is not the package's own.
+    $run = Invoke-Deploy ($common + @{ PackagePath = $nestedPackage })
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('PACKAGE_MANIFEST_MISSING')) `
+        -Name 'release-manifest.json only in a subdirectory of the zip: refused' -Detail (Get-Detail $run)
     $run = Invoke-Deploy ($common + @{ PackagePath = $noCommitPackage })
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('components.controlServer.commit')) `
         -Name 'manifest without components.controlServer.commit: refused' -Detail (Get-Detail $run)
@@ -299,6 +427,12 @@ try {
     $run = Invoke-Deploy $common
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains($head) -and @($global:GhCalls | Where-Object { $_ -like 'run download*' }).Count -eq 0) `
         -Name 'no release run for the clone''s commit: refused, nothing downloaded' -Detail (Get-Detail $run)
+    foreach ($answer in @('null', '')) {
+        $global:GhRuns = $answer
+        $run = Invoke-Deploy $common
+        Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('RELEASE_RUN_NOT_FOUND')) `
+            -Name "gh run list answering '$answer': RELEASE_RUN_NOT_FOUND, not a StrictMode error" -Detail (Get-Detail $run)
+    }
     $global:GhRuns = "[{`"databaseId`":222,`"headSha`":`"$other`",`"headBranch`":`"fp/v2-impl`",`"createdAt`":`"2026-10-10T10:00:00Z`"}]"
     $run = Invoke-Deploy $common
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains($other) -and @($global:GhCalls | Where-Object { $_ -like 'run download*' }).Count -eq 0) `
@@ -310,8 +444,8 @@ try {
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains($other) -and $run.Error.Contains($head)) `
         -Name '-RunId whose package is from another commit: refused after download' -Detail (Get-Detail $run)
 } finally {
-    Remove-Item function:global:gh -ErrorAction SilentlyContinue
-    Remove-Variable -Scope Global -Name GhCalls, GhRuns, GhPackage -ErrorAction SilentlyContinue
+    Remove-Item function:global:gh, function:global:ssh -ErrorAction SilentlyContinue
+    Remove-Variable -Scope Global -Name GhCalls, GhRuns, GhPackage, SshCalls, SshAnswer, SshExit -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

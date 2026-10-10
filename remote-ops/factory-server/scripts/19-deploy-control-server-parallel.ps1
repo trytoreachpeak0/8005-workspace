@@ -94,7 +94,9 @@
     With -Uninstall: also remove the data root, the backups and the ops directory.
 
 .PARAMETER WhatIf
-    Stage and verify everything, print what would run, and stop before touching the server.
+    Stage and verify everything, print what would run, and stop before changing the server. One
+    read-only ssh still runs (except with -Uninstall): reading the admission policy version in the
+    server's installed-instance.json, which the version check needs (control-server#552).
 #>
 [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Download')]
 param(
@@ -217,10 +219,70 @@ function Assert-DefinitionFromClone {
     return $relative
 }
 
+function Assert-SentFilesMatchHead {
+    <#
+        Every file sent to the server, compared with the blob at HEAD. 'git status' is blind to
+        files marked skip-worktree or assume-unchanged (review of control-server#552: either mark,
+        then an edited definition or module, and status stays empty), and to an edit that keeps the
+        size and the write time. So each file's bytes are compared with the blob's own, and any such
+        mark anywhere in the clone is refused as well. Line endings alone are not a difference: which
+        of CRLF or LF a checkout writes depends on core.autocrlf and the attributes, not on the
+        commit ('git hash-object --path' was tried first and disagreed with a clean file on exactly
+        that), and neither a script nor a definition means anything different for it.
+    #>
+    param([string] $Root, [string[]] $Relative)
+    $toLf = {
+        param([byte[]] $Bytes)
+        $list = [System.Collections.Generic.List[byte]]::new($Bytes.Length)
+        for ($i = 0; $i -lt $Bytes.Length; $i++) {
+            if ($Bytes[$i] -eq 0x0D -and $i + 1 -lt $Bytes.Length -and $Bytes[$i + 1] -eq 0x0A) { continue }
+            $list.Add($Bytes[$i])
+        }
+        , $list.ToArray()
+    }
+    # The blob's raw bytes. A Process rather than '& git': a native pipe into PowerShell decodes text.
+    $blobBytes = {
+        param([string] $Path)
+        $info = [Diagnostics.ProcessStartInfo]::new('git')
+        foreach ($a in @('-C', $Root, 'cat-file', 'blob', "HEAD:$Path")) { $info.ArgumentList.Add($a) }
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $info.UseShellExecute = $false
+        $process = [Diagnostics.Process]::Start($info)
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $buffer = [IO.MemoryStream]::new()
+        $process.StandardOutput.BaseStream.CopyTo($buffer)
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw "CLONE_NOT_CLEAN: $Path is not in HEAD of $Root ($($stderr.Result.Trim())). Nothing was downloaded or copied." }
+        , $buffer.ToArray()
+    }
+    $flags = @(& git -C $Root ls-files -v 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "CLONE_NOT_CLEAN: git ls-files -v failed in $Root ($($flags -join ' '))." }
+    # Lower-case tag: assume-unchanged. 'S' (or 's'): skip-worktree.
+    $marked = @($flags | Where-Object { "$_" -cmatch '^(?:[a-z]|S) ' } | ForEach-Object { "$_".Trim() })
+    if ($marked.Count -gt 0) {
+        throw ("CLONE_NOT_CLEAN: -ControlServerRepository $Root has $($marked.Count) path(s) marked assume-unchanged or " +
+            "skip-worktree, which git status does not report: $(@($marked | Select-Object -First 10) -join '; '). " +
+            'Clear the marks (git update-index --no-assume-unchanged / --no-skip-worktree; a sparse checkout is not a deploy ' +
+            'source) or use a fresh worktree. Nothing was downloaded or copied.')
+    }
+    foreach ($path in $Relative) {
+        $committed = & $toLf (& $blobBytes $path)
+        $working = & $toLf ([IO.File]::ReadAllBytes((Join-Path $Root $path)))
+        if (-not [Linq.Enumerable]::SequenceEqual([byte[]] $committed, [byte[]] $working)) {
+            throw ("CLONE_NOT_CLEAN: $path in $Root differs from HEAD ($($working.Length) bytes in the working copy, " +
+                "$($committed.Length) in HEAD, line endings aside) although git status did not report it. It is sent to the " +
+                'server, so it must be the committed file. Nothing was downloaded or copied.')
+        }
+    }
+}
+
 function Get-PackageControlServerCommit {
     <#
         components.controlServer.commit from the release-manifest.json at the root of the zip
-        (control-server scripts/New-WireToGateReleaseCandidate.ps1), read without extracting.
+        (control-server scripts/New-WireToGateReleaseCandidate.ps1), read without extracting; also
+        components.onboardHmi.commit, for the record (not checked: the onboard half is deployed
+        separately, to the vehicles).
     #>
     param([string] $Zip)
     $archive = [IO.Compression.ZipFile]::OpenRead($Zip)
@@ -235,16 +297,48 @@ function Get-PackageControlServerCommit {
         $archive.Dispose()
     }
     $commit = $null
+    $onboard = $null
     try {
         $manifest = $text | ConvertFrom-Json -AsHashtable
         $commit = "$($manifest['components']['controlServer']['commit'])".Trim().ToLowerInvariant()
     } catch {
         $commit = $null
     }
+    try { $onboard = "$($manifest['components']['onboardHmi']['commit'])".Trim() } catch { $onboard = $null }
     if ($commit -notmatch '^[0-9a-f]{40}$') {
         throw "PACKAGE_MANIFEST_NO_COMMIT: release-manifest.json in $Zip has no 40-hex components.controlServer.commit ('$commit'). Refusing to deploy it. Nothing was copied."
     }
-    return $commit
+    return [pscustomobject]@{ ControlServer = $commit; Onboard = ($onboard ? $onboard : '(none in the manifest)') }
+}
+
+function Get-InstalledAdmissionPolicyVersion {
+    <#
+        journeyRuntime.admissionPolicyVersion of <opsRoot>\installed-instance.json on the server, read
+        over one read-only ssh. The installer records that file on every install and rollback before
+        it changes anything, so it holds the version of the last deployment -- the floor the next
+        one is held to (review of control-server#552: the commonest slip is reinstalling after a
+        rollback without the override). Returns $null when there is no such file (first install).
+        Anything else that is not a version -- ssh failing, an unreadable file -- is refused: a
+        server this machine cannot read is not one to deploy to.
+    #>
+    param([string] $Path)
+    $remote = @(
+        "`$p = '$Path'"
+        "if (-not (Test-Path -LiteralPath `$p -PathType Leaf)) { 'INSTALLED_DEFINITION=ABSENT'; exit 0 }"
+        "try { `$v = (Get-Content -Raw -LiteralPath `$p | ConvertFrom-Json -AsHashtable)['journeyRuntime']['admissionPolicyVersion']; 'INSTALLED_DEFINITION=PRESENT version=' + `$v }"
+        "catch { 'INSTALLED_DEFINITION=UNREADABLE ' + `$_.Exception.Message }"
+    ) -join '; '
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
+    $output = @(& ssh $SshAlias 'pwsh' '-NoProfile' '-EncodedCommand' $encoded 2>&1 | ForEach-Object { "$_".Trim() })
+    $exit = $LASTEXITCODE
+    $line = @($output | Where-Object { $_.StartsWith('INSTALLED_DEFINITION=', [StringComparison]::Ordinal) } | Select-Object -Last 1)
+    if ($exit -ne 0 -or $line.Count -eq 0) {
+        throw ("INSTALLED_VERSION_UNREAD: could not read $Path on $SshAlias (ssh exit $exit): $($output -join ' | '). " +
+            'The version check needs it. Nothing was downloaded or copied.')
+    }
+    if ($line[0] -ceq 'INSTALLED_DEFINITION=ABSENT') { return $null }
+    if ($line[0] -cmatch '^INSTALLED_DEFINITION=PRESENT version=(\d+)$') { return [long] $Matches[1] }
+    throw "INSTALLED_VERSION_UNREAD: $Path on $SshAlias has no numeric journeyRuntime.admissionPolicyVersion ($($line[0])). Nothing was downloaded or copied."
 }
 
 function New-AdmissionPolicyOverrideDefinition {
@@ -278,6 +372,11 @@ function New-AdmissionPolicyOverrideDefinition {
 
 # ------------------------------------------------- repository and definition ---
 
+# The server-side scripts Copy-ParallelScripts sends from scripts/parallel; the same list is checked
+# against HEAD before anything is sent.
+$serverScriptNames = @('ParallelInstance.psm1', 'ParallelHost.psm1', 'Install-ParallelInstanceLocal.ps1',
+    'Uninstall-ParallelInstanceLocal.ps1', 'Start-FakeMesIngestResident.ps1')
+
 $repoRoot = (Resolve-Path -LiteralPath $ControlServerRepository).Path
 $parallelScripts = Join-Path $repoRoot 'scripts\parallel'
 if (-not (Test-Path -LiteralPath $parallelScripts -PathType Container)) {
@@ -294,7 +393,9 @@ $cloneHead = $null
 if (-not $Uninstall) {
     $cloneHead = Get-CleanCloneHead -Root $repoRoot
     $definitionRelative = Assert-DefinitionFromClone -Root $repoRoot -Path $InstanceDefinitionPath
-    Write-Step "Clone $repoRoot is clean at $cloneHead; definition $definitionRelative is tracked there"
+    Assert-SentFilesMatchHead -Root $repoRoot -Relative (@($definitionRelative, 'scripts/Uninstall-ControlServerLocal.ps1') +
+        @($serverScriptNames | ForEach-Object { "scripts/parallel/$_" }))
+    Write-Step "Clone $repoRoot is clean at $cloneHead; definition $definitionRelative is tracked there; the files sent match HEAD"
     if ($Rollback -and -not $PSBoundParameters.ContainsKey('AdmissionPolicyVersionOverride')) {
         throw ('ADMISSION_POLICY_VERSION_OVERRIDE_REQUIRED: -Rollback needs -AdmissionPolicyVersionOverride <n>. The rollback ' +
             'reinstalls the previous package but rewrites the overlay from this clone''s definition, and the database refuses ' +
@@ -397,6 +498,26 @@ if (-not $Uninstall) {
     Write-Step ("Clearance exit: VehicleFaultRecovery enabled={0}   FieldOperatorRoles roster={1} onboardEntryDeclared={2}" -f
         $definition['vehicleFaultRecovery']['enabled'], $definition['fieldOperatorRoles']['path'],
         $definition['fieldOperatorRoles']['onboardClearanceEntryDeclared'])
+
+    # control-server#552 review. The version this deployment sends, against the one the server last
+    # recorded: an install may keep it (same package again, or a new one whose seed is unchanged)
+    # but never lower it; a rollback swaps the package, so it must go above it.
+    $sendingVersion = & $getDefinedVersion
+    $installedPath = (Get-ParallelInstanceLayout -Definition $definition).InstalledDefinitionPath
+    $installedVersion = Get-InstalledAdmissionPolicyVersion -Path $installedPath
+    if ($null -eq $installedVersion) {
+        Write-Step "INSTALLED_ADMISSION_POLICY_VERSION=none ($installedPath absent on ${SshAlias}: first install)"
+    } else {
+        Write-Step "INSTALLED_ADMISSION_POLICY_VERSION=$installedVersion (from $installedPath on $SshAlias); sending $sendingVersion"
+        $tooLow = $Rollback ? ([long] $sendingVersion -le $installedVersion) : ([long] $sendingVersion -lt $installedVersion)
+        if ($tooLow) {
+            throw ("ADMISSION_POLICY_VERSION_BELOW_INSTALLED: this " + ($Rollback ? 'rollback' : 'deployment') + " would send " +
+                "admissionPolicyVersion $sendingVersion, but the last deployment recorded $installedVersion in $installedPath. " +
+                'The database refuses a version below the highest it has bound, and a rollback changes the package under it, so ' +
+                "it needs a higher one. Pass -AdmissionPolicyVersionOverride $($installedVersion + 1) (or higher, if the database " +
+                'has bound more: AdmissionPolicyState.Version + 1). Nothing was downloaded or copied.')
+        }
+    }
 }
 
 function Copy-ParallelScripts {
@@ -406,8 +527,7 @@ function Copy-ParallelScripts {
         definition by rules the definition was not written to.
     #>
     Invoke-Ssh @("New-Item -ItemType Directory -Force -Path '$opsRoot' | Out-Null")
-    foreach ($name in @('ParallelInstance.psm1', 'ParallelHost.psm1', 'Install-ParallelInstanceLocal.ps1',
-                         'Uninstall-ParallelInstanceLocal.ps1', 'Start-FakeMesIngestResident.ps1')) {
+    foreach ($name in $serverScriptNames) {
         & scp -q (Join-Path $parallelScripts $name) "${SshAlias}:$(& $toPosix "$opsRoot\$name")"
         if ($LASTEXITCODE -ne 0) { throw "scp of $name failed (exit $LASTEXITCODE)" }
     }
@@ -595,7 +715,9 @@ try {
             $runsJson = & gh run list --repo $Repository --workflow release.yml --status success `
                 --commit $cloneHead --limit 1 --json databaseId,headSha,headBranch,createdAt
             if ($LASTEXITCODE -ne 0) { throw "gh run list failed (exit $LASTEXITCODE)" }
-            $runs = @(($runsJson -join "`n") | ConvertFrom-Json)
+            # gh can answer with nothing at all, or 'null'; both mean "no run", not a StrictMode error.
+            $runsText = "$($runsJson -join "`n")".Trim()
+            $runs = $runsText ? @($runsText | ConvertFrom-Json | Where-Object { $null -ne $_ }) : @()
             if ($runs.Count -eq 0) {
                 throw ("RELEASE_RUN_NOT_FOUND: no successful release.yml run in $Repository was built from $cloneHead, " +
                     'the commit -ControlServerRepository is at. Dispatch release.yml on that commit, or check out the commit ' +
@@ -628,7 +750,8 @@ try {
     Write-Step "Package hash verified ($actual)"
 
     # control-server#552. After the hash, so the manifest read is the one the hash vouches for.
-    $packageCommit = Get-PackageControlServerCommit -Zip $zip
+    $packageCommits = Get-PackageControlServerCommit -Zip $zip
+    $packageCommit = $packageCommits.ControlServer
     if ($packageCommit -cne $cloneHead) {
         throw ("PACKAGE_COMMIT_MISMATCH: the package was built from control-server $packageCommit, but " +
             "-ControlServerRepository is at $cloneHead. The instance definition and the server-side scripts come from " +
@@ -636,6 +759,9 @@ try {
             "Deploy from a clean checkout of $packageCommit, or deploy the package built from $cloneHead. Nothing was copied.")
     }
     Write-Step "PACKAGE_COMMIT_MATCHES_CLONE=$cloneHead (release-manifest.json components.controlServer.commit)"
+    # The onboard half is in the same package and goes to the vehicles separately; its commit is what
+    # 06-deploy-onboard-hmi.ps1 must match.
+    Write-Step "Package onboard commit: $($packageCommits.Onboard) (components.onboardHmi.commit)"
 
     # ------------------------------------------------------- FakeMesIngest ---
 
