@@ -31,22 +31,49 @@
     review -- both server-side scripts carried the same unprefixed '*.incoming-*' cleanup, and
     each deleted the other's staging directory.
 
+    SAME COMMIT (control-server#552). The package and the instance definition travel separately:
+    the package from GitHub or disk, the definition and the server-side scripts from
+    -ControlServerRepository. A package from one commit with a definition from another is how a
+    batch-10 admissionPolicyVersion (3) got bound to an older build's seed, after which every later
+    batch-10 install judged drift and stopped accepting demand. So an install or upgrade is refused
+    unless the clone is clean, the definition is a tracked file of the clone, and the package's
+    release-manifest.json names the clone's HEAD as components.controlServer.commit. A rollback
+    cannot meet the last condition (the previous package is on the server), so it is not asked to;
+    it must instead raise the version explicitly with -AdmissionPolicyVersionOverride.
+
 .PARAMETER RunId
-    GitHub Actions release run to deploy. Omit to take the most recent successful one on the
-    v2 line.
+    GitHub Actions release run to deploy. Omit to take the most recent successful release run
+    built from -ControlServerRepository's HEAD commit (gh run list --commit); none is refused, it
+    never falls back to "the latest release". Either way the package is checked against the clone.
 
 .PARAMETER PackagePath
     Deploy a zip already on disk instead of downloading one. The matching .sha256 must sit
-    beside it.
+    beside it, and its release-manifest.json must name the clone's HEAD.
 
 .PARAMETER Rollback
     Swap the previous parallel package back in. Downloads nothing, and never touches the MVP.
+    Requires -AdmissionPolicyVersionOverride.
+
+.PARAMETER AdmissionPolicyVersionOverride
+    Replaces journeyRuntime.admissionPolicyVersion in the copy of the instance definition that is
+    sent to the server; the clone's file is not changed. Required with -Rollback: the database
+    refuses both a version it has already bound to other content and any version below the highest
+    it has bound, so a rolled-back build needs the highest version this instance has ever bound + 1
+    (control-server scripts/parallel/README.md, "回滚"). Optional on an install, for the same reason
+    when re-installing after a rollback. Must be above the definition's own value. Printed, with the
+    reason, as ADMISSION_POLICY_VERSION_OVERRIDE=...; write the version into the deployment record.
 
 .PARAMETER ControlServerRepository
     A clean 8005-agv-control-server checkout or worktree at the commit being deployed. The
     instance definition, the validator module, the on-server installer and the FakeMesIngest
     source all come from here -- so that what is deployed and what validates it are the same
-    revision.
+    revision. Enforced: any uncommitted change or untracked file is refused (control-server#552).
+
+.PARAMETER InstanceDefinitionPath
+    Default scripts/parallel/instance-factory01-v2.json in the clone. Must be a file tracked in
+    the clone (e.g. scripts/parallel/instance-factory01-v2.production-mes.json); a path outside it
+    is refused. To change the version for one deployment use -AdmissionPolicyVersionOverride, and
+    commit any other change.
 
 .PARAMETER FakeMesIngestZip
     A FakeMesIngest package already built by scripts/parallel/Publish-FakeMesIngest.ps1. Omit
@@ -79,6 +106,14 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Rollback')]
     [switch] $Rollback,
+
+    # Not Mandatory on purpose: a missing value is refused with the explanation of what to pass,
+    # rather than an interactive prompt (or a bare binding error under -NonInteractive).
+    [Parameter(ParameterSetName = 'Download')]
+    [Parameter(ParameterSetName = 'Local')]
+    [Parameter(ParameterSetName = 'Rollback')]
+    [ValidateRange(1, [int]::MaxValue)]
+    [int] $AdmissionPolicyVersionOverride,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Uninstall')]
     [switch] $Uninstall,
@@ -120,6 +155,118 @@ function Invoke-Ssh {
     return $output
 }
 
+# ------------------------------------------------------------- provenance ---
+# control-server#552. What is deployed, and what it is deployed with, must be one commit.
+
+function Get-CleanCloneHead {
+    <#
+        The clone's HEAD, refused unless the whole clone is clean: no uncommitted change and no
+        untracked file (ignored build output does not count). The whole clone rather than only
+        scripts/parallel, because more than that directory reaches the server: the product
+        uninstaller comes from scripts/, and in 'fake' mode FakeMesIngest is built from tools/ and
+        the repository's build props -- an untracked .cs file there is compiled into it.
+    #>
+    param([string] $Root)
+    $head = "$(& git -C $Root rev-parse HEAD 2>&1)".Trim()
+    if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40}$') {
+        throw "CLONE_NOT_A_GIT_CHECKOUT: git rev-parse HEAD failed in $Root ($head)."
+    }
+    $dirty = @(& git -C $Root status --porcelain --untracked-files=all 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "CLONE_NOT_CLEAN: git status failed in $Root ($($dirty -join ' '))." }
+    if ($dirty.Count -gt 0) {
+        $shown = @($dirty | Select-Object -First 10 | ForEach-Object { "$_".Trim() }) -join '; '
+        $more = $dirty.Count -gt 10 ? " (and $($dirty.Count - 10) more)" : ''
+        throw ("CLONE_NOT_CLEAN: -ControlServerRepository $Root at $head has $($dirty.Count) uncommitted or untracked " +
+            "path(s): $shown$more. The definition and the scripts sent to the server come from this clone, so it " +
+            'must be exactly the commit being deployed. Commit or remove them, or use a fresh worktree. Nothing was downloaded or copied.')
+    }
+    return $head
+}
+
+function Assert-DefinitionFromClone {
+    <#
+        The definition must be a file tracked in the clone. A copy outside it -- or an untracked or
+        ignored file inside it -- carries no commit, and the same-commit check would vouch for a
+        definition it never saw. Refused rather than allowed behind a switch: the one edit there was
+        a reason to make in a copy, the admission policy version on a rollback, now has its own
+        parameter, and any other edit belongs in a commit.
+    #>
+    param([string] $Root, [string] $Path)
+    $full = (Resolve-Path -LiteralPath $Path).Path
+    $rootPrefix = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Root)) + [IO.Path]::DirectorySeparatorChar
+    $inside = $full.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+    $relative = $inside ? [IO.Path]::GetRelativePath($Root, $full).Replace('\', '/') : $null
+    if ($inside) {
+        $null = & git -C $Root ls-files --error-unmatch -- $relative 2>&1
+        $inside = $LASTEXITCODE -eq 0
+    }
+    if (-not $inside) {
+        throw ("DEFINITION_NOT_FROM_CLONE: -InstanceDefinitionPath $full is not a tracked file of -ControlServerRepository " +
+            "$Root. Deploy a definition committed in the clone (scripts/parallel/instance-factory01-v2*.json); to raise " +
+            'the admission policy version for one deployment use -AdmissionPolicyVersionOverride. Nothing was downloaded or copied.')
+    }
+    return $relative
+}
+
+function Get-PackageControlServerCommit {
+    <#
+        components.controlServer.commit from the release-manifest.json at the root of the zip
+        (control-server scripts/New-WireToGateReleaseCandidate.ps1), read without extracting.
+    #>
+    param([string] $Zip)
+    $archive = [IO.Compression.ZipFile]::OpenRead($Zip)
+    try {
+        $entry = @($archive.Entries | Where-Object { $_.FullName -ceq 'release-manifest.json' })
+        if ($entry.Count -ne 1) {
+            throw "PACKAGE_MANIFEST_MISSING: $Zip has no release-manifest.json at its root, so the commit it was built from is unknown. Refusing to deploy it. Nothing was copied."
+        }
+        $reader = [IO.StreamReader]::new($entry[0].Open())
+        try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally {
+        $archive.Dispose()
+    }
+    $commit = $null
+    try {
+        $manifest = $text | ConvertFrom-Json -AsHashtable
+        $commit = "$($manifest['components']['controlServer']['commit'])".Trim().ToLowerInvariant()
+    } catch {
+        $commit = $null
+    }
+    if ($commit -notmatch '^[0-9a-f]{40}$') {
+        throw "PACKAGE_MANIFEST_NO_COMMIT: release-manifest.json in $Zip has no 40-hex components.controlServer.commit ('$commit'). Refusing to deploy it. Nothing was copied."
+    }
+    return $commit
+}
+
+function New-AdmissionPolicyOverrideDefinition {
+    <#
+        A copy of the definition with journeyRuntime.admissionPolicyVersion replaced, written into
+        $Directory under the same file name. The text is edited, not re-serialized, so nothing else
+        in the file can change; both files are then parsed and compared to prove exactly that.
+    #>
+    param([string] $SourcePath, [int] $Version, [string] $Directory)
+    $bytes = [IO.File]::ReadAllBytes($SourcePath)
+    $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $text = [Text.UTF8Encoding]::new($false).GetString($bytes, ($bom ? 3 : 0), $bytes.Length - ($bom ? 3 : 0))
+    $pattern = '("admissionPolicyVersion"\s*:\s*)(\d+)'
+    $found = [regex]::Matches($text, $pattern).Count
+    if ($found -ne 1) {
+        throw "ADMISSION_POLICY_VERSION_OVERRIDE_UNAPPLIED: expected one numeric admissionPolicyVersion in $SourcePath, found $found. Nothing was downloaded or copied."
+    }
+    $edited = [regex]::Replace($text, $pattern, { param($m) $m.Groups[1].Value + $Version })
+    $target = Join-Path $Directory (Split-Path -Leaf $SourcePath)
+    [IO.File]::WriteAllBytes($target, [Text.UTF8Encoding]::new($bom).GetPreamble() + [Text.UTF8Encoding]::new($false).GetBytes($edited))
+
+    $expected = Read-ParallelInstanceDefinition -Path $SourcePath
+    $actual = Read-ParallelInstanceDefinition -Path $target
+    $expected['journeyRuntime']['admissionPolicyVersion'] = $actual['journeyRuntime']['admissionPolicyVersion']
+    if ("$($actual['journeyRuntime']['admissionPolicyVersion'])" -cne "$Version" -or
+        (ConvertTo-Json -InputObject $expected -Depth 32 -Compress) -cne (ConvertTo-Json -InputObject $actual -Depth 32 -Compress)) {
+        throw "ADMISSION_POLICY_VERSION_OVERRIDE_UNAPPLIED: the derived definition $target does not differ from $SourcePath in journeyRuntime.admissionPolicyVersion alone. Nothing was downloaded or copied."
+    }
+    return $target
+}
+
 # ------------------------------------------------- repository and definition ---
 
 $repoRoot = (Resolve-Path -LiteralPath $ControlServerRepository).Path
@@ -127,12 +274,57 @@ $parallelScripts = Join-Path $repoRoot 'scripts\parallel'
 if (-not (Test-Path -LiteralPath $parallelScripts -PathType Container)) {
     throw "No scripts/parallel directory in $repoRoot. Is this an 8005-agv-control-server checkout on fp/v2-impl or later?"
 }
-Import-Module (Join-Path $parallelScripts 'ParallelInstance.psm1') -Force
 
 if (-not $InstanceDefinitionPath) {
     $InstanceDefinitionPath = Join-Path $parallelScripts 'instance-factory01-v2.json'
 }
+
+# An uninstall copies nothing from the clone and sends no definition (see below), so it is not held
+# to these: it must stay possible to remove an instance from whatever checkout is at hand.
+$cloneHead = $null
+if (-not $Uninstall) {
+    $cloneHead = Get-CleanCloneHead -Root $repoRoot
+    $definitionRelative = Assert-DefinitionFromClone -Root $repoRoot -Path $InstanceDefinitionPath
+    Write-Step "Clone $repoRoot is clean at $cloneHead; definition $definitionRelative is tracked there"
+    if ($Rollback -and -not $PSBoundParameters.ContainsKey('AdmissionPolicyVersionOverride')) {
+        throw ('ADMISSION_POLICY_VERSION_OVERRIDE_REQUIRED: -Rollback needs -AdmissionPolicyVersionOverride <n>. The rollback ' +
+            'reinstalls the previous package but rewrites the overlay from this clone''s definition, and the database refuses ' +
+            'a version it has already bound to other content as well as any version below the highest it has bound -- either ' +
+            'way the instance stops accepting demand. Pass the highest admissionPolicyVersion this instance has ever bound + 1 ' +
+            '(AdmissionPolicyState.Version in the v2 database + 1, checked against the deployment record; the first rollback ' +
+            'from 3 is 4). See the control-server scripts/parallel/README.md section on rollback. Nothing was copied.')
+    }
+}
+
+Import-Module (Join-Path $parallelScripts 'ParallelInstance.psm1') -Force
+
 $definition = Read-ParallelInstanceDefinition -Path $InstanceDefinitionPath
+# The definition is asserted further down; until then journeyRuntime may be missing or malformed.
+$getDefinedVersion = { $j = $definition['journeyRuntime']; ($j -is [System.Collections.IDictionary]) ? $j['admissionPolicyVersion'] : $null }
+$definitionStage = $null
+if ($PSBoundParameters.ContainsKey('AdmissionPolicyVersionOverride')) {
+    $definedVersion = & $getDefinedVersion
+    if ($null -ne $definedVersion -and $AdmissionPolicyVersionOverride -le [long] $definedVersion) {
+        throw ("ADMISSION_POLICY_VERSION_OVERRIDE_NOT_ABOVE_DEFINITION: -AdmissionPolicyVersionOverride $AdmissionPolicyVersionOverride " +
+            "is not above the definition's own $definedVersion. That version is already bound (or about to be) to this " +
+            "commit's seed; pass the highest version this instance has ever bound + 1. Nothing was copied.")
+    }
+    $definitionStage = Join-Path $env:TEMP "control-server-v2-definition-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    New-Item -ItemType Directory -Path $definitionStage -Force -WhatIf:$false | Out-Null
+    $InstanceDefinitionPath = New-AdmissionPolicyOverrideDefinition -SourcePath $InstanceDefinitionPath -Version $AdmissionPolicyVersionOverride -Directory $definitionStage
+    $definition = Read-ParallelInstanceDefinition -Path $InstanceDefinitionPath
+    $reason = $Rollback ?
+        'rollback: the previous package''s seed cannot reuse a bound version and the database refuses a lower one' :
+        'operator raised the version above the definition (e.g. reinstalling after a rollback)'
+    $overrideLine = "ADMISSION_POLICY_VERSION_OVERRIDE=$AdmissionPolicyVersionOverride definition=$definedVersion reason=$reason"
+    Write-Step $overrideLine
+    Write-Warning $overrideLine
+    Write-Step "journeyRuntime.admissionPolicyVersion=$($definition['journeyRuntime']['admissionPolicyVersion']) read back from the derived definition $InstanceDefinitionPath"
+}
+if (-not $Uninstall) {
+    Write-Step ("ADMISSION_POLICY_VERSION={0} -- write it into the deployment record; a rollback needs the highest one ever installed + 1" -f
+        ((& $getDefinedVersion) ?? '(not in the definition)'))
+}
 
 # Refused here, before a package is downloaded and before anything is copied to a machine that
 # is serving customers. The same assertion runs again on the server: the control host proves
@@ -312,15 +504,26 @@ if ($Uninstall) {
 # ------------------------------------------------------------------ rollback ---
 
 if ($Rollback) {
-    if (-not $PSCmdlet.ShouldProcess($SshAlias, 'Roll back the v2 parallel instance to its previous package')) { return }
-    Copy-ParallelScripts
-    $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
-    $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
-    Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
-    Write-Step 'Rollback complete. The MVP service was not involved.'
-    Write-Step 'The onboard half was NOT rolled back. The two ends do not negotiate versions --'
-    Write-Step 'roll agv02/agv03 back too, or they will simply stop connecting.'
-    return
+    try {
+        # Not checked against the package: the previous generation is already on the server. The
+        # scripts and the definition sent are still this clean clone's, with the version overridden.
+        Write-Step "Rollback: package commit not checked (the previous generation is on the server); scripts and definition from $cloneHead"
+        if (-not $PSCmdlet.ShouldProcess($SshAlias, 'Roll back the v2 parallel instance to its previous package')) {
+            Write-Step 'WhatIf: rollback stops before the server is touched.'
+            return
+        }
+        Copy-ParallelScripts
+        $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
+        $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
+        Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
+        Write-Step 'Rollback complete. The MVP service was not involved.'
+        Write-Step "Record admissionPolicyVersion=$AdmissionPolicyVersionOverride in the deployment record: the next install needs a higher one."
+        Write-Step 'The onboard half was NOT rolled back. The two ends do not negotiate versions --'
+        Write-Step 'roll agv02/agv03 back too, or they will simply stop connecting.'
+        return
+    } finally {
+        if ($definitionStage) { Remove-Item -LiteralPath $definitionStage -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false }
+    }
 }
 
 # ------------------------------------------------------------------- secrets ---
@@ -375,12 +578,26 @@ try {
         Write-Step "Using local package $zip"
     } else {
         if (-not $RunId) {
-            Write-Step "Finding the most recent successful release run in $Repository"
-            $RunId = & gh run list --repo $Repository --workflow release.yml `
-                --status success --limit 1 --json databaseId --jq '.[0].databaseId'
-            if ($LASTEXITCODE -ne 0 -or -not $RunId) {
-                throw "No successful release run found in $Repository."
+            # control-server#552. By the clone's commit, not by branch and never "the latest": the
+            # latest successful release is whatever was built last on any branch, and a branch filter
+            # would still pick that branch's tip rather than the commit the definition comes from (and
+            # would refuse a field build, which is cut on its own branch). Full SHA: gh matches no
+            # abbreviation here.
+            Write-Step "Finding the most recent successful release run in $Repository built from $cloneHead"
+            $runsJson = & gh run list --repo $Repository --workflow release.yml --status success `
+                --commit $cloneHead --limit 1 --json databaseId,headSha,headBranch,createdAt
+            if ($LASTEXITCODE -ne 0) { throw "gh run list failed (exit $LASTEXITCODE)" }
+            $runs = @(($runsJson -join "`n") | ConvertFrom-Json)
+            if ($runs.Count -eq 0) {
+                throw ("RELEASE_RUN_NOT_FOUND: no successful release.yml run in $Repository was built from $cloneHead, " +
+                    'the commit -ControlServerRepository is at. Dispatch release.yml on that commit, or check out the commit ' +
+                    'of the package you mean and pass -RunId or -PackagePath. Nothing was downloaded.')
             }
+            if ("$($runs[0].headSha)" -cne $cloneHead) {
+                throw "RELEASE_RUN_COMMIT_MISMATCH: asked for a release run built from $cloneHead, got run $($runs[0].databaseId) built from $($runs[0].headSha). Nothing was downloaded."
+            }
+            $RunId = "$($runs[0].databaseId)"
+            Write-Step "Selected release run $RunId (branch $($runs[0].headBranch), commit $($runs[0].headSha), created $($runs[0].createdAt))"
         }
         Write-Step "Downloading artifact from run $RunId"
         & gh run download $RunId --repo $Repository --dir $localStage
@@ -401,6 +618,16 @@ try {
         throw "Package hash mismatch on the control host. Expected $expected, got $actual."
     }
     Write-Step "Package hash verified ($actual)"
+
+    # control-server#552. After the hash, so the manifest read is the one the hash vouches for.
+    $packageCommit = Get-PackageControlServerCommit -Zip $zip
+    if ($packageCommit -cne $cloneHead) {
+        throw ("PACKAGE_COMMIT_MISMATCH: the package was built from control-server $packageCommit, but " +
+            "-ControlServerRepository is at $cloneHead. The instance definition and the server-side scripts come from " +
+            'the clone, so a mismatch binds this definition''s admission policy version to another build''s seed. ' +
+            "Deploy from a clean checkout of $packageCommit, or deploy the package built from $cloneHead. Nothing was copied.")
+    }
+    Write-Step "PACKAGE_COMMIT_MATCHES_CLONE=$cloneHead (release-manifest.json components.controlServer.commit)"
 
     # ------------------------------------------------------- FakeMesIngest ---
 
@@ -559,6 +786,9 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     }
     if (Test-Path -LiteralPath $localStage) {
         Remove-Item -LiteralPath $localStage -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false
+    }
+    if ($definitionStage) {
+        Remove-Item -LiteralPath $definitionStage -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false
     }
     $plain.Clear()
 }

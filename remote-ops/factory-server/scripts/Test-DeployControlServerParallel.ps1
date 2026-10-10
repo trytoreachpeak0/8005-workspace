@@ -17,7 +17,7 @@
       * same commit, clean clone, definition inside the clone: accepted, and the output names the commit;
       * package built from another commit: refused, both commits in the message;
       * uncommitted change under scripts/parallel, or an untracked file anywhere in the clone: refused;
-      * -InstanceDefinitionPath outside the clone: refused;
+      * -InstanceDefinitionPath outside the clone, or inside it but not tracked (git-ignored): refused;
       * -Rollback without -AdmissionPolicyVersionOverride: refused, the message says what to pass;
         with it: accepted, the override value and reason printed and read back from the derived copy;
         an override not above the definition's own version: refused;
@@ -91,6 +91,7 @@ try {
     Expand-Archive -LiteralPath $archive -DestinationPath $clone
     New-Item -ItemType Directory -Path (Join-Path $clone 'tools') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $clone 'tools\README.md') -Value 'fixture' -Encoding utf8NoBOM
+    Set-Content -LiteralPath (Join-Path $clone '.gitignore') -Value 'local/' -Encoding utf8NoBOM
     Invoke-Git $clone @('init', '-q') | Out-Null
     Invoke-Git $clone @('-c', 'core.autocrlf=false', 'add', '-A') | Out-Null
     Invoke-Git $clone @('-c', 'user.name=selftest', '-c', 'user.email=selftest@invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'fixture') | Out-Null
@@ -229,6 +230,14 @@ try {
     $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage; InstanceDefinitionPath = $outsideDefinition })
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('DEFINITION_NOT_FROM_CLONE')) `
         -Name '-InstanceDefinitionPath outside the clone: refused' -Detail (Get-Detail $run)
+    # Inside the clone but ignored: 'git status' does not see it, so the clean check cannot either.
+    $ignoredDefinition = Join-Path $clone 'local\instance-factory01-v2.json'
+    New-Item -ItemType Directory -Path (Split-Path $ignoredDefinition) -Force | Out-Null
+    Copy-Item -LiteralPath $definitionPath -Destination $ignoredDefinition
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage; InstanceDefinitionPath = $ignoredDefinition })
+    Remove-Item -LiteralPath (Split-Path $ignoredDefinition) -Recurse -Force
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('DEFINITION_NOT_FROM_CLONE')) `
+        -Name '-InstanceDefinitionPath inside the clone but git-ignored (untracked): refused' -Detail (Get-Detail $run)
     $run = Invoke-Deploy ($common + @{ Rollback = $true; InstanceDefinitionPath = $outsideDefinition; AdmissionPolicyVersionOverride = ($definitionVersion + 1) })
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('DEFINITION_NOT_FROM_CLONE')) `
         -Name '-InstanceDefinitionPath outside the clone on -Rollback: refused too' -Detail (Get-Detail $run)
