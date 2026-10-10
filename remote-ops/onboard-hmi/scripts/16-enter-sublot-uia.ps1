@@ -69,6 +69,31 @@ function Assert-SublotRequested {
     return [pscustomobject]@{ MessageId = $Request.messageId; StationId = $Request.payload.stationId; ExpectedSublots = $expected; SentAt = $sentAt }
 }
 
+<#
+    Only the v2 parallel instance's database may be read. Pointing -ServerDatabase at the MVP database
+    would be a query against the production database, which needs the user first (Ask first, category 2).
+#>
+function Assert-V2Database {
+    param([string] $Path)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $root = 'C:\ProgramData\8005\ControlServer.V2\'
+    if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "REFUSED: -ServerDatabase '$Path' is not under $root. Only the v2 parallel instance's database is read."
+    }
+    return $full
+}
+
+<#
+    The newest request for this vehicle, ordered by sentAt parsed as DateTimeOffset on this side.
+    SQLite cannot order DateTimeOffset text correctly, so the SQL does not sort.
+#>
+function Select-LatestSublotRequest {
+    param([string[]] $PayloadLines, [string] $AgvId)
+    return @($PayloadLines | Where-Object { $_ -like '{*' } | ForEach-Object { $_ | ConvertFrom-Json } |
+        Where-Object { $_.agvId -ceq $AgvId } |
+        Sort-Object -Property @{ Expression = { [DateTimeOffset] $_.sentAt } } -Descending) | Select-Object -First 1
+}
+
 function Invoke-SelfTest {
     $failures = [System.Collections.Generic.List[string]]::new()
     function Check([string] $Name, [scriptblock] $Body) {
@@ -111,6 +136,34 @@ function Invoke-SelfTest {
             throw
         }
         throw 'not refused'
+    }
+
+    Check 'the MVP database path is refused' {
+        try { $null = Assert-V2Database 'C:\ProgramData\8005\ControlServer\data\controlserver.db' } catch {
+            if ($_.Exception.Message -like 'REFUSED:*') { return }
+            throw
+        }
+        throw 'not refused'
+    }
+    Check 'a path escaping the v2 root through .. is refused' {
+        try { $null = Assert-V2Database 'C:\ProgramData\8005\ControlServer.V2\..\ControlServer\data\controlserver.db' } catch {
+            if ($_.Exception.Message -like 'REFUSED:*') { return }
+            throw
+        }
+        throw 'not refused'
+    }
+    Check 'the v2 database path is accepted' {
+        $null = Assert-V2Database 'C:\ProgramData\8005\ControlServer.V2\data\controlserver.db'
+    }
+    Check 'the newest request by time wins when text order disagrees' {
+        # '+08:00' text sorts after '+00:00' text, but 10:00+08:00 is 02:00Z -- older than 09:00Z.
+        $older = '{"messageId":"old","agvId":"A2","sentAt":"2026-10-10T10:00:00+08:00","payload":{"stationId":"X","expectedSublots":["OLD"]}}'
+        $newer = '{"messageId":"new","agvId":"A2","sentAt":"2026-10-10T09:00:00+00:00","payload":{"stationId":"Y","expectedSublots":["NEW"]}}'
+        $other = '{"messageId":"other","agvId":"A3","sentAt":"2026-10-10T11:00:00+00:00","payload":{"stationId":"Z","expectedSublots":["OTHER"]}}'
+        $picked = Select-LatestSublotRequest @($older, $newer, $other) 'A2'
+        if ($picked.messageId -ne 'new') { throw "picked $($picked.messageId)" }
+        $picked = Select-LatestSublotRequest @($newer, $older) 'A2'
+        if ($picked.messageId -ne 'new') { throw "picked $($picked.messageId) with the lines reversed" }
     }
 
     . $vehicleScript
@@ -158,6 +211,7 @@ function Invoke-SelfTest {
 
 if ($PSCmdlet.ParameterSetName -eq 'SelfTest') { Invoke-SelfTest; return }
 
+$ServerDatabase = Assert-V2Database $ServerDatabase
 $site = Get-Content (Join-Path $PSScriptRoot "..\config\site-$SshAlias.json") -Raw | ConvertFrom-Json
 $agvId = $site.agvId
 
@@ -168,13 +222,12 @@ foreach (`$a in 'SQLitePCLRaw.core.dll','SQLitePCLRaw.provider.e_sqlite3.dll','S
 [SQLitePCL.Batteries_V2]::Init()
 `$c = [Microsoft.Data.Sqlite.SqliteConnection]::new('Data Source=$ServerDatabase;Mode=ReadOnly'); `$c.Open()
 `$cmd = `$c.CreateCommand()
-`$cmd.CommandText = "SELECT PayloadJson FROM ProtocolOutbox WHERE MessageType = 'SublotEntryRequested' ORDER BY CreatedAt DESC LIMIT 20"
+`$cmd.CommandText = "SELECT PayloadJson FROM ProtocolOutbox WHERE MessageType = 'SublotEntryRequested'"
 `$r = `$cmd.ExecuteReader(); while (`$r.Read()) { `$r.GetString(0) }; `$r.Close(); `$c.Close()
 "@
 $lines = $readRequest | ssh $ServerAlias 'pwsh -NoProfile -Command -'
 if ($LASTEXITCODE -ne 0) { throw "Reading the request from $ServerAlias failed (exit $LASTEXITCODE)." }
-$request = @($lines | Where-Object { $_ -like '{*' } | ForEach-Object { $_ | ConvertFrom-Json } |
-    Where-Object { $_.agvId -ceq $agvId }) | Select-Object -First 1
+$request = Select-LatestSublotRequest $lines $agvId
 $checked = Assert-SublotRequested $request $agvId $Sublot ([DateTimeOffset]::UtcNow) $RequestMaxAgeMinutes
 Write-Host "Request $($checked.MessageId) at $($checked.StationId), sent $($checked.SentAt.ToString('o')): expectedSublots [$($checked.ExpectedSublots -join ', ')]"
 
