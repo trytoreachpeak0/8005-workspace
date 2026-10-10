@@ -30,7 +30,9 @@
       * no -RunId/-PackagePath: the release run is looked up by the clone's commit, not "latest", and
         a lookup that finds none, or one built from another commit, is refused.
     Plus ParseFile with zero errors for the deploy script and for this file: the AST walk below would
-    swallow a syntax error that a real run would hit.
+    swallow a syntax error that a real run would hit. And the vehicle lines of the target summary: one
+    per vehicle for a fleet definition (control-server#571), checked on Format-VehicleLines lifted out
+    by its AST with hand-made definitions, so it does not depend on the fixture's revision.
 
 .PARAMETER ControlServerSource
     A local 8005-agv-control-server clone to take scripts/parallel from. Read only ('git archive').
@@ -80,6 +82,37 @@ foreach ($file in @($ScriptPath, $PSCommandPath)) {
     $errors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors)
     Write-Result -Ok (@($errors).Count -eq 0) -Name "$(Split-Path -Leaf $file) parses with 0 errors" -Detail (@($errors) -join ' | ')
+}
+
+# ----------------------------------------------------------- vehicle lines ---
+# control-server#571 review: a definition with a fleet table has no top-level agvId, and the target
+# summary printed "Vehicle:  ()". Format-VehicleLines is lifted out by its AST and driven with
+# hand-made definitions, so this holds whether or not the fixture's control-server revision knows
+# fleets yet; the AST walk below pins that the summary prints vehicles only through it.
+Write-Host ''
+Write-Host 'Vehicle lines' -ForegroundColor Cyan
+$deployAst = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$null, [ref]$null)
+$formatAst = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Format-VehicleLines' }, $true)
+if ($null -eq $formatAst) {
+    Write-Result -Ok $false -Name 'Format-VehicleLines is defined in the deploy script' -Detail 'not found'
+} else {
+    . ([scriptblock]::Create($formatAst.Extent.Text))
+    $fleetDefinition = @{ journeyRuntime = @{ fleet = @(
+                @{ agvId = 'fleet-car-one'; vehicleKey = 'BROKERX-aaaa' },
+                @{ agvId = 'fleet-car-two'; vehicleKey = 'BROKERX-bbbb' }) } }
+    $lines = @(Format-VehicleLines -Definition $fleetDefinition)
+    Write-Result -Ok ($lines.Count -eq 2 -and $lines[0] -ceq 'Vehicle 1/2: fleet-car-one (BROKERX-aaaa)' -and $lines[1] -ceq 'Vehicle 2/2: fleet-car-two (BROKERX-bbbb)') `
+        -Name 'fleet definition: one line per vehicle, each with its agvId and vehicleKey' -Detail ($lines -join ' | ')
+    $lines = @(Format-VehicleLines -Definition @{ journeyRuntime = @{ agvId = 'single-car'; vehicleKey = 'BROKERX-cccc' } })
+    Write-Result -Ok ($lines.Count -eq 1 -and $lines[0] -ceq 'Vehicle: single-car (BROKERX-cccc)') `
+        -Name 'single-vehicle definition: the line as before' -Detail ($lines -join ' | ')
+    # Every "Vehicle: ..." string in the script is inside Format-VehicleLines, and the summary calls it.
+    $vehicleStrings = @($deployAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.ExpandableStringExpressionAst] -or
+                $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) |
+        Where-Object { $_.Value -clike 'Vehicle:*' -and ($_.Extent.StartOffset -lt $formatAst.Extent.StartOffset -or $_.Extent.EndOffset -gt $formatAst.Extent.EndOffset) })
+    $calls = @($deployAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Format-VehicleLines' }, $true))
+    Write-Result -Ok ($vehicleStrings.Count -eq 0 -and $calls.Count -eq 1) `
+        -Name 'the target summary prints vehicles only through Format-VehicleLines' -Detail ("other Vehicle strings: $(@($vehicleStrings | ForEach-Object { $_.Extent.Text }) -join ' | '); calls: $($calls.Count)")
 }
 
 # ------------------------------------------------------------------ fixtures ---
@@ -421,6 +454,7 @@ try {
     $run = Invoke-Deploy $common
     $listCall = @($global:GhCalls | Where-Object { $_ -like 'run list*' })
     Write-Result -Ok ($null -eq $run.Error -and $listCall.Count -eq 1 -and $listCall[0].Contains("--commit $head") -and
+            $listCall[0].Contains('--json databaseId,headSha,headBranch,createdAt') -and
             $run.Text.Contains('run 111') -and $run.Text.Contains("PACKAGE_COMMIT_MATCHES_CLONE=$head")) `
         -Name 'no -RunId/-PackagePath: the release run is looked up by the clone''s commit, and named' -Detail ("gh: $($global:GhCalls -join ' / ')`n        " + (Get-Detail $run))
     $global:GhRuns = '[]'

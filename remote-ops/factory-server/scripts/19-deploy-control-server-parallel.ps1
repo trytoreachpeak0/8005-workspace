@@ -219,6 +219,24 @@ function Assert-DefinitionFromClone {
     return $relative
 }
 
+function Format-VehicleLines {
+    <#
+        The vehicle line(s) of the target summary. A definition with a fleet table
+        (journeyRuntime.fleet, control-server#571) has no top-level agvId/vehicleKey and printed an
+        empty "Vehicle:  ()"; it gets one line per vehicle instead. Display only: nothing is checked here.
+    #>
+    param([System.Collections.IDictionary] $Definition)
+    $journey = $Definition['journeyRuntime']
+    if ($journey -isnot [System.Collections.IDictionary]) { return 'Vehicle: (no journeyRuntime section)' }
+    $fleet = $journey.Contains('fleet') ? @($journey['fleet'] | Where-Object { $_ -is [System.Collections.IDictionary] }) : @()
+    if ($fleet.Count -eq 0) { return "Vehicle: $($journey['agvId']) ($($journey['vehicleKey']))" }
+    $lines = for ($i = 0; $i -lt $fleet.Count; $i++) {
+        "Vehicle $($i + 1)/$($fleet.Count): $($fleet[$i]['agvId']) ($($fleet[$i]['vehicleKey']))"
+    }
+    # Enumerated, one string per vehicle: the caller writes each as its own line.
+    return $lines
+}
+
 function Assert-SentFilesMatchHead {
     <#
         Every file sent to the server, compared with the blob at HEAD. 'git status' is blind to
@@ -489,7 +507,7 @@ $listenAddress = [string] $definition['listenAddress']
 $onboardPort = [int] $definition['onboardPort']
 
 Write-Step "Target: $SshAlias  service '$($definition['serviceName'])'"
-Write-Step "Vehicle: $($definition['journeyRuntime']['agvId']) ($($definition['journeyRuntime']['vehicleKey']))"
+foreach ($vehicleLine in (Format-VehicleLines -Definition $definition)) { Write-Step $vehicleLine }
 Write-Step ("RouteGraph: enabled={0} mapId={1}   RiotCreateDispatch: enabled={2}" -f
     $definition['routeGraph']['enabled'], $definition['routeGraph']['mapId'],
     $definition['riotCreateDispatch']['enabled'])
@@ -506,7 +524,11 @@ if (-not $Uninstall) {
     $installedPath = (Get-ParallelInstanceLayout -Definition $definition).InstalledDefinitionPath
     $installedVersion = Get-InstalledAdmissionPolicyVersion -Path $installedPath
     if ($null -eq $installedVersion) {
-        Write-Step "INSTALLED_ADMISSION_POLICY_VERSION=none ($installedPath absent on ${SshAlias}: first install)"
+        $firstInstallLine = ("INSTALLED_ADMISSION_POLICY_VERSION=none: $installedPath is absent on ${SshAlias}, so this is treated as a " +
+            'first install and the version floor is not checked. If the instance was installed before and that file was removed, ' +
+            'nothing here protects against sending a version below the bound one: check AdmissionPolicyState.Version first.')
+        Write-Step $firstInstallLine
+        Write-Warning $firstInstallLine
     } else {
         Write-Step "INSTALLED_ADMISSION_POLICY_VERSION=$installedVersion (from $installedPath on $SshAlias); sending $sendingVersion"
         $tooLow = $Rollback ? ([long] $sendingVersion -le $installedVersion) : ([long] $sendingVersion -lt $installedVersion)
@@ -713,7 +735,7 @@ try {
             # abbreviation here.
             Write-Step "Finding the most recent successful release run in $Repository built from $cloneHead"
             $runsJson = & gh run list --repo $Repository --workflow release.yml --status success `
-                --commit $cloneHead --limit 1 --json databaseId,headSha,headBranch,createdAt
+                --commit $cloneHead --limit 1 --json 'databaseId,headSha,headBranch,createdAt'
             if ($LASTEXITCODE -ne 0) { throw "gh run list failed (exit $LASTEXITCODE)" }
             # gh can answer with nothing at all, or 'null'; both mean "no run", not a StrictMode error.
             $runsText = "$($runsJson -join "`n")".Trim()
