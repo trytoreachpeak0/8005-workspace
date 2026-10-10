@@ -19,7 +19,7 @@
 ## 1. 三十秒版
 
 ```bash
-# 干跑：把要做的事全算一遍，在碰服务器之前停下
+# 干跑：把要做的事全算一遍，在改动服务器之前停下（只读 ssh 一次，读已装的准入版本）
 pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
   -ControlServerRepository <control-server 的干净 checkout> -WhatIf
 ```
@@ -72,6 +72,14 @@ MVP 那一套用的是 `15-deploy-control-server.ps1`，**两条命令永远不�
 - **克隆必须整体干净**：没有未提交的改动，也没有未跟踪的文件（被 `.gitignore` 忽略的构建产物不算）。
   不只查 `scripts/parallel/`，因为发到服务器的还有 `scripts/` 下的产品卸载脚本，`fake` 模式下 FakeMesIngest
   也从 `tools/` 现场构建，多出一个未跟踪的 `.cs` 文件就会被编进去。拒绝码 `CLONE_NOT_CLEAN`，信息里列出路径。
+  `git status` 有看不见的改动，所以另外两道也归在这个拒绝码下：克隆里有文件被标了 `assume-unchanged` 或
+  `skip-worktree`（`git ls-files -v` 里的小写标记或 `S`）就拒绝，稀疏检出因此也不能当部署来源；发到服务器的 7 个文件
+  （实例定义、`scripts/parallel/` 下的 5 个脚本、产品卸载脚本）逐个与 `HEAD` 里的内容逐字节比对，只忽略换行符
+  （CRLF 还是 LF 取决于检出时的 `core.autocrlf`，不改变内容），不一致就拒绝——同长度改动再把修改时间改回去，
+  `git status` 也看不出来。
+  **一个已知限制**：被忽略的文件不算「不干净」，包括 `.git/info/exclude` 或全局 `core.excludesFile` 忽略的。这类文件放在
+  `tools/` 下仍会被编进 FakeMesIngest 这个替身。影响只到替身，不进产品包、不进实例定义；生产来源模式不构建替身，不受影响。
+  没有改成拒绝，是因为全局忽略里常有 IDE 文件（`*.user`、`.vs/`），一刀切会把正常的克隆也挡掉。
 - **实例定义必须是克隆里被跟踪的文件**：出厂的两份 `scripts/parallel/instance-factory01-v2*.json` 都满足。
   定义在克隆外、或在克隆里但被忽略，一律拒绝（`DEFINITION_NOT_FROM_CLONE`），**没有放行开关**。以前在克隆外放
   副本的唯一正当理由是回滚时改版本号，现在由 `-AdmissionPolicyVersionOverride` 显式承担；别的改动应当提交。
@@ -82,6 +90,13 @@ MVP 那一套用的是 `15-deploy-control-server.ps1`，**两条命令永远不�
   找这个提交打出来的最近一次成功的 release，找不到就拒绝（`RELEASE_RUN_NOT_FOUND`），**不再退回「全仓最近一次成功
   的 release」**。没有按分支过滤：分支上最新的包仍可能不是克隆所在的提交，而现场包是在自己的 `field/*` 分支上打的。
 - **每次部署都会打印所用的准入版本** `ADMISSION_POLICY_VERSION=<n>`：把它记进部署记录，回滚时要用到「装过的最高版本」。
+- **与服务器上已装的版本比对**：碰服务器之前，19 用一次只读 ssh 读 `<opsRoot>\installed-instance.json`（服务器端安装器
+  每次安装、回滚动手之前都会记下这份定义）里的 `admissionPolicyVersion`，打出 `INSTALLED_ADMISSION_POLICY_VERSION=<n>`。
+  安装要发的版本低于它、或回滚要发的版本不高于它，就拒绝（`ADMISSION_POLICY_VERSION_BELOW_INSTALLED`），信息里写着该带
+  `-AdmissionPolicyVersionOverride` 几。最常见的漏法——回滚之后直接装新包、忘了带覆盖——因此会被拦下。没有这个文件按首装处理；
+  ssh 不通或文件读不出就拒绝（`INSTALLED_VERSION_UNREAD`），连不上的服务器本来也装不了。`-WhatIf` 也会做这一次只读 ssh。
+  它管不到的是库里绑过、但没记进这个文件的版本（例如手工改过服务器上的配置），所以「最高版本」仍以库里的
+  `AdmissionPolicyState.Version` 为准。
 
 所以部署某个包的正确做法是：先在 control-server 仓为那个提交建一个干净的 detached worktree，再把它传给
 `-ControlServerRepository`；包用那个提交打的 release（不带 `-RunId` 时 19 会自己按提交找到它）。
@@ -663,7 +678,9 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 - 回滚之后再装批次 10 及之后的包，要**再高一个**（上例是 5）：首装与升级也接受同一个参数，同提交检查照做。
 
 形状与 MVP 那套相同：上一代原样留在 `D:\zhengyushao\ControlServer.V2.previous`，回滚是把两个
-目录**对调**（不是复制），所以「回滚一次回滚」就是再跑一遍同一条命令。回滚之后会**重新叠加一次
+目录**对调**（不是复制），所以「回滚一次回滚」就是再跑一遍 `-Rollback`——**但版本覆盖不能照抄上一次的值**：
+每次回滚都换了一次包，都要给「这个实例装过的最高版本 + 1」（第一次 4，回滚那次回滚就是 5），照抄同一个值会判漂移、停接单；
+19 读到服务器上记录的版本不低于你给的值时会直接拒绝（第 1 节「与服务器上已装的版本比对」）。回滚之后会**重新叠加一次
 配置**——升级会保留现有的 `appsettings.Production.json`，但回滚到一个比某个叠加键更早的代际
 时，不重叠就会丢掉那个键。
 
