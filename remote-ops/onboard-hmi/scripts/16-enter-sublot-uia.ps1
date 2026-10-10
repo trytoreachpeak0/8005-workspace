@@ -94,12 +94,87 @@ function Select-LatestSublotRequest {
         Sort-Object -Property @{ Expression = { [DateTimeOffset] $_.sentAt } } -Descending) | Select-Object -First 1
 }
 
+<#
+    The script that registers and starts the one-shot Interactive task on the vehicle. Run there with -File.
+    It removes itself and any launch script an earlier run left behind, whatever happens, and its last line is
+    LAUNCH_DONE: the caller treats output without that marker as a failure, so a launch that never ran can no
+    longer look like a clean exit (2026-10-10: exit code 0, task never registered).
+#>
+function New-LaunchScript {
+    param([string] $VehicleRoot, [string] $Sublot, [string] $ResultPath, [string] $RunId)
+    return @"
+`$ErrorActionPreference = 'Stop'
+try {
+    `$console = (query session 2>&1 | Select-String -Pattern '^\s*>?console\s+(\S+)\s+(\d+)\s+Active').Matches
+    if (-not `$console) { throw 'No active console session on this vehicle.' }
+    `$arguments = '-NoProfile -ExecutionPolicy Bypass -File "$VehicleRoot\agv-enter-sublot-uia.ps1" -Sublot "$Sublot" -ResultPath "$ResultPath"'
+    `$action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument `$arguments -WorkingDirectory '$VehicleRoot'
+    `$principal = New-ScheduledTaskPrincipal -UserId `$console[0].Groups[1].Value -LogonType Interactive -RunLevel Limited
+    `$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5))
+    try {
+        Register-ScheduledTask -TaskName 'W2G-EnterSublot-$RunId' -Action `$action -Principal `$principal -Settings `$settings -Force | Out-Null
+        Start-ScheduledTask -TaskName 'W2G-EnterSublot-$RunId'
+        Start-Sleep -Seconds 3
+        `$info = Get-ScheduledTaskInfo -TaskName 'W2G-EnterSublot-$RunId'
+        'TASK_STARTED lastRunTime={0} lastTaskResult=0x{1:X}' -f `$info.LastRunTime, `$info.LastTaskResult
+    } finally {
+        Unregister-ScheduledTask -TaskName 'W2G-EnterSublot-$RunId' -Confirm:`$false -ErrorAction SilentlyContinue
+    }
+} finally {
+    Get-ChildItem -LiteralPath '$VehicleRoot' -Filter 'launch-*.ps1' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+'LAUNCH_DONE'
+"@
+}
+
+<#
+    Whether the launch output proves the task started: the end marker and a TASK_STARTED line whose
+    LastTaskResult is 0x41301 (running) or 0x0 (already finished).
+#>
+function Test-LaunchOutput {
+    param([string[]] $Output)
+    $text = $Output -join "`n"
+    return ($text -match '(?m)^LAUNCH_DONE\s*$') -and ($text -match 'TASK_STARTED .*lastTaskResult=0x(41301|0)\b')
+}
+
 function Invoke-SelfTest {
     $failures = [System.Collections.Generic.List[string]]::new()
     function Check([string] $Name, [scriptblock] $Body) {
         try { & $Body; "PASS $Name" } catch { $failures.Add($Name); "FAIL $Name -- $($_.Exception.Message)" }
     }
 
+    Check 'neither script carries a control character' {
+        # 2026-10-10: a Python edit turned "\a" into BEL and "\b" into backspace in this file.
+        foreach ($path in @($PSCommandPath, $vehicleScript)) {
+            $bad = @([System.IO.File]::ReadAllBytes($path) | Where-Object { $_ -lt 32 -and $_ -notin 9, 10, 13 })
+            if ($bad.Count -ne 0) { throw "$path carries $($bad.Count) control character(s)" }
+        }
+    }
+    $launchText = New-LaunchScript -VehicleRoot 'C:\8005\uia' -Sublot 'S-1' -ResultPath 'C:\8005\uia\result-x.json' -RunId 'r1'
+    Check 'the generated launch script parses with zero errors' {
+        $errors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput($launchText, [ref] $null, [ref] $errors)
+        if ($errors.Count -ne 0) { throw $errors[0].Message }
+    }
+    Check 'the launch script removes launch-*.ps1 in a finally and ends with LAUNCH_DONE' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($launchText, [ref] $null, [ref] $null)
+        $finallyRemoves = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $true) |
+            Where-Object { $_.Finally -and $_.Finally.Extent.Text -match "-Filter 'launch-\*\.ps1'" -and $_.Finally.Extent.Text -match 'Remove-Item' })
+        if ($finallyRemoves.Count -ne 1) { throw "finally blocks removing launch-*.ps1: $($finallyRemoves.Count)" }
+        if ($ast.EndBlock.Statements[-1].Extent.Text -ne "'LAUNCH_DONE'") { throw "last statement is $($ast.EndBlock.Statements[-1].Extent.Text)" }
+        if ($launchText -notmatch [regex]::Escape('"C:\8005\uia\agv-enter-sublot-uia.ps1"')) { throw 'vehicle script path not in the launch script' }
+    }
+    foreach ($case in @(
+            @{ Name = 'launch output with marker and a running task passes'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41301', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'launch output with marker and a finished task passes'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x0', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'empty launch output fails (the 2026-10-10 case)'; Out = @(); Expect = $false },
+            @{ Name = 'launch output without the marker fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41301'); Expect = $false },
+            @{ Name = 'launch output with a failed task result fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x80070002', 'LAUNCH_DONE'); Expect = $false })) {
+        Check $case.Name {
+            $got = Test-LaunchOutput $case.Out
+            if ($got -ne $case.Expect) { throw "got $got" }
+        }
+    }
     Check 'both scripts parse with zero errors' {
         foreach ($path in @($PSCommandPath, $vehicleScript)) {
             $errors = $null
@@ -238,24 +313,7 @@ ssh $SshAlias "pwsh -NoProfile -Command `"New-Item -ItemType Directory -Force -P
 if ($LASTEXITCODE -ne 0) { throw "Preparing $vehicleRoot on $SshAlias failed." }
 scp -q $vehicleScript "${SshAlias}:$($vehicleRoot -replace '\\', '/')/agv-enter-sublot-uia.ps1"
 if ($LASTEXITCODE -ne 0) { throw "Copying the vehicle script to $SshAlias failed." }
-$launch = @"
-`$ErrorActionPreference = 'Stop'
-`$console = (query session 2>&1 | Select-String -Pattern '^\s*>?console\s+(\S+)\s+(\d+)\s+Active').Matches
-if (-not `$console) { throw 'No active console session on this vehicle.' }
-`$arguments = '-NoProfile -ExecutionPolicy Bypass -File "$vehicleRoot\agv-enter-sublot-uia.ps1" -Sublot "$Sublot" -ResultPath "$resultPath"'
-`$action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument `$arguments -WorkingDirectory '$vehicleRoot'
-`$principal = New-ScheduledTaskPrincipal -UserId `$console[0].Groups[1].Value -LogonType Interactive -RunLevel Limited
-`$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5))
-try {
-    Register-ScheduledTask -TaskName 'W2G-EnterSublot-$runId' -Action `$action -Principal `$principal -Settings `$settings -Force | Out-Null
-    Start-ScheduledTask -TaskName 'W2G-EnterSublot-$runId'
-    Start-Sleep -Seconds 3
-    `$info = Get-ScheduledTaskInfo -TaskName 'W2G-EnterSublot-$runId'
-    'TASK_STARTED lastRunTime={0} lastTaskResult=0x{1:X}' -f `$info.LastRunTime, `$info.LastTaskResult
-} finally {
-    Unregister-ScheduledTask -TaskName 'W2G-EnterSublot-$runId' -Confirm:`$false -ErrorAction SilentlyContinue
-}
-"@
+$launch = New-LaunchScript -VehicleRoot $vehicleRoot -Sublot $Sublot -ResultPath $resultPath -RunId $runId
 # Copied and run with -File, never piped to `pwsh -Command -`: that mode reads statement by statement and
 # silently drops a trailing multi-line block (this try/finally) at end of input. On 2026-10-10 the task was
 # never registered that way, exit code 0, and the station deadline ran out (control-server#566 B 段).
@@ -267,8 +325,11 @@ try {
 } finally {
     Remove-Item -LiteralPath $launchLocal -ErrorAction SilentlyContinue
 }
-ssh $SshAlias "pwsh -NoProfile -File `"$vehicleRoot\launch-$runId.ps1`""
-if ($LASTEXITCODE -ne 0) { throw "Launching the entry task on $SshAlias failed (exit $LASTEXITCODE)." }
+$launchOutput = @(ssh $SshAlias "pwsh -NoProfile -File `"$vehicleRoot\launch-$runId.ps1`"" 2>&1 | ForEach-Object { "$_" })
+$launchOutput | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0 -or -not (Test-LaunchOutput $launchOutput)) {
+    throw "Launching the entry task on $SshAlias did not report LAUNCH_DONE with a started task (exit $LASTEXITCODE). Nothing was typed; enter the sublot by hand."
+}
 
 # 3. The result.
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
