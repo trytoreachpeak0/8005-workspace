@@ -59,7 +59,7 @@
     sent to the server; the clone's file is not changed. Required with -Rollback: the database
     refuses both a version it has already bound to other content and any version below the highest
     it has bound, so a rolled-back build needs the highest version this instance has ever bound + 1
-    (control-server scripts/parallel/README.md, "回滚"). Optional on an install, for the same reason
+    (control-server scripts/parallel/README.md, the rollback section). Optional on an install, for the same reason
     when re-installing after a rollback. Must be above the definition's own value. Printed, with the
     reason, as ADMISSION_POLICY_VERSION_OVERRIDE=...; write the version into the deployment record.
 

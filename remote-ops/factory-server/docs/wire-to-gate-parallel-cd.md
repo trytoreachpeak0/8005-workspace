@@ -38,9 +38,9 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 ```
 
 ```bash
-# 退回上一代
+# 退回上一代：必须给准入版本覆盖，值是「这个实例装过的最高版本 + 1」（第 10 节）
 pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
-  -ControlServerRepository <同上> -Rollback
+  -ControlServerRepository <同上> -Rollback -AdmissionPolicyVersionOverride <n>
 ```
 
 ```bash
@@ -60,6 +60,31 @@ map 26 的三个值已在 control-server#411 填好（第 9 节），出厂定�
 
 MVP 那一套用的是 `15-deploy-control-server.ps1`，**两条命令永远不会互相走错**：MVP 的脚本
 不认识并行实例，并行的脚本在读到 MVP 的服务名、安装目录、端口或车号时**直接拒绝**，见第 6 节。
+
+### 包、实例定义与克隆必须是同一个提交（control-server#552）
+
+19 的包和实例定义来自两处：包从 GitHub 下载或取本地文件，实例定义和发到服务器上的脚本取自
+`-ControlServerRepository` 那个克隆。两者不是同一提交时，最坏的后果是批次 10 实测过的那种：旧包配上
+`admissionPolicyVersion` 为 3 的定义，库里的 3 就绑到旧包的种子上，当下不报错；之后再装批次 10 的包，
+同版本换内容判漂移，新需求全部停止受理（control-server#545 审查 M2）。所以 19 在碰服务器之前做这几道检查，
+任何一道不过都直接拒绝，什么都没下载或复制：
+
+- **克隆必须整体干净**：没有未提交的改动，也没有未跟踪的文件（被 `.gitignore` 忽略的构建产物不算）。
+  不只查 `scripts/parallel/`，因为发到服务器的还有 `scripts/` 下的产品卸载脚本，`fake` 模式下 FakeMesIngest
+  也从 `tools/` 现场构建，多出一个未跟踪的 `.cs` 文件就会被编进去。拒绝码 `CLONE_NOT_CLEAN`，信息里列出路径。
+- **实例定义必须是克隆里被跟踪的文件**：出厂的两份 `scripts/parallel/instance-factory01-v2*.json` 都满足。
+  定义在克隆外、或在克隆里但被忽略，一律拒绝（`DEFINITION_NOT_FROM_CLONE`），**没有放行开关**。以前在克隆外放
+  副本的唯一正当理由是回滚时改版本号，现在由 `-AdmissionPolicyVersionOverride` 显式承担；别的改动应当提交。
+- **包与克隆同一提交**（首装与升级）：直接从 zip 里读 `release-manifest.json` 的
+  `components.controlServer.commit`，与克隆的 `HEAD` 比对，不同就拒绝（`PACKAGE_COMMIT_MISMATCH`，信息里有两个
+  提交号）；zip 里没有 manifest 或没有这个提交号也拒绝。通过时打一行 `PACKAGE_COMMIT_MATCHES_CLONE=<提交>`。
+- **默认取包按提交查**：不带 `-RunId`／`-PackagePath` 时，19 用 `gh run list --commit <克隆 HEAD 的完整提交号>`
+  找这个提交打出来的最近一次成功的 release，找不到就拒绝（`RELEASE_RUN_NOT_FOUND`），**不再退回「全仓最近一次成功
+  的 release」**。没有按分支过滤：分支上最新的包仍可能不是克隆所在的提交，而现场包是在自己的 `field/*` 分支上打的。
+- **每次部署都会打印所用的准入版本** `ADMISSION_POLICY_VERSION=<n>`：把它记进部署记录，回滚时要用到「装过的最高版本」。
+
+所以部署某个包的正确做法是：先在 control-server 仓为那个提交建一个干净的 detached worktree，再把它传给
+`-ControlServerRepository`；包用那个提交打的 release（不带 `-RunId` 时 19 会自己按提交找到它）。
 
 ---
 
@@ -621,8 +646,21 @@ v2 实例。
 
 ```bash
 pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.ps1 `
-  -ControlServerRepository <干净 checkout> -Rollback
+  -ControlServerRepository <干净 checkout> -Rollback -AdmissionPolicyVersionOverride <装过的最高版本 + 1>
 ```
+
+**回滚必须显式给准入版本（control-server#552）。**回滚换回的是服务器上的上一代包，覆盖层却按控制端这一次传的
+定义重写，所以第 1 节的「包与克隆同一提交」对回滚不适用，也不检查（克隆干净、定义来自克隆这两条照样检查）。而库里
+绑过的准入版本只能往上走：用和库里相同的版本，内容不同判漂移；用更低的版本，判倒退；两种都让新需求停止受理
+（control-server `scripts/parallel/README.md`「回滚」一节，control-server#545 实测）。因此：
+
+- 不带 `-AdmissionPolicyVersionOverride` 的 `-Rollback` 直接拒绝（`ADMISSION_POLICY_VERSION_OVERRIDE_REQUIRED`），
+  拒绝信息里写着该填多少：**这个实例装过的最高版本 + 1**，以库里 `AdmissionPolicyState.Version` 为准、部署记录作对照，
+  第一次从 3 回滚就是 4。控制端看不到库，也判断不了上一代包的种子是否与当前定义相同，所以不设「版本没变可以不给」的例外。
+- 覆盖值必须高于定义里自己的版本，否则拒绝（`ADMISSION_POLICY_VERSION_OVERRIDE_NOT_ABOVE_DEFINITION`）。
+- 19 只改发往服务器的那份定义副本（放在本机临时目录，用完删掉），克隆里的文件不动；改完重新解析，核对除这个版本外
+  一个字段都没变。输出里有 `ADMISSION_POLICY_VERSION_OVERRIDE=<n> definition=<原值> reason=...`，把 `<n>` 记进部署记录。
+- 回滚之后再装批次 10 及之后的包，要**再高一个**（上例是 5）：首装与升级也接受同一个参数，同提交检查照做。
 
 形状与 MVP 那套相同：上一代原样留在 `D:\zhengyushao\ControlServer.V2.previous`，回滚是把两个
 目录**对调**（不是复制），所以「回滚一次回滚」就是再跑一遍同一条命令。回滚之后会**重新叠加一次
