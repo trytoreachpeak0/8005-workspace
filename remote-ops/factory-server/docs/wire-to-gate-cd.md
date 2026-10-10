@@ -31,8 +31,9 @@ gh workflow run release.yml --repo trytoreachpeak0/8005-agv-control-server \
 ```
 
 ```bash
-# 二、部署服务端（控制端）
-pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1
+# 二、部署服务端（控制端）。-RunId 必填；先 gh run view <id> 核实分支
+gh run view <id> --repo trytoreachpeak0/8005-agv-control-server --json headBranch,headSha,workflowName
+pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -RunId <id>
 ```
 
 ```bash
@@ -199,31 +200,43 @@ gh workflow run release.yml --repo trytoreachpeak0/8005-agv-control-server \
 （run `34356760424`）。那次恰好在组装步骤失败、没有产出 artifact，但**它本可以静默成功**：
 拿到的会是一个 commit 完全不对、而哈希与流程一切正常的包。
 
+**MVP 线出包只走 `ControlServer_MVP` 或 agv01 现场线 `field/agv01-*`**，车载端提交用
+`onboard_commit` 输入指定；不要为换车载端另开 `deploy/*` 之类的分支出包。`15` 只接受这两种
+分支的 run（`8005-workspace#10`）：`release.yml` 也在 v2 线（`fp/v2-impl`、`field/cs*`）上跑，
+全仓最新的一次常常是 v2 的包，装进 MVP 生产就是停线。所以 `-RunId` 必填，脚本不再替你挑
+「最近一次成功」的 run。
+
 ```bash
-# 3. 先干跑一次，看它打算做什么
-pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -WhatIf
+# 3. 找到这次出包的 run，先 gh run view <id> 核实分支是 ControlServer_MVP 或 field/agv01-*
+gh run list --repo trytoreachpeak0/8005-agv-control-server --workflow release.yml --branch ControlServer_MVP --limit 5
+gh run view <id> --repo trytoreachpeak0/8005-agv-control-server --json headBranch,headSha,workflowName
 ```
 
 ```bash
-# 4. 部署服务端
-pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1
+# 4. 先干跑一次，看它打算做什么
+pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -RunId <id> -WhatIf
+```
+
+```bash
+# 5. 部署服务端
+pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -RunId <id>
 ```
 
 服务端跑完会打印两个端点和车载端该用的 commit。**先服务端后车载端**：车载端落地时会从车上
 探一次投影端点，服务端不在就只能拿到一条 `UNREACHABLE` 告警。
 
 ```bash
-# 5. 车载端也先干跑，它会把渲染好的配置整份打出来
+# 6. 车载端也先干跑，它会把渲染好的配置整份打出来
 pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
 ```
 
 ```bash
-# 6. 部署车载端
+# 7. 部署车载端
 pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1
 ```
 
 ```bash
-# 7. 人到车前，确认车的状态，然后启动
+# 8. 人到车前，确认车的状态，然后启动
 ssh agv01 "Start-Process 'C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe'"   # ← 不要这样做
 ```
 
