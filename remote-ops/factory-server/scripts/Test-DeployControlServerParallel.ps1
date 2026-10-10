@@ -268,6 +268,17 @@ try {
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains($other)) `
         -Name 'install with an override and a package from another commit: still refused' -Detail (Get-Detail $run)
 
+    # 5c. A refusal after the derived copy exists but before the install's try (here: the secret
+    # store lacks a key) still removes the copy, and the refusal reaches the caller unchanged.
+    $thinSecrets = Join-Path $work 'secrets-thin.xml'
+    @{ RiotCallApiKey = (& $fake 'k') } | Export-Clixml -LiteralPath $thinSecrets
+    $before = @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'control-server-v2-definition-*' | ForEach-Object FullName)
+    $thin = $common.Clone(); $thin['SecretPath'] = $thinSecrets
+    $run = Invoke-Deploy ($thin + @{ PackagePath = $samePackage; AdmissionPolicyVersionOverride = $override })
+    $left = @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'control-server-v2-definition-*' | ForEach-Object FullName | Where-Object { $before -notcontains $_ })
+    Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains("'OnboardCredential' is missing") -and $left.Count -eq 0) `
+        -Name 'refused after the derived definition was written: the copy is removed, the refusal unchanged' -Detail ("left: $($left -join ', ')`n        " + (Get-Detail $run))
+
     # 6. Manifest.
     $run = Invoke-Deploy ($common + @{ PackagePath = $noManifestPackage })
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('release-manifest.json')) `

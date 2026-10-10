@@ -140,6 +140,15 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
+# The local copy of the definition made for -AdmissionPolicyVersionOverride. Removed by the rollback
+# and install finally blocks; the trap covers a refusal between its creation and those blocks, and
+# rethrows the same error ('break').
+$definitionStage = $null
+trap {
+    if ($definitionStage) { Remove-Item -LiteralPath $definitionStage -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false }
+    break
+}
+
 $toPosix = { param($p) $p.Replace('\', '/') }
 
 function Write-Step {
@@ -301,7 +310,6 @@ Import-Module (Join-Path $parallelScripts 'ParallelInstance.psm1') -Force
 $definition = Read-ParallelInstanceDefinition -Path $InstanceDefinitionPath
 # The definition is asserted further down; until then journeyRuntime may be missing or malformed.
 $getDefinedVersion = { $j = $definition['journeyRuntime']; ($j -is [System.Collections.IDictionary]) ? $j['admissionPolicyVersion'] : $null }
-$definitionStage = $null
 if ($PSBoundParameters.ContainsKey('AdmissionPolicyVersionOverride')) {
     $definedVersion = & $getDefinedVersion
     if ($null -ne $definedVersion -and $AdmissionPolicyVersionOverride -le [long] $definedVersion) {
