@@ -245,25 +245,44 @@ if (-not `$console) { throw 'No active console session on this vehicle.' }
 `$arguments = '-NoProfile -ExecutionPolicy Bypass -File "$vehicleRoot\agv-enter-sublot-uia.ps1" -Sublot "$Sublot" -ResultPath "$resultPath"'
 `$action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument `$arguments -WorkingDirectory '$vehicleRoot'
 `$principal = New-ScheduledTaskPrincipal -UserId `$console[0].Groups[1].Value -LogonType Interactive -RunLevel Limited
+`$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5))
 try {
-    Register-ScheduledTask -TaskName 'W2G-EnterSublot-$runId' -Action `$action -Principal `$principal -Force | Out-Null
+    Register-ScheduledTask -TaskName 'W2G-EnterSublot-$runId' -Action `$action -Principal `$principal -Settings `$settings -Force | Out-Null
     Start-ScheduledTask -TaskName 'W2G-EnterSublot-$runId'
-} finally {
     Start-Sleep -Seconds 3
+    `$info = Get-ScheduledTaskInfo -TaskName 'W2G-EnterSublot-$runId'
+    'TASK_STARTED lastRunTime={0} lastTaskResult=0x{1:X}' -f `$info.LastRunTime, `$info.LastTaskResult
+} finally {
     Unregister-ScheduledTask -TaskName 'W2G-EnterSublot-$runId' -Confirm:`$false -ErrorAction SilentlyContinue
 }
 "@
-$launch | ssh $SshAlias 'pwsh -NoProfile -Command -'
+# Copied and run with -File, never piped to `pwsh -Command -`: that mode reads statement by statement and
+# silently drops a trailing multi-line block (this try/finally) at end of input. On 2026-10-10 the task was
+# never registered that way, exit code 0, and the station deadline ran out (control-server#566 B 段).
+$launchLocal = Join-Path ([System.IO.Path]::GetTempPath()) "enter-sublot-launch-$runId.ps1"
+Set-Content -LiteralPath $launchLocal -Value $launch -Encoding utf8NoBOM
+try {
+    scp -q $launchLocal "${SshAlias}:$($vehicleRoot -replace '\\', '/')/launch-$runId.ps1"
+    if ($LASTEXITCODE -ne 0) { throw "Copying the launch script to $SshAlias failed." }
+} finally {
+    Remove-Item -LiteralPath $launchLocal -ErrorAction SilentlyContinue
+}
+ssh $SshAlias "pwsh -NoProfile -File `"$vehicleRoot\launch-$runId.ps1`""
 if ($LASTEXITCODE -ne 0) { throw "Launching the entry task on $SshAlias failed (exit $LASTEXITCODE)." }
 
 # 3. The result.
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
 do {
     Start-Sleep -Seconds 2
-    $raw = ssh $SshAlias "pwsh -NoProfile -Command `"if (Test-Path '$resultPath') { Get-Content -Raw '$resultPath' }`""
-} until ($raw -or [DateTimeOffset]::UtcNow -ge $deadline)
-if (-not $raw) { throw "No result from $SshAlias within ${TimeoutSeconds}s ($resultPath). Nothing is known about the entry; check the screen." }
-$result = ($raw -join "`n") | ConvertFrom-Json -AsHashtable
+    $present = ssh $SshAlias "pwsh -NoProfile -Command `"Test-Path '$resultPath'`""
+} until (($present -join '') -match 'True' -or [DateTimeOffset]::UtcNow -ge $deadline)
+if (($present -join '') -notmatch 'True') { throw "No result from $SshAlias within ${TimeoutSeconds}s ($resultPath). Nothing is known about the entry; check the screen." }
+# Fetched by scp, not printed through ssh: the console code page garbles non-ASCII text on the way back.
+$resultLocal = Join-Path ([System.IO.Path]::GetTempPath()) "enter-sublot-result-$runId.json"
+scp -q "${SshAlias}:$($resultPath -replace '\\', '/')" $resultLocal
+if ($LASTEXITCODE -ne 0) { throw "Copying the result back from $SshAlias failed ($resultPath)." }
+$result = Get-Content -LiteralPath $resultLocal -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
+Remove-Item -LiteralPath $resultLocal -ErrorAction SilentlyContinue
 $result.request = [ordered]@{ messageId = $checked.MessageId; stationId = $checked.StationId; expectedSublots = $checked.ExpectedSublots }
 $json = $result | ConvertTo-Json -Depth 5
 if ($EvidencePath) { $json | Set-Content -LiteralPath $EvidencePath -Encoding utf8NoBOM }

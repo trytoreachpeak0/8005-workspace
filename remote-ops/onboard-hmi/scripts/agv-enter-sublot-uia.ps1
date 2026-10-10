@@ -191,4 +191,4 @@ try {
     $result.error = $_.Exception.Message
 }
 $result.finishedAt = [DateTimeOffset]::Now.ToString('o')
-$result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding utf8NoBOM
+$result | ConvertTo-Json -Depth 4 -EscapeHandling EscapeNonAscii | Set-Content -LiteralPath $ResultPath -Encoding utf8NoBOM
