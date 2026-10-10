@@ -29,8 +29,22 @@
     will leave RecoveryRequired.
 
 .PARAMETER RunId
-    GitHub Actions run to deploy. Omit to take the most recent successful
-    `release` run.
+    GitHub Actions `release` run to deploy. Required unless -PackagePath or
+    -Rollback is given (8005-workspace#10). There is deliberately no "most
+    recent successful run" default: release.yml also runs on the v2 line
+    (fp/v2-impl, field/cs*), and the newest run in the repository is usually a
+    v2 package -- deploying one here stops the production MVP line, because the
+    two ends do not negotiate versions.
+
+    Before anything is downloaded the run is read back and refused unless it
+    is a successful run of .github/workflows/release.yml on an MVP branch:
+    ControlServer_MVP, or the agv01 field line field/agv01-* (cut from
+    ControlServer_MVP; see $MvpBranchPatterns). After the download the
+    release-manifest.json inside the zip must name the run's head commit as
+    the ControlServer commit.
+
+    List candidate runs with:
+        gh run list --repo trytoreachpeak0/8005-agv-control-server --workflow release.yml --branch ControlServer_MVP
 
 .PARAMETER PackagePath
     Deploy a zip already on disk instead of downloading one. The matching
@@ -50,7 +64,7 @@
     touching the server.
 
 .EXAMPLE
-    ./15-deploy-control-server.ps1
+    ./15-deploy-control-server.ps1 -RunId 12345678 -WhatIf
 
 .EXAMPLE
     ./15-deploy-control-server.ps1 -RunId 12345678
@@ -128,6 +142,59 @@ function Invoke-RemoteScript {
     Invoke-Ssh @("pwsh -NoProfile -File `"$remote`" $($quoted -join ' ')")
 }
 
+# Branches whose release runs may reach the production MVP service (8005-workspace#10). Read
+# from the release history on 2026-10-10: production runs ControlServer_MVP and, since
+# 2026-09-15, the agv01 field line field/agv01-670bdd45 (ControlServer_MVP at 670bdd45 plus
+# field fixes; its last release is run 35672994834). Every other branch release.yml runs on is
+# refused -- fp/v2-impl and field/cs* carry the v2 line and a newer protocol, and the newest run
+# in the repository is usually one of those. Note field/agv01-* and field/cs* share a prefix:
+# never widen this to field/*.
+$MvpBranchPatterns = @('^ControlServer_MVP$', '^field/agv01-[0-9A-Za-z._-]+$')
+$ReleaseWorkflowPath = '.github/workflows/release.yml'
+
+# Reads the run back from GitHub and throws unless it is a successful release.yml run on an MVP
+# branch. Uses the REST run object rather than `gh run view --json workflowName`: workflowName is
+# the workflow's display name ("release"), not its file, so only `path` can tell release.yml apart
+# from another workflow that happens to share the name.
+function Assert-DeployableReleaseRun {
+    param([string] $Id)
+    $json = & gh api "repos/$Repository/actions/runs/$Id"
+    if ($LASTEXITCODE -ne 0 -or -not $json) { throw "Cannot read run $Id in $Repository (gh api exit $LASTEXITCODE)." }
+    $run = $json | ConvertFrom-Json
+    $identity = "run $Id (branch '$($run.head_branch)', commit $($run.head_sha), workflow $($run.path))"
+    if ($run.path -cne $ReleaseWorkflowPath) {
+        throw "Refusing $identity`: not a $ReleaseWorkflowPath run."
+    }
+    if ($run.conclusion -cne 'success') {
+        throw "Refusing $identity`: conclusion is '$($run.conclusion)', not 'success'."
+    }
+    if (-not @($MvpBranchPatterns | Where-Object { $run.head_branch -cmatch $_ })) {
+        throw ("Refusing $identity`: not an MVP branch. This script deploys the production MVP service; " +
+            "only branches matching $($MvpBranchPatterns -join ' or ') are accepted. " +
+            'The v2 parallel instance is deployed with 19-deploy-control-server-parallel.ps1.')
+    }
+    if ($run.head_sha -notmatch '^[0-9a-f]{40}$') { throw "Refusing $identity`: head commit is not a full SHA." }
+    return $run
+}
+
+# The manifest inside the zip, not the copy beside it: the zip is what gets installed, and its
+# hash was just checked against the .sha256 file.
+function Assert-PackageFromCommit {
+    param([string] $Zip, [string] $Commit, [string] $Id)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($Zip)
+    try {
+        $entry = $archive.GetEntry('release-manifest.json')
+        if ($null -eq $entry) { throw "Refusing run $Id`: the package has no release-manifest.json." }
+        $reader = [System.IO.StreamReader]::new($entry.Open())
+        try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+    } finally { $archive.Dispose() }
+    $packaged = "$($manifest.components.controlServer.commit)"
+    if ($packaged -ne $Commit) {
+        throw "Refusing run $Id`: the package's release-manifest.json names ControlServer commit '$packaged', but the run built $Commit."
+    }
+}
+
 Write-Step "ControlServer deployment to $SshAlias"
 
 # ------------------------------------------------------------------ rollback ---
@@ -142,6 +209,19 @@ if ($Rollback) {
     Write-Step 'The onboard half was NOT rolled back. The two ends do not negotiate'
     Write-Step 'versions -- roll the vehicles back too, or they will simply stop connecting.'
     return
+}
+
+# ------------------------------------------------------------ release run ---
+
+# Before anything is downloaded or loaded, and outside every ShouldProcess: -WhatIf refuses the
+# same runs a real deployment does.
+if ($PSCmdlet.ParameterSetName -eq 'Download') {
+    if (-not $RunId) {
+        throw ("-RunId is required (8005-workspace#10): the newest release run is usually a v2 package. " +
+            "List MVP runs with: gh run list --repo $Repository --workflow release.yml --branch ControlServer_MVP")
+    }
+    $releaseRun = Assert-DeployableReleaseRun -Id $RunId
+    Write-Step "Run $RunId is a release of $($releaseRun.head_branch) at $($releaseRun.head_sha)"
 }
 
 # ------------------------------------------------------------------- secrets ---
@@ -178,14 +258,6 @@ try {
         $zip = (Resolve-Path -LiteralPath $PackagePath).Path
         Write-Step "Using local package $zip"
     } else {
-        if (-not $RunId) {
-            Write-Step "Finding the most recent successful release run in $Repository"
-            $RunId = & gh run list --repo $Repository --workflow release.yml `
-                --status success --limit 1 --json databaseId --jq '.[0].databaseId'
-            if ($LASTEXITCODE -ne 0 -or -not $RunId) {
-                throw "No successful release run found in $Repository. Trigger one: gh workflow run release.yml --repo $Repository -f onboard_commit=<sha>"
-            }
-        }
         Write-Step "Downloading artifact from run $RunId"
         & gh run download $RunId --repo $Repository --dir $localStage
         if ($LASTEXITCODE -ne 0) { throw "gh run download failed (exit $LASTEXITCODE)" }
@@ -209,6 +281,11 @@ try {
         throw "Package hash mismatch on the control host. Expected $expected, got $actual."
     }
     Write-Step "Package hash verified ($actual)"
+
+    if ($PSCmdlet.ParameterSetName -eq 'Download') {
+        Assert-PackageFromCommit -Zip $zip -Commit $releaseRun.head_sha -Id $RunId
+        Write-Step "Package manifest names the run's commit $($releaseRun.head_sha)"
+    }
 
     # The release identity travels beside the zip too. Printing the onboard
     # commit here is the only place an operator sees, before the deployment,
