@@ -34,6 +34,7 @@
       PARTIAL [7]                ran, but an image or the UIA tree is missing (see errors in the JSON)
       FOCUS_DISTURBED [8]        the capture itself held the foreground; a defect of this tool
       WSH_DISABLED [9]           Windows Script Host is disabled; nothing was launched
+      DESKTOP_BUSY [10]          another interactive tool (16-enter-sublot-uia) is running; nothing was launched
       tool failure [1]           SSH, scp or the launch failed
 
 .EXAMPLE
@@ -59,7 +60,7 @@ $taskPrefix = 'W2G-CaptureHmi-'
 
 $exitCodes = [ordered]@{
     CAPTURED = 0; HMI_NOT_RUNNING = 2; DESKTOP_LOCKED = 3; SCREEN_BLANK = 4; NO_INTERACTIVE_SESSION = 5
-    TIMEOUT = 6; PARTIAL = 7; FOCUS_DISTURBED = 8; WSH_DISABLED = 9; TOOL_FAILURE = 1
+    TIMEOUT = 6; PARTIAL = 7; FOCUS_DISTURBED = 8; WSH_DISABLED = 9; DESKTOP_BUSY = 10; TOOL_FAILURE = 1
 }
 
 <#
@@ -71,6 +72,8 @@ function Get-CaptureOutcome {
     param([object] $Preflight, [object] $Vehicle, [bool] $TimedOut)
     if (-not $Preflight.consoleSessionId) { return 'NO_INTERACTIVE_SESSION' }
     if ($Preflight.wshDisabled) { return 'WSH_DISABLED' }
+    # Filtered, not @(...).Count: @($null) has one element, so a missing field would read as busy.
+    if (@($Preflight.otherDesktopTools | Where-Object { $_ }).Count) { return 'DESKTOP_BUSY' }
     if ($TimedOut -or -not $Vehicle) { return 'TIMEOUT' }
     if ($Vehicle.focusDisturbed) { return 'FOCUS_DISTURBED' }
     if ($Vehicle.desktop.locked) { return 'DESKTOP_LOCKED' }
@@ -105,6 +108,9 @@ if (`$user) {
     hmiPids          = @(Get-Process -Name '$ProcessName' -ErrorAction SilentlyContinue | Where-Object SessionId -eq `$sid | ForEach-Object { `$_.Id })
     wshDisabled      = [bool] @(`$wsh | Where-Object { `$null -ne `$_ -and "`$_" -eq '0' }).Count
     leftoverTasks    = @(Get-ScheduledTask -TaskName '$taskPrefix*' -ErrorAction SilentlyContinue | ForEach-Object { `$_.TaskName })
+    # The sublot entry tool drives the same desktop; two interactive tools at once is not allowed (Coordinator 10, 2026-10-11).
+    otherDesktopTools = @(@(Get-ScheduledTask -TaskName 'W2G-EnterSublot-*' -ErrorAction SilentlyContinue | ForEach-Object { 'task ' + `$_.TaskName }) +
+        @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'pwsh.exe'" | Where-Object { `$_.CommandLine -like '*agv-enter-sublot-uia*' -and `$_.ProcessId -ne `$PID } | ForEach-Object { 'process ' + `$_.ProcessId }))
     vehicleClock     = [DateTimeOffset]::Now.ToString('o')
 } | ConvertTo-Json -Compress
 "@
@@ -262,6 +268,7 @@ function Invoke-SelfTest {
             @{ Name = 'everything present is CAPTURED'; Pre = $pre; V = (Vehicle @{}); T = $false; Expect = 'CAPTURED' },
             @{ Name = 'no console session is NO_INTERACTIVE_SESSION'; Pre = [pscustomobject]@{ consoleSessionId = $null }; V = $null; T = $false; Expect = 'NO_INTERACTIVE_SESSION' },
             @{ Name = 'disabled script host is WSH_DISABLED'; Pre = [pscustomobject]@{ consoleSessionId = 1; wshDisabled = $true }; V = $null; T = $false; Expect = 'WSH_DISABLED' },
+            @{ Name = 'a running sublot entry is DESKTOP_BUSY'; Pre = [pscustomobject]@{ consoleSessionId = 1; wshDisabled = $false; otherDesktopTools = @('task W2G-EnterSublot-ab12') }; V = $null; T = $false; Expect = 'DESKTOP_BUSY' },
             @{ Name = 'no result is TIMEOUT'; Pre = $pre; V = $null; T = $true; Expect = 'TIMEOUT' },
             @{ Name = 'a focus disturbance outranks a lock'; Pre = $pre; V = (Vehicle @{ focusDisturbed = $true; desktop = @{ locked = $true } }); T = $false; Expect = 'FOCUS_DISTURBED' },
             @{ Name = 'a lock is DESKTOP_LOCKED even with UIA text'; Pre = $pre; V = (Vehicle @{ desktop = @{ locked = $true } }); T = $false; Expect = 'DESKTOP_LOCKED' },
@@ -312,16 +319,19 @@ $run = [ordered]@{
 $vehicle = $null
 $timedOut = $false
 $launched = $false
+$runDirectoryCreated = $false
 
 try {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Capturing the onboard HMI screen on $SshAlias ($name)" -ForegroundColor Green
     $run.preflight = Invoke-Vehicle (New-PreflightScript) | ConvertFrom-Json
     $p = $run.preflight
     Write-Host "  console: $($p.consoleUser ?? '(none)') session $($p.consoleSessionId ?? '-'); locked: $($p.logonUi); onboard client pid(s): $(if ($p.hmiPids) { $p.hmiPids -join ', ' } else { '(none)' })"
+    if (@($p.otherDesktopTools | Where-Object { $_ }).Count) { Write-Host "  another interactive tool is on the desktop, not launching: $($p.otherDesktopTools -join ', ')" -ForegroundColor Yellow }
     if (@($p.leftoverTasks).Count) { Write-Host "  note: capture task(s) left by an earlier run: $($p.leftoverTasks -join ', ')" -ForegroundColor Yellow }
 
-    if ($p.consoleSessionId -and -not $p.wshDisabled) {
+    if ($p.consoleSessionId -and -not $p.wshDisabled -and -not @($p.otherDesktopTools | Where-Object { $_ }).Count) {
         $null = Invoke-Vehicle "New-Item -ItemType Directory -Force -Path '$runDirectory' | Out-Null"
+        $runDirectoryCreated = $true
         $staging = Join-Path ([System.IO.Path]::GetTempPath()) "capture-hmi-$runId"
         New-Item -ItemType Directory -Force -Path $staging | Out-Null
         try {
@@ -369,7 +379,7 @@ try {
 } catch {
     $run.error = $_.Exception.Message
 } finally {
-    if ($run.preflight -and $run.preflight.consoleSessionId -and -not $run.preflight.wshDisabled) {
+    if ($runDirectoryCreated) {
         # The run directory goes whatever happened; on a timeout the hidden pwsh may still hold a file, which
         # is reported rather than retried.
         try {

@@ -498,6 +498,7 @@ agv01 的放行记录是 [8005-agv-program#44 的这条留言](https://github.co
 只读取一次车载端屏：全屏截图、每个车载端窗口单独的图、UI Automation 控件树与可见文字（JSON）。
 **只接受 `agv02`／`agv03`**，`agv01` 在参数校验时就被拒绝。不点、不输入、不改焦点、不起停任何
 进程，所以不需要逐次授权；但它要进 `HT` 的桌面会话，现场票作业中途用之前先跟调度打招呼。
+条码自动录入（`16`）在跑时它拒绝启动（`DESKTOP_BUSY`），两个交互工具不同时进桌面。
 
 ```bash
 pwsh -File remote-ops/onboard-hmi/scripts/17-capture-hmi-screen.ps1 -SshAlias agv02 -EvidenceDirectory evidence/field/<目录>
