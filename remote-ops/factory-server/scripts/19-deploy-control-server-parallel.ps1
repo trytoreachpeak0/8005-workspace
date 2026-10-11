@@ -345,7 +345,7 @@ function Get-InstalledAdmissionPolicyVersion {
         "if (-not (Test-Path -LiteralPath `$p -PathType Leaf)) { 'INSTALLED_DEFINITION=ABSENT'; exit 0 }"
         "try { `$v = (Get-Content -Raw -LiteralPath `$p | ConvertFrom-Json -AsHashtable)['journeyRuntime']['admissionPolicyVersion']; 'INSTALLED_DEFINITION=PRESENT version=' + `$v }"
         "catch { 'INSTALLED_DEFINITION=UNREADABLE ' + `$_.Exception.Message }"
-    ) -join '; '
+    ) -join "`n"   # not '; ': "try { } ; catch { }" does not parse, and the version check then refused every deploy
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
     $output = @(& ssh $SshAlias 'pwsh' '-NoProfile' '-EncodedCommand' $encoded 2>&1 | ForEach-Object { "$_".Trim() })
     $exit = $LASTEXITCODE
