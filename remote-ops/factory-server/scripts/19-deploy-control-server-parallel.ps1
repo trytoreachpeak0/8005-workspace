@@ -711,6 +711,33 @@ if ($productionSource -and -not $plain.ContainsKey('MesIngestSharedSecret')) {
 Write-Step ("Secrets loaded from the DPAPI store (V2FaultRecoveryCredential {0})" -f
     ($plain.ContainsKey('V2FaultRecoveryCredential') ? 'present, will be sent' : 'absent; the Host recovery entry is off'))
 
+# control-server#600. A roster definition makes the v2 server answer each vehicle's vehicle-safety projection only to that
+# vehicle's own credential, and refuse to start without one per roster row. They are generated on this machine
+# (Set-ControlServerSecret.ps1 -NewVehicleSafetyCredential) and filed under OnboardSafetyCredential:<vehicleKey>. Refused
+# here, before anything is downloaded, when a row has none; the server-side installer checks again (and also refuses two
+# rows with one value, or one equal to the shared onboard credential). A single-car definition sends none.
+$journeyDefinition = $definition['journeyRuntime']
+$fleetRows = $journeyDefinition.Contains('fleet') ? @($journeyDefinition['fleet']) : @()
+$safetyCredentials = [ordered]@{}
+$missingSafety = @()
+foreach ($row in $fleetRows) {
+    $vehicleKey = [string] $row['vehicleKey']
+    $storeKey = 'OnboardSafetyCredential:' + $vehicleKey
+    if ($secrets.ContainsKey($storeKey) -and $secrets[$storeKey]) {
+        $safetyCredentials[$vehicleKey] = [System.Net.NetworkCredential]::new('', $secrets[$storeKey]).Password
+    } else {
+        $missingSafety += "$vehicleKey (riotId $($row['riotId']))"
+    }
+}
+if ($missingSafety.Count -gt 0) {
+    throw ("The definition's roster needs one vehicle-safety projection credential per vehicle (control-server#600), and " +
+        "$SecretPath has none for: $($missingSafety -join ', '). Run control-server\Set-ControlServerSecret.ps1 " +
+        '-NewVehicleSafetyCredential <alias> for each, then deploy again; each vehicle''s onboard half needs redeploying ' +
+        'with 06-deploy-onboard-hmi.ps1 afterwards. Nothing was downloaded or copied.')
+}
+Write-Step ($fleetRows.Count -eq 0 ? 'Vehicle-safety projection: single car, shared onboard credential' :
+    "Vehicle-safety projection credentials loaded for $(@($safetyCredentials.Keys) -join ', ') (values not shown)")
+
 # ------------------------------------------------------------------- package ---
 
 # -WhatIf:$false on local staging: SupportsShouldProcess puts the whole script into WhatIf
@@ -815,6 +842,10 @@ try {
     if ($plain.ContainsKey('V2FaultRecoveryCredential')) {
         $config['faultRecoveryCredential'] = $plain['V2FaultRecoveryCredential']
     }
+    # control-server#600: vehicleKey -> value, one per roster row; the installer writes each into the service's Environment.
+    if ($safetyCredentials.Count -gt 0) {
+        $config['onboardSafetyCredentials'] = $safetyCredentials
+    }
     $configPath = Join-Path $localStage 'deploy-config.json'
     ConvertTo-Json -InputObject $config -Depth 5 |
         Set-Content -LiteralPath $configPath -Encoding utf8NoBOM -WhatIf:$false
@@ -915,10 +946,13 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     Write-Step "Package root on the server: $packageRoot"
     Write-Step 'Next: deploy the matching onboard commit to agv02/agv03 with'
     Write-Step '  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SiteAlias agv02'
+    if ($safetyCredentials.Count -gt 0) {
+        Write-Step '  Each vehicle reads its projection with its own credential now: redeploy its onboard half with 06-deploy.'
+    }
 
 } finally {
-    # deploy-config.json on the server holds the RIoT call API key, the MesIngest shared secret and,
-    # when the store has it, the v2 fault recovery credential
+    # deploy-config.json on the server holds the RIoT call API key, the MesIngest shared secret, each roster
+    # vehicle's projection credential (control-server#600) and, when the store has it, the v2 fault recovery credential
     # in plain text. The installer removes it on every way out -- once its body has started. This
     # covers the rest: parameter binding or Import-Module failing before that, an ssh session that
     # dropped, a pwsh process killed (its finally never runs), a pwsh that never started, a scp cut
@@ -947,4 +981,5 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
         Remove-Item -LiteralPath $definitionStage -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false
     }
     $plain.Clear()
+    if ($null -ne (Get-Variable -Name safetyCredentials -ValueOnly -ErrorAction SilentlyContinue)) { $safetyCredentials.Clear() }
 }
