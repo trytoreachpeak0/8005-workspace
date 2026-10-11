@@ -96,6 +96,12 @@ function Select-LatestSublotRequest {
 
 <#
     The script that registers and starts the one-shot Interactive task on the vehicle. Run there with -File.
+    The task stays Interactive in the console user's session, which is what lets UIA see the HMI window;
+    -WindowStyle Hidden only hides pwsh's own console, so no console window sits over the HMI where a
+    person can close it or where it takes the foreground. 8005-workspace#20: the first entry of
+    2026-10-11 18:03 reported 0xC000013A at the 3-second check and left no result file; that a closed
+    or interrupted console ended it is an inference, not a measurement. Hidden takes effect only once
+    pwsh has initialised, so the console still shows for a moment while it starts.
     It removes itself and any launch script an earlier run left behind, whatever happens, and its last line is
     LAUNCH_DONE: the caller treats output without that marker as a failure, so a launch that never ran can no
     longer look like a clean exit (2026-10-10: exit code 0, task never registered).
@@ -107,7 +113,7 @@ function New-LaunchScript {
 try {
     `$console = (query session 2>&1 | Select-String -Pattern '^\s*>?console\s+(\S+)\s+(\d+)\s+Active').Matches
     if (-not `$console) { throw 'No active console session on this vehicle.' }
-    `$arguments = '-NoProfile -ExecutionPolicy Bypass -File "$VehicleRoot\agv-enter-sublot-uia.ps1" -Sublot "$Sublot" -ResultPath "$ResultPath"'
+    `$arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$VehicleRoot\agv-enter-sublot-uia.ps1" -Sublot "$Sublot" -ResultPath "$ResultPath"'
     `$action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument `$arguments -WorkingDirectory '$VehicleRoot'
     `$principal = New-ScheduledTaskPrincipal -UserId `$console[0].Groups[1].Value -LogonType Interactive -RunLevel Limited
     `$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5))
@@ -129,12 +135,103 @@ try {
 
 <#
     Whether the launch output proves the task started: the end marker and a TASK_STARTED line whose
-    LastTaskResult is 0x41301 (running) or 0x0 (already finished).
+    LastTaskResult is 0x41301 (running) or any code a process that ran can end with (0x0, 0x1, 0x2,
+    0xC000013A ...). A task that already ended is not a failed launch: what happened is in the result
+    file, which the caller reads next. Refusing it here would throw that answer away (8005-workspace#20
+    review: the vehicle script now exits 1 or 2 when nothing was submitted).
+    Not started: the Task Scheduler's own status codes other than running (ready, disabled, has not
+    run, no more runs, not scheduled, queued) and HRESULTs of a failed launch (0x8004xxxx, 0x8007xxxx).
 #>
 function Test-LaunchOutput {
     param([string[]] $Output)
     $text = $Output -join "`n"
-    return ($text -match '(?m)^LAUNCH_DONE\s*$') -and ($text -match 'TASK_STARTED .*lastTaskResult=0x(41301|0)\b')
+    if ($text -notmatch '(?m)^LAUNCH_DONE\s*$') { return $false }
+    if ($text -notmatch 'TASK_STARTED .*lastTaskResult=0x([0-9A-Fa-f]{1,8})\b') { return $false }
+    $code = [uint32]::Parse($Matches[1], [System.Globalization.NumberStyles]::HexNumber)
+    if ($code -eq 0x41301) { return $true }
+    if ($code -in 0x41300, 0x41302, 0x41303, 0x41304, 0x41305, 0x41325) { return $false }
+    # Compared as text: PowerShell reads 0x80040000 as a negative Int32, so a numeric mask silently never matches.
+    if ($Matches[1].ToUpperInvariant().PadLeft(8, '0').Substring(0, 4) -in '8004', '8007') { return $false }
+    return $true
+}
+
+<#
+    What to say when no result file arrived. The vehicle script writes <result>.started as its first
+    act, so its presence tells "the script ran and died before writing a result" from "the script
+    never ran" (8005-workspace#20 review).
+#>
+function Get-NoResultMessage {
+    param([string] $SshAlias, [int] $TimeoutSeconds, [string] $ResultPath, [bool] $StartedMarkerPresent)
+    if ($StartedMarkerPresent) {
+        return "No result from $SshAlias within ${TimeoutSeconds}s ($ResultPath), but the entry script did start ($ResultPath.started is there): it ended after its first line without writing a result. Whether anything was typed is unknown; check the screen."
+    }
+    return "No result from $SshAlias within ${TimeoutSeconds}s ($ResultPath), and no $ResultPath.started either: the entry script never reached its first line. Nothing was typed by it; check the screen."
+}
+
+<#
+    Keyboard, focus, foreground, element-by-location and process-ending APIs found in a script's code
+    (comments excluded, matched as whole words in token text). The vehicle script must have none: a
+    keystroke goes to whatever window has the focus, which is how input would reach another window
+    while the HMI's scan box is not open, and element lookups by handle, point, focus or tree walk can
+    leave the HMI's window (8005-workspace#20).
+
+    Boundary, stated because the review showed it: this is a deny list, so it has misses. It does not
+    see a forbidden call reached another way -- a name built at run time, a function defined but never
+    called, code under `if ($false)`, an API not on the list, or the driver pointed at another process
+    id. Get-UiaScopeViolation narrows the UIA side; neither proves the script safe. An allow list of the
+    calls the script may make would close more of this and is left as a known residual risk.
+
+    Known false alarms, which are acceptable for a guard on one small file:
+      F1  a forbidden word inside a string, e.g. an error message mentioning SendKeys;
+      F2  a variable or function whose name is a forbidden word (`$Focus`, `function Kill`);
+      F3  in Get-UiaScopeViolation, FindFirst on anything spelled other than `$this.Window`, even if it
+          is the same window held in another variable;
+      F4  in Get-UiaScopeViolation, the process-id condition written in any other form (a different
+          variable, `using namespace` short type names, built on another line).
+#>
+function Get-InputApiViolation {
+    param([string] $Text)
+    $names = 'SendKeys', 'SendWait', 'SendInput', 'keybd_event', 'mouse_event', 'SetFocus', 'Focus', 'FocusedElement',
+        'SetForegroundWindow', 'SetActiveWindow', 'BringWindowToTop', 'SwitchToThisWindow', 'AppActivate', 'PostMessage',
+        'SendMessage', 'WScript\.Shell', 'System\.Windows\.Forms', 'user32', 'DllImport', 'MemberDefinition',
+        'FromHandle', 'FromPoint', 'TreeWalker', 'LookupById', 'CloseMainWindow', 'Stop-Process', 'Kill'
+    $pattern = '(?i)(?<![A-Za-z0-9_-])(' + ($names -join '|') + ')(?![A-Za-z0-9_-])'
+    $tokens = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref] $tokens, [ref] $null)
+    return @($tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match $pattern } | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Text)" })
+}
+
+<#
+    Where the vehicle script's UIA writes can reach. Every element search starts from the HMI's own
+    window, except the one top-level search that finds that window by process id, and the only
+    patterns used are ValuePattern (write the box, read it back) and InvokePattern (the submit button).
+#>
+function Get-UiaScopeViolation {
+    param([string] $Text)
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref] $null, [ref] $null)
+    $violations = [System.Collections.Generic.List[string]]::new()
+    $invokes = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+    foreach ($call in $invokes | Where-Object { $_.Member.Extent.Text -eq 'FindFirst' }) {
+        if ($call.Expression.Extent.Text -ne '$this.Window') { $violations.Add("FindFirst on $($call.Expression.Extent.Text)") }
+    }
+    $findAll = @($invokes | Where-Object { $_.Member.Extent.Text -eq 'FindAll' })
+    foreach ($call in $findAll) {
+        $root = $call.Expression.Extent.Text -eq '[System.Windows.Automation.AutomationElement]::RootElement'
+        $block = $call.Parent
+        while ($block -and $block -isnot [System.Management.Automation.Language.ScriptBlockAst]) { $block = $block.Parent }
+        $condition = if ($call.Arguments.Count -eq 2) { [regex]::Escape($call.Arguments[1].Extent.Text) } else { '(?!)' }
+        $byProcess = $block -and $block.Extent.Text -match "$condition\s*=\s*\[System\.Windows\.Automation\.PropertyCondition\]::new\(\s*\[System\.Windows\.Automation\.AutomationElement\]::ProcessIdProperty"
+        if (-not ($root -and $byProcess)) { $violations.Add("FindAll on $($call.Expression.Extent.Text) without a process-id condition") }
+    }
+    $patterns = @($ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.MemberExpressionAst] -and $n.Static -and $n.Member.Extent.Text -eq 'Pattern' }, $true))
+    foreach ($p in $patterns) {
+        if ($p.Expression.Extent.Text -notin '[System.Windows.Automation.ValuePattern]', '[System.Windows.Automation.InvokePattern]') {
+            $violations.Add("pattern $($p.Expression.Extent.Text)")
+        }
+    }
+    if ($patterns.Count -eq 0) { $violations.Add('no UIA pattern found: the scan did not see the driver') }
+    return @($violations)
 }
 
 function Invoke-SelfTest {
@@ -169,7 +266,12 @@ function Invoke-SelfTest {
             @{ Name = 'launch output with marker and a finished task passes'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x0', 'LAUNCH_DONE'); Expect = $true },
             @{ Name = 'empty launch output fails (the 2026-10-10 case)'; Out = @(); Expect = $false },
             @{ Name = 'launch output without the marker fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41301'); Expect = $false },
-            @{ Name = 'launch output with a failed task result fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x80070002', 'LAUNCH_DONE'); Expect = $false })) {
+            @{ Name = 'launch output with a failed task result fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x80070002', 'LAUNCH_DONE'); Expect = $false },
+            @{ Name = 'a task already ended with 0x1 counts as started (the result file decides)'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x1', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'a task already ended with 0x2 counts as started (the result file decides)'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x2', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'a task already ended with 0xC000013A counts as started (the 2026-10-11 case)'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0xC000013A', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'a task that has not run yet (0x41303) fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41303', 'LAUNCH_DONE'); Expect = $false },
+            @{ Name = 'a scheduler error (0x8004131F) fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x8004131F', 'LAUNCH_DONE'); Expect = $false })) {
         Check $case.Name {
             $got = Test-LaunchOutput $case.Out
             if ($got -ne $case.Expect) { throw "got $got" }
@@ -181,6 +283,53 @@ function Invoke-SelfTest {
             $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref] $null, [ref] $errors)
             if ($errors.Count -ne 0) { throw "$path : $($errors[0].Message)" }
         }
+    }
+
+    $vehicleText = [System.IO.File]::ReadAllText($vehicleScript)
+    Check 'the vehicle script sends no keyboard input and takes no focus' {
+        $found = Get-InputApiViolation $vehicleText
+        if ($found.Count -ne 0) { throw "found: $($found -join '; ')" }
+    }
+    Check 'the keyboard scan sees a keystroke API when there is one, and ignores comments' {
+        # Positive control: a scan that never finds anything would pass the check above forever.
+        $bad = "# SendKeys in a comment is fine`n`$box.SetFocus()`n[System.Windows.Forms.SendKeys]::SendWait('x')"
+        $found = Get-InputApiViolation $bad
+        if ($found -match '^line 1:' -or -not ($found -match '^line 2:') -or -not ($found -match '^line 3:')) { throw "found: $($found -join '; ')" }
+    }
+    foreach ($snippet in @('$box.Focus()', '[System.Windows.Automation.AutomationElement]::FocusedElement',
+            '[System.Windows.Automation.AutomationElement]::FromHandle($h)', '[System.Windows.Automation.AutomationElement]::FromPoint($p)',
+            '[System.Windows.Automation.TreeWalker]::ControlViewWalker', '$box.LookupById(1)', '$p.CloseMainWindow()',
+            'Stop-Process -Id 1', '$p.Kill()')) {
+        Check "the keyboard scan sees $snippet" {
+            if ((Get-InputApiViolation $snippet).Count -eq 0) { throw 'not found' }
+        }
+    }
+    Check 'the keyboard scan matches whole words only' {
+        $found = Get-InputApiViolation '$killSwitch = $focusedRow; $s.Skill()'
+        if ($found.Count -ne 0) { throw "found: $($found -join '; ')" }
+    }
+    Check 'every UIA write in the vehicle script is scoped to the HMI window' {
+        $found = Get-UiaScopeViolation $vehicleText
+        if ($found.Count -ne 0) { throw "found: $($found -join '; ')" }
+    }
+    Check 'the UIA scope scan sees a search from the desktop root and a foreign pattern' {
+        $bad = $vehicleText.Replace('$this.Window.FindFirst(', '[System.Windows.Automation.AutomationElement]::RootElement.FindFirst(').
+            Replace('[System.Windows.Automation.InvokePattern]::Pattern', '[System.Windows.Automation.WindowPattern]::Pattern')
+        $found = Get-UiaScopeViolation $bad
+        if (-not ($found -match 'FindFirst on') -or -not ($found -match 'WindowPattern')) { throw "found: $($found -join '; ')" }
+    }
+    Check 'the launch task stays Interactive in the console session and starts pwsh hidden' {
+        if ($launchText -notmatch '-LogonType Interactive') { throw 'the task is no longer Interactive' }
+        if ($launchText -notmatch "'-NoProfile -NonInteractive -WindowStyle Hidden [^']*-File ") { throw 'pwsh is not started with -WindowStyle Hidden before -File' }
+    }
+
+    Check 'no result with a started marker says the script ran and died, not that nothing was typed' {
+        $m = Get-NoResultMessage 'agv02' 120 'C:\8005\uia\result-x.json' $true
+        if ($m -notmatch 'did start' -or $m -match 'Nothing was typed') { throw $m }
+    }
+    Check 'no result and no started marker says the script never ran' {
+        $m = Get-NoResultMessage 'agv02' 120 'C:\8005\uia\result-x.json' $false
+        if ($m -notmatch 'never reached its first line') { throw $m }
     }
 
     $now = [DateTimeOffset]::Parse('2026-10-10T12:00:00Z')
@@ -279,6 +428,33 @@ function Invoke-SelfTest {
         $null = Invoke-SublotEntry -Driver $d -Sublot 'S-1' -WaitSeconds 1
         if ($d.Submits -ne 1) { throw "submits=$($d.Submits)" }
     }
+    foreach ($case in @(
+            @{ Result = @{ submitted = $true; outcome = 'SUBMITTED_ONCE' }; Expect = 0 },
+            @{ Result = @{ submitted = $false; outcome = 'INPUT_NOT_OPEN' }; Expect = 2 },
+            @{ Result = @{ submitted = $false; outcome = 'READBACK_MISMATCH' }; Expect = 2 },
+            @{ Result = @{ submitted = $false; outcome = 'ERROR' }; Expect = 1 })) {
+        Check "exit code for $($case.Result.outcome) is $($case.Expect)" {
+            $got = Get-EntryExitCode $case.Result
+            if ($got -ne $case.Expect) { throw "got $got" }
+        }
+    }
+    Check 'with no HMI process the vehicle script exits 1, writes ERROR and types nothing' {
+        # The real script in a child pwsh, pointed at a process name that cannot exist on this host.
+        $resultFile = Join-Path ([System.IO.Path]::GetTempPath()) "ws20-selftest-$([guid]::NewGuid().ToString('N')).json"
+        try {
+            & pwsh -NoProfile -NonInteractive -File $vehicleScript -Sublot 'S-1' -ResultPath $resultFile -ProcessName 'ws20-no-such-hmi-process' | Out-Null
+            $code = $LASTEXITCODE
+            if ($code -ne 1) { throw "exit code $code" }
+            $r = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json -AsHashtable
+            if ($r.submitted -ne $false -or $r.outcome -ne 'ERROR' -or $r.ContainsKey('typings')) {
+                throw "submitted=$($r.submitted) outcome=$($r.outcome) typings=$($r.typings)"
+            }
+            $marker = Get-Content -LiteralPath "$resultFile.started" -Raw | ConvertFrom-Json -AsHashtable
+            if ($marker.outcome -ne 'STARTED') { throw "started marker outcome=$($marker.outcome)" }
+        } finally {
+            Remove-Item -LiteralPath $resultFile, "$resultFile.started" -ErrorAction SilentlyContinue
+        }
+    }
 
     "SELFTEST $(if ($failures.Count -eq 0) { 'PASS' } else { "FAIL ($($failures -join '; '))" })"
     if ($failures.Count -ne 0) { exit 1 }
@@ -328,7 +504,7 @@ try {
 $launchOutput = @(ssh $SshAlias "pwsh -NoProfile -File `"$vehicleRoot\launch-$runId.ps1`"" 2>&1 | ForEach-Object { "$_" })
 $launchOutput | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0 -or -not (Test-LaunchOutput $launchOutput)) {
-    throw "Launching the entry task on $SshAlias did not report LAUNCH_DONE with a started task (exit $LASTEXITCODE). Nothing was typed; enter the sublot by hand."
+    throw "Launching the entry task on $SshAlias did not report LAUNCH_DONE with a task that started (exit $LASTEXITCODE). The task never ran, so nothing was typed; enter the sublot by hand."
 }
 
 # 3. The result.
@@ -337,7 +513,10 @@ do {
     Start-Sleep -Seconds 2
     $present = ssh $SshAlias "pwsh -NoProfile -Command `"Test-Path '$resultPath'`""
 } until (($present -join '') -match 'True' -or [DateTimeOffset]::UtcNow -ge $deadline)
-if (($present -join '') -notmatch 'True') { throw "No result from $SshAlias within ${TimeoutSeconds}s ($resultPath). Nothing is known about the entry; check the screen." }
+if (($present -join '') -notmatch 'True') {
+    $started = ssh $SshAlias "pwsh -NoProfile -Command `"Test-Path '$resultPath.started'`""
+    throw (Get-NoResultMessage -SshAlias $SshAlias -TimeoutSeconds $TimeoutSeconds -ResultPath $resultPath -StartedMarkerPresent (($started -join '') -match 'True'))
+}
 # Fetched by scp, not printed through ssh: the console code page garbles non-ASCII text on the way back.
 $resultLocal = Join-Path ([System.IO.Path]::GetTempPath()) "enter-sublot-result-$runId.json"
 scp -q "${SshAlias}:$($resultPath -replace '\\', '/')" $resultLocal
@@ -348,4 +527,6 @@ $result.request = [ordered]@{ messageId = $checked.MessageId; stationId = $check
 $json = $result | ConvertTo-Json -Depth 5
 if ($EvidencePath) { $json | Set-Content -LiteralPath $EvidencePath -Encoding utf8NoBOM }
 $json
+# The result file is the verdict, not the task's exit code: the 3-second check above only proves the
+# task started, and the vehicle script's own exit code (0 / 2 / 1) never reaches this side.
 if (-not $result.submitted) { exit 2 }
