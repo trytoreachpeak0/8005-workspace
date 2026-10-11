@@ -30,7 +30,14 @@
         error of this tool, not something to force.
 
     Writes a JSON result to -ResultPath whatever happens, so the control host never has to
-    guess from silence.
+    guess from silence, and exits non-zero unless the sublot was submitted: 0 submitted,
+    2 not submitted (INPUT_NOT_OPEN, READBACK_MISMATCH), 1 error (no HMI process, no scan box).
+
+    No keyboard input, no focus, no foreground (8005-workspace#20). Every write goes through a
+    UIA pattern on an element found under the HMI process's own window, so nothing can land in
+    another window, whatever is in the foreground. When the HMI or its scan box is not there the
+    script fails without writing anything. 16-enter-sublot-uia.ps1 -SelfTest scans this file for
+    keyboard, focus and foreground APIs and fails if one appears.
 #>
 param(
     [string] $Sublot,
@@ -160,6 +167,17 @@ function Invoke-SublotEntry {
     return [pscustomobject]@{ Submitted = $false; Outcome = 'READBACK_MISMATCH'; Typings = 1 + $MaxRetypes; ReadBack = $null; Readings = @($readings) }
 }
 
+<#
+    The process exit code for a result: 0 only when the sublot was submitted, so a scheduled task
+    result of 0x0 can no longer mean "nothing was entered".
+#>
+function Get-EntryExitCode {
+    param([System.Collections.IDictionary] $Result)
+    if ($Result.submitted -eq $true) { return 0 }
+    if ($Result.outcome -eq 'ERROR') { return 1 }
+    return 2
+}
+
 # Dot-sourced by the self-test: define the functions and stop.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -192,3 +210,4 @@ try {
 }
 $result.finishedAt = [DateTimeOffset]::Now.ToString('o')
 $result | ConvertTo-Json -Depth 4 -EscapeHandling EscapeNonAscii | Set-Content -LiteralPath $ResultPath -Encoding utf8NoBOM
+exit (Get-EntryExitCode $result)

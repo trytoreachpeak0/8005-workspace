@@ -96,6 +96,11 @@ function Select-LatestSublotRequest {
 
 <#
     The script that registers and starts the one-shot Interactive task on the vehicle. Run there with -File.
+    The task stays Interactive in the console user's session, which is what lets UIA see the HMI window;
+    -WindowStyle Hidden only hides pwsh's own console, so no console window sits over the HMI where a
+    person can close it or where it takes the foreground (8005-workspace#20: the first entry of
+    2026-10-11 18:03 ended 0xC000013A before its first line ran). pwsh still shows the console for a
+    moment while it starts.
     It removes itself and any launch script an earlier run left behind, whatever happens, and its last line is
     LAUNCH_DONE: the caller treats output without that marker as a failure, so a launch that never ran can no
     longer look like a clean exit (2026-10-10: exit code 0, task never registered).
@@ -107,7 +112,7 @@ function New-LaunchScript {
 try {
     `$console = (query session 2>&1 | Select-String -Pattern '^\s*>?console\s+(\S+)\s+(\d+)\s+Active').Matches
     if (-not `$console) { throw 'No active console session on this vehicle.' }
-    `$arguments = '-NoProfile -ExecutionPolicy Bypass -File "$VehicleRoot\agv-enter-sublot-uia.ps1" -Sublot "$Sublot" -ResultPath "$ResultPath"'
+    `$arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$VehicleRoot\agv-enter-sublot-uia.ps1" -Sublot "$Sublot" -ResultPath "$ResultPath"'
     `$action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument `$arguments -WorkingDirectory '$VehicleRoot'
     `$principal = New-ScheduledTaskPrincipal -UserId `$console[0].Groups[1].Value -LogonType Interactive -RunLevel Limited
     `$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5))
@@ -135,6 +140,52 @@ function Test-LaunchOutput {
     param([string[]] $Output)
     $text = $Output -join "`n"
     return ($text -match '(?m)^LAUNCH_DONE\s*$') -and ($text -match 'TASK_STARTED .*lastTaskResult=0x(41301|0)\b')
+}
+
+<#
+    Keyboard, focus and foreground APIs found in a script's code (comments excluded). The vehicle
+    script must have none: a keystroke goes to whatever window has the focus, which is how input
+    would reach another window while the HMI's scan box is not open (8005-workspace#20).
+#>
+function Get-InputApiViolation {
+    param([string] $Text)
+    $pattern = '(?i)(SendKeys|SendWait|SendInput|keybd_event|mouse_event|SetFocus|\.Focus\b|SetForegroundWindow|SetActiveWindow|BringWindowToTop|SwitchToThisWindow|AppActivate|PostMessage|SendMessage|WScript\.Shell|System\.Windows\.Forms|user32|DllImport|MemberDefinition)'
+    $tokens = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref] $tokens, [ref] $null)
+    return @($tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match $pattern } | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Text)" })
+}
+
+<#
+    Where the vehicle script's UIA writes can reach. Every element search starts from the HMI's own
+    window, except the one top-level search that finds that window by process id, and the only
+    patterns used are ValuePattern (write the box, read it back) and InvokePattern (the submit button).
+#>
+function Get-UiaScopeViolation {
+    param([string] $Text)
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref] $null, [ref] $null)
+    $violations = [System.Collections.Generic.List[string]]::new()
+    $invokes = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+    foreach ($call in $invokes | Where-Object { $_.Member.Extent.Text -eq 'FindFirst' }) {
+        if ($call.Expression.Extent.Text -ne '$this.Window') { $violations.Add("FindFirst on $($call.Expression.Extent.Text)") }
+    }
+    $findAll = @($invokes | Where-Object { $_.Member.Extent.Text -eq 'FindAll' })
+    foreach ($call in $findAll) {
+        $root = $call.Expression.Extent.Text -eq '[System.Windows.Automation.AutomationElement]::RootElement'
+        $block = $call.Parent
+        while ($block -and $block -isnot [System.Management.Automation.Language.ScriptBlockAst]) { $block = $block.Parent }
+        $condition = if ($call.Arguments.Count -eq 2) { [regex]::Escape($call.Arguments[1].Extent.Text) } else { '(?!)' }
+        $byProcess = $block -and $block.Extent.Text -match "$condition\s*=\s*\[System\.Windows\.Automation\.PropertyCondition\]::new\(\s*\[System\.Windows\.Automation\.AutomationElement\]::ProcessIdProperty"
+        if (-not ($root -and $byProcess)) { $violations.Add("FindAll on $($call.Expression.Extent.Text) without a process-id condition") }
+    }
+    $patterns = @($ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.MemberExpressionAst] -and $n.Static -and $n.Member.Extent.Text -eq 'Pattern' }, $true))
+    foreach ($p in $patterns) {
+        if ($p.Expression.Extent.Text -notin '[System.Windows.Automation.ValuePattern]', '[System.Windows.Automation.InvokePattern]') {
+            $violations.Add("pattern $($p.Expression.Extent.Text)")
+        }
+    }
+    if ($patterns.Count -eq 0) { $violations.Add('no UIA pattern found: the scan did not see the driver') }
+    return @($violations)
 }
 
 function Invoke-SelfTest {
@@ -181,6 +232,32 @@ function Invoke-SelfTest {
             $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref] $null, [ref] $errors)
             if ($errors.Count -ne 0) { throw "$path : $($errors[0].Message)" }
         }
+    }
+
+    $vehicleText = [System.IO.File]::ReadAllText($vehicleScript)
+    Check 'the vehicle script sends no keyboard input and takes no focus' {
+        $found = Get-InputApiViolation $vehicleText
+        if ($found.Count -ne 0) { throw "found: $($found -join '; ')" }
+    }
+    Check 'the keyboard scan sees a keystroke API when there is one, and ignores comments' {
+        # Positive control: a scan that never finds anything would pass the check above forever.
+        $bad = "# SendKeys in a comment is fine`n`$box.SetFocus()`n[System.Windows.Forms.SendKeys]::SendWait('x')"
+        $found = Get-InputApiViolation $bad
+        if ($found -match '^line 1:' -or -not ($found -match '^line 2:') -or -not ($found -match '^line 3:')) { throw "found: $($found -join '; ')" }
+    }
+    Check 'every UIA write in the vehicle script is scoped to the HMI window' {
+        $found = Get-UiaScopeViolation $vehicleText
+        if ($found.Count -ne 0) { throw "found: $($found -join '; ')" }
+    }
+    Check 'the UIA scope scan sees a search from the desktop root and a foreign pattern' {
+        $bad = $vehicleText.Replace('$this.Window.FindFirst(', '[System.Windows.Automation.AutomationElement]::RootElement.FindFirst(').
+            Replace('[System.Windows.Automation.InvokePattern]::Pattern', '[System.Windows.Automation.WindowPattern]::Pattern')
+        $found = Get-UiaScopeViolation $bad
+        if (-not ($found -match 'FindFirst on') -or -not ($found -match 'WindowPattern')) { throw "found: $($found -join '; ')" }
+    }
+    Check 'the launch task stays Interactive in the console session and starts pwsh hidden' {
+        if ($launchText -notmatch '-LogonType Interactive') { throw 'the task is no longer Interactive' }
+        if ($launchText -notmatch "'-NoProfile -NonInteractive -WindowStyle Hidden [^']*-File ") { throw 'pwsh is not started with -WindowStyle Hidden before -File' }
     }
 
     $now = [DateTimeOffset]::Parse('2026-10-10T12:00:00Z')
@@ -278,6 +355,31 @@ function Invoke-SelfTest {
         $d = New-FakeDriver @('S-1', 'S-1', 'S-1', 'S-1')
         $null = Invoke-SublotEntry -Driver $d -Sublot 'S-1' -WaitSeconds 1
         if ($d.Submits -ne 1) { throw "submits=$($d.Submits)" }
+    }
+    foreach ($case in @(
+            @{ Result = @{ submitted = $true; outcome = 'SUBMITTED_ONCE' }; Expect = 0 },
+            @{ Result = @{ submitted = $false; outcome = 'INPUT_NOT_OPEN' }; Expect = 2 },
+            @{ Result = @{ submitted = $false; outcome = 'READBACK_MISMATCH' }; Expect = 2 },
+            @{ Result = @{ submitted = $false; outcome = 'ERROR' }; Expect = 1 })) {
+        Check "exit code for $($case.Result.outcome) is $($case.Expect)" {
+            $got = Get-EntryExitCode $case.Result
+            if ($got -ne $case.Expect) { throw "got $got" }
+        }
+    }
+    Check 'with no HMI process the vehicle script exits 1, writes ERROR and types nothing' {
+        # The real script in a child pwsh, pointed at a process name that cannot exist on this host.
+        $resultFile = Join-Path ([System.IO.Path]::GetTempPath()) "ws20-selftest-$([guid]::NewGuid().ToString('N')).json"
+        try {
+            & pwsh -NoProfile -NonInteractive -File $vehicleScript -Sublot 'S-1' -ResultPath $resultFile -ProcessName 'ws20-no-such-hmi-process' | Out-Null
+            $code = $LASTEXITCODE
+            if ($code -ne 1) { throw "exit code $code" }
+            $r = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json -AsHashtable
+            if ($r.submitted -ne $false -or $r.outcome -ne 'ERROR' -or $r.ContainsKey('typings')) {
+                throw "submitted=$($r.submitted) outcome=$($r.outcome) typings=$($r.typings)"
+            }
+        } finally {
+            Remove-Item -LiteralPath $resultFile -ErrorAction SilentlyContinue
+        }
     }
 
     "SELFTEST $(if ($failures.Count -eq 0) { 'PASS' } else { "FAIL ($($failures -join '; '))" })"
