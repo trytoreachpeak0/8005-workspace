@@ -510,7 +510,7 @@ pwsh -File remote-ops/onboard-hmi/scripts/17-capture-hmi-screen.ps1 -SelfTest
 `-run.json`（控制端记录：预检、结果码、清理与残留检查）。终端最后会打印可见文字的前 30 条。
 
 结果码与退出码、为什么这样做、锁屏和熄屏时能看到什么，见 [hmi-screen-capture.md](hmi-screen-capture.md)。
-两条要记住：锁屏时截不到车载端画面，只有 UIA 文字（结果码 `DESKTOP_LOCKED`）；截图入库前看一眼，
+两条要记住：锁屏时全屏图只有锁屏画面，车载端界面看 `-window-<n>.png` 与 UIA 文字（结果码 `DESKTOP_LOCKED`）；截图入库前看一眼，
 脚本只涂黑了密码框，屏上若有别的敏感内容要自己处理。
 
 ---

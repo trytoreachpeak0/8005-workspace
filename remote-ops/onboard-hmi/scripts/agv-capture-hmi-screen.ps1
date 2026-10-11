@@ -77,7 +77,9 @@ namespace HmiCapture {
 
 
         // "Default" when the user's desktop takes input; null with an error when it is the secure
-        // (Winlogon) desktop, which is what a locked workstation looks like from inside the session.
+        // (Winlogon) desktop. Not a lock test on its own: on agv02 (Windows 10 22H2, 2026-10-11) the lock
+        // screen read "Default", because its curtain (LockApp) lives on the user's desktop. LogonUI in the
+        // session is what caught that lock; both are recorded and either one counts.
         public static string InputDesktopName(out int error) {
             error = 0;
             IntPtr h = OpenInputDesktop(0, false, 0x0001 /* DESKTOP_READOBJECTS */);
