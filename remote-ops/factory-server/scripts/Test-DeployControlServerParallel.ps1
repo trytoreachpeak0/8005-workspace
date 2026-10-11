@@ -448,6 +448,35 @@ try {
     Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('components.controlServer.commit')) `
         -Name 'manifest without components.controlServer.commit: refused' -Detail (Get-Detail $run)
 
+    # 7. control-server#600: a roster definition needs one projection credential per vehicle from the store. Only when
+    # the fixture's revision ships the two-car example (control-server#571 and later).
+    $twoCar = Join-Path $clone 'scripts\parallel\instance-factory01-v2.two-car-example.json'
+    if (Test-Path -LiteralPath $twoCar) {
+        $fleetKeys = @((Get-Content -LiteralPath $twoCar -Raw | ConvertFrom-Json -AsHashtable)['journeyRuntime']['fleet'] | ForEach-Object { [string] $_['vehicleKey'] })
+        $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage; InstanceDefinitionPath = $twoCar })
+        Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('control-server#600') -and
+                @($fleetKeys | Where-Object { -not $run.Error.Contains($_) }).Count -eq 0 -and $run.Error.Contains('Nothing was downloaded or copied') -and
+                -not $run.Text.Contains('WhatIf: stopping before the server is touched')) `
+            -Name 'two-car definition without per-vehicle projection credentials in the store: refused, naming both vehicles' -Detail (Get-Detail $run)
+
+        $safetySecrets = Join-Path $work 'secrets-safety.xml'
+        $withSafety = Import-Clixml -LiteralPath $secretPath
+        foreach ($key in $fleetKeys) { $withSafety["OnboardSafetyCredential:$key"] = & $fake "selftest-safety-$key" }
+        $withSafety | Export-Clixml -LiteralPath $safetySecrets
+        $safe = $common.Clone(); $safe['SecretPath'] = $safetySecrets
+        $run = Invoke-Deploy ($safe + @{ PackagePath = $samePackage; InstanceDefinitionPath = $twoCar })
+        Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains('WhatIf: stopping before the server is touched') -and
+                $run.Text.Contains("Vehicle-safety projection credentials loaded for $($fleetKeys -join ', ') (values not shown)") -and
+                -not $run.Text.Contains('selftest-safety-')) `
+            -Name 'two-car definition with both credentials: accepted, names the vehicles and never a value' -Detail (Get-Detail $run)
+
+        $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+        Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains('Vehicle-safety projection: single car, shared onboard credential')) `
+            -Name 'single-car definition: no per-vehicle credential asked for' -Detail (Get-Detail $run)
+    } else {
+        Write-Host "  SKIP  two-car cases: $ControlServerRef ships no two-car example" -ForegroundColor Yellow
+    }
+
     # 7. Default package: looked up by the clone's commit.
     $global:GhRuns = "[{`"databaseId`":111,`"headSha`":`"$head`",`"headBranch`":`"fp/v2-impl`",`"createdAt`":`"2026-10-10T10:00:00Z`"}]"
     $global:GhPackage = $samePackage
