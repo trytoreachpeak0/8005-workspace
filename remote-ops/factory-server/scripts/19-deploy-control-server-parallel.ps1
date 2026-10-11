@@ -945,7 +945,9 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     Write-Step "Vehicle safety: http://${healthBindAddress}:$healthPort/api/onboard/v1/vehicle-safety"
     Write-Step "Package root on the server: $packageRoot"
     Write-Step 'Next: deploy the matching onboard commit to agv02/agv03 with'
-    Write-Step '  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SiteAlias agv02'
+    # -SshAlias, not -SiteAlias: 06-deploy has no such parameter (control-server#600 review L8). The ports are this
+    # instance's; 06's defaults are the MVP's.
+    Write-Step "  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort $onboardPort -HealthPort $healthPort"
     if ($safetyCredentials.Count -gt 0) {
         Write-Step '  Each vehicle reads its projection with its own credential now: redeploy its onboard half with 06-deploy.'
     }
