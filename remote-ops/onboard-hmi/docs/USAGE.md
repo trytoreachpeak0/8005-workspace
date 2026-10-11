@@ -493,6 +493,25 @@ agv01 的放行记录是 [8005-agv-program#44 的这条留言](https://github.co
 它逐个叶子比对改前改后，除这两个字段外有任何变化就还原备份并失败；备份留在 `C:\8005\appsettings-backup-automation-face-*.json`。
 **窗口内重新部署之后两个都要重跑**——部署不报错，面与恢复入口只是无声消失。
 
+### 看屏上显示什么：`17-capture-hmi-screen.ps1`
+
+只读取一次车载端屏：全屏截图、每个车载端窗口单独的图、UI Automation 控件树与可见文字（JSON）。
+**只接受 `agv02`／`agv03`**，`agv01` 在参数校验时就被拒绝。不点、不输入、不改焦点、不起停任何
+进程，所以不需要逐次授权；但它要进 `HT` 的桌面会话，现场票作业中途用之前先跟调度打招呼。
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/17-capture-hmi-screen.ps1 -SshAlias agv02 -EvidenceDirectory evidence/field/<目录>
+pwsh -File remote-ops/onboard-hmi/scripts/17-capture-hmi-screen.ps1 -SelfTest
+```
+
+输出落在 `-EvidenceDirectory`，文件名带车号和**控制端**时刻（车上时钟不可信）：
+`agv02-<时刻>-screen.png`、`-window-<n>.png`、`-uia.json`（车端记录，`visibleTexts` 是屏上文字）、
+`-run.json`（控制端记录：预检、结果码、清理与残留检查）。终端最后会打印可见文字的前 30 条。
+
+结果码与退出码、为什么这样做、锁屏和熄屏时能看到什么，见 [hmi-screen-capture.md](hmi-screen-capture.md)。
+两条要记住：锁屏时截不到车载端画面，只有 UIA 文字（结果码 `DESKTOP_LOCKED`）；截图入库前看一眼，
+脚本只涂黑了密码框，屏上若有别的敏感内容要自己处理。
+
 ---
 
 ## 9. 完全撤销
