@@ -507,7 +507,8 @@ pwsh -File remote-ops/onboard-hmi/scripts/17-capture-hmi-screen.ps1 -SelfTest
 
 输出落在 `-EvidenceDirectory`，文件名带车号和**控制端**时刻（车上时钟不可信）：
 `agv02-<时刻>-screen.png`、`-window-<n>.png`、`-uia.json`（车端记录，`visibleTexts` 是屏上文字）、
-`-run.json`（控制端记录：预检、结果码、清理与残留检查）。终端最后会打印可见文字的前 30 条。
+`-run.json`（控制端记录：预检、结果码、车端脚本是否跑起来、清理，以及车上还剩的取屏任务与进程——
+脚本不停任何进程，只列出来；能保证的是控制端不挂住）。终端最后会打印可见文字的前 30 条。
 
 结果码与退出码、为什么这样做、锁屏和熄屏时能看到什么，见 [hmi-screen-capture.md](hmi-screen-capture.md)。
 两条要记住：锁屏时全屏图只有锁屏画面，车载端界面看 `-window-<n>.png` 与 UIA 文字（结果码 `DESKTOP_LOCKED`）；截图入库前看一眼，

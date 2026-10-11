@@ -37,6 +37,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# First act, before anything slow: tells the control host "ran but never finished" from "never ran".
+# Carries TickCount64, a clock the system time cannot move, for comparing with the launch and preflight.
+if ($MyInvocation.InvocationName -ne '.' -and $OutputDirectory -and $Stamp) {
+    Set-Content -LiteralPath (Join-Path $OutputDirectory "$Stamp.started") -Encoding utf8NoBOM `
+        -Value ('{0} tick={1}' -f [DateTimeOffset]::Now.ToString('o'), [Environment]::TickCount64)
+}
+
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
 if (-not ('HmiCapture.Native' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -72,7 +79,9 @@ namespace HmiCapture {
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetUserObjectInformation(IntPtr h, int index, StringBuilder info, int length, out int needed);
         [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
 
-        // Per-monitor v2, so screen coordinates, UIA rectangles and bitmap pixels agree.
+        // Asks for per-monitor v2 so screen coordinates, UIA rectangles and bitmap pixels agree under scaling.
+        // It returned false on agv02 (2026-10-11: pwsh had already set its awareness), so the result records
+        // whether it took; at that vehicle's 100% scaling the three agree either way.
         public static bool MakeDpiAware() { return SetProcessDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero; }
 
 
@@ -269,6 +278,31 @@ function Get-WindowRecord {
     }
 }
 
+<#
+    Whether the desktop is locked, from three signals; any one is enough. Pure, so -SelfTest covers each.
+      * the input desktop is not "Default" (the Winlogon secure desktop, e.g. a sign-in prompt);
+      * LogonUI runs in this session;
+      * the foreground process is LockApp, the Windows 10 lock screen curtain.
+    The first alone misses the plain lock screen: on agv02 at 2026-10-11 20:04 the lock read "Default",
+    and LogonUI was what caught it (LockApp was in the foreground too).
+#>
+function Get-LockState {
+    param([string] $InputDesktop, [int] $OpenError, [bool] $LogonUiInSession, [string] $ForegroundProcess)
+    $signals = @(
+        if ($InputDesktop -ne 'Default') { 'inputDesktop' }
+        if ($LogonUiInSession) { 'logonUi' }
+        if ($ForegroundProcess -eq 'LockApp') { 'lockAppForeground' }
+    )
+    return [ordered]@{
+        inputDesktop      = $InputDesktop
+        openError         = $OpenError
+        logonUiInSession  = $LogonUiInSession
+        foregroundProcess = $ForegroundProcess
+        lockSignals       = $signals
+        locked            = $signals.Count -gt 0
+    }
+}
+
 # Dot-sourced by the self-test: define the functions and stop.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -280,6 +314,7 @@ $result = [ordered]@{
     user             = $env:USERNAME
     sessionId        = $sessionId
     vehicleClock     = [DateTimeOffset]::Now.ToString('o')
+    tickCount64      = [Environment]::TickCount64
     processName      = $ProcessName
     errors           = [System.Collections.Generic.List[string]]::new()
 }
@@ -297,12 +332,8 @@ try {
     $desktopError = 0
     $desktopName = [HmiCapture.Native]::InputDesktopName([ref] $desktopError)
     $logonUi = @(Get-Process -Name LogonUI -ErrorAction SilentlyContinue | Where-Object SessionId -eq $sessionId)
-    $result.desktop = [ordered]@{
-        inputDesktop  = $desktopName
-        openError     = $desktopError
-        logonUiInSession = $logonUi.Count -gt 0
-        locked        = ($desktopName -ne 'Default') -or ($logonUi.Count -gt 0)
-    }
+    $result.desktop = Get-LockState -InputDesktop $desktopName -OpenError $desktopError -LogonUiInSession ($logonUi.Count -gt 0) `
+        -ForegroundProcess $result.foregroundAtStart.process
 
     $hmi = @(($ProcessId ? (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) : (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) | Where-Object SessionId -eq $sessionId)
     $result.hmi = [ordered]@{

@@ -8,34 +8,39 @@
     Runs on the control host. In order:
 
       1. Preflight over SSH (session 0, read-only): is someone logged on at the console, is the
-         desktop locked, is the onboard client running, is Windows Script Host usable, are there
-         capture tasks left over from an earlier run.
+         desktop locked, is the onboard client running, is Windows Script Host usable, is the sublot
+         entry tool on the desktop, are there capture tasks left over from an earlier run.
       2. Copies agv-capture-hmi-screen.ps1 to C:\8005\capture\<runId> and runs it in the logged-on
          user's desktop session through a one-shot Interactive scheduled task, started hidden through
          wscript (window style 0) so nothing appears on the operator's screen and the foreground
          window does not change. The task is unregistered right after it starts.
       3. Waits for the vehicle-side JSON, copies the run directory back with scp, keeps the JSON and
-         the PNGs in -EvidenceDirectory, deletes the run directory on the vehicle, and checks that no
-         capture task is left registered.
+         the PNGs in -EvidenceDirectory, deletes the run directory on the vehicle, and records any
+         capture task or capture process still there afterwards.
 
     Read-only. It never clicks, types, focuses, switches windows, or starts or stops the onboard
-    stack; the vehicle half only reads pixels and UIA properties (the self-test scans it for any call
-    that would act). It moves nothing, so it needs no per-run authorization -- but agv02/agv03 only:
-    agv01 is the production vehicle, and touching it needs the user first (Ask first, category 2).
+    stack; the vehicle half only reads pixels and UIA properties (the self-test scans it for calls
+    that would act, by name -- a bounded check, see Invoke-SelfTest). It moves nothing, so it needs no
+    per-run authorization -- but agv02/agv03 only: agv01 is the production vehicle, and touching it
+    needs the user first (Ask first, category 2).
 
-    It never retries. Every run ends in one outcome code (exit code in brackets):
+    It never retries, and the control host never hangs: every run ends within -TimeoutSeconds plus the
+    SSH round trips, in one outcome code (exit code in brackets). It does not stop anything it finds
+    left running on the vehicle; it lists it in the run record.
 
       CAPTURED [0]               screenshot, window images and UIA text all present
       HMI_NOT_RUNNING [2]        no onboard client in the console session; the desktop was still captured
-      DESKTOP_LOCKED [3]         lock screen up; whatever could be read is kept (UIA usually is)
+      DESKTOP_LOCKED [3]         lock screen up; the screenshot shows it, the window image and UIA text
+                                 still show the HMI (agv02, 2026-10-11)
       SCREEN_BLANK [4]           the screenshot is one flat colour
       NO_INTERACTIVE_SESSION [5] nobody logged on at the console; nothing was launched
-      TIMEOUT [6]                no result within -TimeoutSeconds
+      TIMEOUT [6]                launched, but no result within -TimeoutSeconds; the run record says
+                                 whether the vehicle script ever started
       PARTIAL [7]                ran, but an image or the UIA tree is missing (see errors in the JSON)
       FOCUS_DISTURBED [8]        the capture itself held the foreground; a defect of this tool
       WSH_DISABLED [9]           Windows Script Host is disabled; nothing was launched
-      DESKTOP_BUSY [10]          another interactive tool (16-enter-sublot-uia) is running; nothing was launched
-      tool failure [1]           SSH, scp or the launch failed
+      DESKTOP_BUSY [10]          the sublot entry tool (16-enter-sublot-uia) is running; nothing was launched
+      TOOL_FAILURE [1]           SSH, scp or the launch failed
 
 .EXAMPLE
     pwsh -File remote-ops/onboard-hmi/scripts/17-capture-hmi-screen.ps1 -SshAlias agv02 -EvidenceDirectory evidence/field/<dir>
@@ -55,8 +60,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $vehicleScript = Join-Path $PSScriptRoot 'agv-capture-hmi-screen.ps1'
+$entryScript = Join-Path $PSScriptRoot '16-enter-sublot-uia.ps1'
 $vehicleBase = 'C:\8005\capture'
 $taskPrefix = 'W2G-CaptureHmi-'
+# What 16-enter-sublot-uia leaves on the vehicle while it runs. -SelfTest generates 16's own launch script
+# and checks both still match it, so a rename there cannot silently switch this check off.
+$entryTaskPattern = 'W2G-EnterSublot-*'
+$entryProcessPattern = '*agv-enter-sublot-uia*'
 
 $exitCodes = [ordered]@{
     CAPTURED = 0; HMI_NOT_RUNNING = 2; DESKTOP_LOCKED = 3; SCREEN_BLANK = 4; NO_INTERACTIVE_SESSION = 5
@@ -89,6 +99,7 @@ function New-PreflightScript {
     param([string] $ProcessName = 'SQCD.Agv.Wpf')
     return @"
 `$ErrorActionPreference = 'Stop'
+`$tick = [Environment]::TickCount64
 `$console = (query session 2>&1 | Select-String -Pattern '^\s*>?console\s+(\S+)\s+(\d+)\s+Active').Matches
 `$user = if (`$console) { `$console[0].Groups[1].Value } else { `$null }
 `$sid = if (`$console) { [int] `$console[0].Groups[2].Value } else { `$null }
@@ -109,9 +120,10 @@ if (`$user) {
     wshDisabled      = [bool] @(`$wsh | Where-Object { `$null -ne `$_ -and "`$_" -eq '0' }).Count
     leftoverTasks    = @(Get-ScheduledTask -TaskName '$taskPrefix*' -ErrorAction SilentlyContinue | ForEach-Object { `$_.TaskName })
     # The sublot entry tool drives the same desktop; two interactive tools at once is not allowed (Coordinator 10, 2026-10-11).
-    otherDesktopTools = @(@(Get-ScheduledTask -TaskName 'W2G-EnterSublot-*' -ErrorAction SilentlyContinue | ForEach-Object { 'task ' + `$_.TaskName }) +
-        @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'pwsh.exe'" | Where-Object { `$_.CommandLine -like '*agv-enter-sublot-uia*' -and `$_.ProcessId -ne `$PID } | ForEach-Object { 'process ' + `$_.ProcessId }))
+    otherDesktopTools = @(@(Get-ScheduledTask -TaskName '$entryTaskPattern' -ErrorAction SilentlyContinue | ForEach-Object { 'task ' + `$_.TaskName }) +
+        @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'pwsh.exe'" | Where-Object { `$_.CommandLine -like '$entryProcessPattern' -and `$_.ProcessId -ne `$PID } | ForEach-Object { 'process ' + `$_.ProcessId }))
     vehicleClock     = [DateTimeOffset]::Now.ToString('o')
+    tickCount64      = `$tick
 } | ConvertTo-Json -Compress
 "@
 }
@@ -147,10 +159,12 @@ try {
     `$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5))
     try {
         Register-ScheduledTask -TaskName '$taskName' -Action `$action -Principal `$principal -Settings `$settings -Force | Out-Null
+        `$startTick = [Environment]::TickCount64
         Start-ScheduledTask -TaskName '$taskName'
         Start-Sleep -Seconds 3
         `$info = Get-ScheduledTaskInfo -TaskName '$taskName'
-        'TASK_STARTED lastRunTime={0} lastTaskResult=0x{1:X}' -f `$info.LastRunTime, `$info.LastTaskResult
+        # TickCount64 next to LastRunTime: the system clock can be moved, the tick count cannot.
+        'TASK_STARTED lastRunTime={0} lastTaskResult=0x{1:X} startTick={2} now={3} nowTick={4}' -f `$info.LastRunTime, `$info.LastTaskResult, `$startTick, [DateTimeOffset]::Now.ToString('o'), [Environment]::TickCount64
     } finally {
         Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false -ErrorAction SilentlyContinue
     }
@@ -162,23 +176,86 @@ try {
 }
 
 <#
-    Whether the launch output proves the task started: the end marker and a TASK_STARTED line whose
-    LastTaskResult is 0x41301 (running) or 0x0 (already finished).
+    Whether the launch output proves the task started. Same rule as 16-enter-sublot-uia.ps1 (8005-workspace#20):
+    the end marker and a TASK_STARTED line whose LastTaskResult is 0x41301 (running) or any code a process
+    that ran can end with (0x0, 0x1, 0xC000013A ...). A task that already ended is not a failed launch; the
+    result file decides. Not started: the Task Scheduler's own status codes other than running (ready,
+    disabled, has not run, no more runs, not scheduled, queued) and HRESULTs of a failed launch
+    (0x8004xxxx, 0x8007xxxx).
 #>
 function Test-LaunchOutput {
     param([string[]] $Output)
     $text = $Output -join "`n"
-    return ($text -match '(?m)^LAUNCH_DONE\s*$') -and ($text -match 'TASK_STARTED .*lastTaskResult=0x(41301|0)\b')
+    if ($text -notmatch '(?m)^LAUNCH_DONE\s*$') { return $false }
+    if ($text -notmatch 'TASK_STARTED .*lastTaskResult=0x([0-9A-Fa-f]{1,8})\b') { return $false }
+    $code = [uint32]::Parse($Matches[1], [System.Globalization.NumberStyles]::HexNumber)
+    if ($code -eq 0x41301) { return $true }
+    if ($code -in 0x41300, 0x41302, 0x41303, 0x41304, 0x41305, 0x41325) { return $false }
+    # Compared as text: PowerShell reads 0x80040000 as a negative Int32, so a numeric mask silently never matches.
+    if ($Matches[1].ToUpperInvariant().PadLeft(8, '0').Substring(0, 4) -in '8004', '8007') { return $false }
+    return $true
 }
 
-<# Calls the vehicle half would need to act on the screen. None may appear in it. #>
+<#
+    What a run without a result file was. Pure. The vehicle script writes <name>.started as its first act,
+    so its presence tells "ran and never finished" from "never ran".
+#>
+function Get-NoResultVerdict {
+    param([bool] $LaunchProved, [bool] $StartedMarkerPresent, [int] $TimeoutSeconds)
+    if ($StartedMarkerPresent) {
+        return [ordered]@{ outcome = 'TIMEOUT'; detail = "The capture script started (its .started marker is there) but wrote no result within ${TimeoutSeconds}s. It may still be running; see leftoverProcessesAfter." }
+    }
+    if ($LaunchProved) {
+        return [ordered]@{ outcome = 'TIMEOUT'; detail = "The task started but the capture script never reached its first line within ${TimeoutSeconds}s (no .started marker)." }
+    }
+    return [ordered]@{ outcome = 'TOOL_FAILURE'; detail = 'The launch did not prove a started task and the capture script never reached its first line (no .started marker).' }
+}
+
+<#
+    Vehicle-side cleanup: delete the run directory, then list what is still there. Reads and deletes only
+    this run's directory; it stops no process. Prints one line of JSON.
+#>
+function New-CleanupScript {
+    param([string] $RunDirectory, [string] $RunId)
+    return @"
+`$ErrorActionPreference = 'Stop'
+Remove-Item -LiteralPath '$RunDirectory' -Recurse -Force -ErrorAction SilentlyContinue
+[pscustomobject]@{
+    vehicleCleanup = if (Test-Path -LiteralPath '$RunDirectory') { 'RUN_DIRECTORY_LEFT' } else { 'RUN_DIRECTORY_REMOVED' }
+    leftoverTasksAfter = @(Get-ScheduledTask -TaskName '$taskPrefix*' -ErrorAction SilentlyContinue | ForEach-Object { `$_.TaskName })
+    leftoverProcessesAfter = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'pwsh.exe' OR Name = 'wscript.exe'" |
+        Where-Object { `$_.ProcessId -ne `$PID -and (`$_.CommandLine -like '*agv-capture-hmi-screen*' -or `$_.CommandLine -like '*hidden-$RunId.vbs*') } |
+        ForEach-Object { '{0} {1}' -f `$_.Name, `$_.ProcessId })
+    tickCount64 = [Environment]::TickCount64
+} | ConvertTo-Json -Compress
+"@
+}
+
+<#
+    Calls the vehicle half would need to act on the screen. A blacklist of names, matched as text: it
+    catches a direct call, not a name built at run time or reached through reflection. Bounded on purpose
+    (an AST allowlist is the stronger check, not done; see docs/hmi-screen-capture.md).
+#>
 $forbiddenInVehicleScript = @(
     'SetFocus', 'SetForegroundWindow', 'SetActiveWindow', 'BringWindowToTop', 'ShowWindow', 'SwitchToThisWindow',
+    'SetWindowPos', 'AppActivate',
     'SendInput', 'keybd_event', 'mouse_event', 'SetCursorPos', 'PostMessage', 'SendMessage', 'SendKeys',
     'InvokePattern', 'SelectionItemPattern', 'ExpandCollapsePattern', 'WindowPattern', 'TransformPattern',
+    'ScrollIntoView', 'DoDefaultAction', 'Realize',
     '.SetValue(', '.Invoke()', '.Toggle()', '.Select()', '.Expand()', '.Close()',
     'Stop-Process', 'Start-Process', '.Kill(', 'CloseMainWindow', 'Restart-'
 )
+
+<# Win32 functions imported by a C# source, whatever modifiers precede `extern`. #>
+function Get-DllImportNames {
+    param([string] $Source)
+    $pattern = '(?s)\[DllImport\([^\]]*\]\s*(?:(?:public|private|internal|protected|static|unsafe|extern)\s+)*extern\s+[\w.<>\[\]]+\s+(\w+)\s*\('
+    return @([regex]::Matches($Source, $pattern) | ForEach-Object { $_.Groups[1].Value })
+}
+
+$readingWin32 = 'EnumWindows', 'GetWindowThreadProcessId', 'IsWindowVisible', 'IsIconic', 'GetWindowText', 'GetClassName',
+    'GetWindowRect', 'GetWindow', 'GetForegroundWindow', 'PrintWindow', 'SetProcessDpiAwarenessContext',
+    'OpenInputDesktop', 'CloseDesktop', 'GetUserObjectInformation', 'GetSystemMetrics'
 
 function Invoke-SelfTest {
     $failures = [System.Collections.Generic.List[string]]::new()
@@ -199,32 +276,68 @@ function Invoke-SelfTest {
             if ($bad.Count -ne 0) { throw "$path carries $($bad.Count) control character(s)" }
         }
     }
-    Check 'the vehicle half calls nothing that acts on the screen' {
+    Check 'the vehicle half calls nothing on the blacklist' {
         $text = [System.IO.File]::ReadAllText($vehicleScript)
         $hits = @($forbiddenInVehicleScript | Where-Object { $text.Contains($_) })
         if ($hits.Count) { throw "found: $($hits -join ', ')" }
     }
-    Check 'the vehicle half imports only reading Win32 calls' {
-        $allowed = 'EnumWindows', 'GetWindowThreadProcessId', 'IsWindowVisible', 'IsIconic', 'GetWindowText', 'GetClassName',
-            'GetWindowRect', 'GetWindow', 'GetForegroundWindow', 'PrintWindow', 'SetProcessDpiAwarenessContext',
-            'OpenInputDesktop', 'CloseDesktop', 'GetUserObjectInformation', 'GetSystemMetrics'
-        $imported = [regex]::Matches([System.IO.File]::ReadAllText($vehicleScript), '(?s)\[DllImport\([^\]]*\]\s*static extern \S+ (\w+)\(') | ForEach-Object { $_.Groups[1].Value }
-        $extra = @($imported | Where-Object { $_ -notin $allowed })
-        if ($extra.Count) { throw "not on the reading list: $($extra -join ', ')" }
-        if (@($imported).Count -lt 10) { throw "only $(@($imported).Count) imports found; the scan is not reading the file" }
+    foreach ($probe in @(
+            '$button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()',
+            '$shell.AppActivate($title)', 'SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, 3)', '$item.ScrollIntoView()',
+            '$legacy.DoDefaultAction()', '$virtualized.Realize()')) {
+        Check "the blacklist catches: $probe" {
+            if (-not @($forbiddenInVehicleScript | Where-Object { $probe.Contains($_) }).Count) { throw 'scan missed it' }
+        }
     }
-    Check 'the forbidden-call scan would catch an Invoke' {
-        $probe = '$button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()'
-        if (-not @($forbiddenInVehicleScript | Where-Object { $probe.Contains($_) }).Count) { throw 'scan missed it' }
+    Check 'the vehicle half imports only reading Win32 calls' {
+        $imported = Get-DllImportNames ([System.IO.File]::ReadAllText($vehicleScript))
+        $extra = @($imported | Where-Object { $_ -notin $readingWin32 })
+        if ($extra.Count) { throw "not on the reading list: $($extra -join ', ')" }
+        if ($imported.Count -ne $readingWin32.Count) { throw "found $($imported.Count) imports, the reading list has $($readingWin32.Count); the scan is not reading the file" }
+    }
+    Check 'the import scan sees a public static extern' {
+        $probe = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);'
+        if ((Get-DllImportNames $probe) -notcontains 'SetCursorPos') { throw 'missed' }
+        $probe = "[DllImport(`"user32.dll`", SetLastError = true)]`n        private static extern IntPtr SetFocus(IntPtr h);"
+        if ((Get-DllImportNames $probe) -notcontains 'SetFocus') { throw 'missed across a line break' }
     }
     Check 'agv01 is refused before anything runs' {
         $out = & pwsh -NoProfile -File $PSCommandPath -SshAlias agv01 -EvidenceDirectory ([System.IO.Path]::GetTempPath()) 2>&1
         if ($LASTEXITCODE -eq 0 -or ($out -join "`n") -notmatch 'Only the spare vehicles agv02 and agv03') { throw "exit $LASTEXITCODE : $out" }
     }
 
+    Check 'every outcome has a distinct exit code' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref] $null, [ref] $null)
+        $sources = @('Get-CaptureOutcome', 'Get-NoResultVerdict') | ForEach-Object {
+            $fn = $_
+            $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true)
+        }
+        $returned = @($sources | ForEach-Object {
+                $_.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.Value -cmatch '^[A-Z]+(_[A-Z]+)+$|^[A-Z]{5,}$' }, $true) | ForEach-Object Value
+            }) + 'TOOL_FAILURE' | Sort-Object -Unique
+        if ($returned.Count -lt 11) { throw "only $($returned.Count) outcome literals found: $($returned -join ', ')" }
+        $missing = @($returned | Where-Object { -not $exitCodes.Contains($_) })
+        if ($missing.Count) { throw "no exit code for: $($missing -join ', ')" }
+        if (@($exitCodes.Values | Sort-Object -Unique).Count -ne $exitCodes.Count) { throw 'two outcomes share an exit code' }
+        if ($exitCodes['CAPTURED'] -ne 0 -or @($exitCodes.Keys | Where-Object { $_ -ne 'CAPTURED' -and $exitCodes[$_] -eq 0 }).Count) { throw 'only CAPTURED may exit 0' }
+    }
+
+    Check '16-enter-sublot-uia still leaves what the preflight looks for' {
+        # 16 has no dot-source exit, so its launch-script generator is lifted out of its syntax tree.
+        $ast16 = [System.Management.Automation.Language.Parser]::ParseFile($entryScript, [ref] $null, [ref] $null)
+        $fn = $ast16.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-LaunchScript' }, $true)
+        if (-not $fn) { throw "no New-LaunchScript in $entryScript" }
+        $text16 = & ([scriptblock]::Create("$($fn.Extent.Text)`nNew-LaunchScript -VehicleRoot 'C:\8005\uia' -Sublot 'S-1' -ResultPath 'C:\8005\uia\result-r1.json' -RunId 'r1'"))
+        $tasks = @([regex]::Matches($text16, "-TaskName '([^']+)'") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        if ($tasks.Count -ne 1) { throw "task names in 16's launch script: $($tasks -join ', ')" }
+        if ($tasks[0] -notlike $entryTaskPattern) { throw "16 registers '$($tasks[0])', which '$entryTaskPattern' misses" }
+        if ($text16 -notmatch "`\`$arguments = '([^']+)'") { throw "no `$arguments line in 16's launch script" }
+        if ("pwsh.exe $($Matches[1])" -notlike $entryProcessPattern) { throw "16's pwsh command line '$($Matches[1])' is missed by '$entryProcessPattern'" }
+    }
+
     $launch = New-LaunchScript -RunDirectory 'C:\8005\capture\r1' -RunId 'r1'
-    Check 'the generated launch and preflight scripts parse with zero errors' {
-        foreach ($text in @($launch, (New-PreflightScript))) {
+    Check 'the generated launch, preflight and cleanup scripts parse with zero errors' {
+        foreach ($text in @($launch, (New-PreflightScript), (New-CleanupScript -RunDirectory 'C:\8005\capture\r1' -RunId 'r1'))) {
             $errors = $null
             $null = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref] $null, [ref] $errors)
             if ($errors.Count -ne 0) { throw $errors[0].Message }
@@ -237,6 +350,7 @@ function Invoke-SelfTest {
         if ($unregister.Count -ne 1) { throw "finally blocks unregistering the task: $($unregister.Count)" }
         if ($ast.EndBlock.Statements[-1].Extent.Text -ne "'LAUNCH_DONE'") { throw "last statement is $($ast.EndBlock.Statements[-1].Extent.Text)" }
         if ($launch -notmatch 'wscript\.exe') { throw 'the task does not start through wscript' }
+        if ($launch -notmatch 'startTick=\{2\}') { throw 'the TASK_STARTED line carries no tick count' }
     }
     Check 'the hidden runner uses window style 0, waits, and is ASCII' {
         $vbs = New-HiddenRunner -RunDirectory 'C:\8005\capture\r1' -Name 'agv02-20261011T120000'
@@ -244,14 +358,39 @@ function Invoke-SelfTest {
         if ($vbs -notmatch [regex]::Escape('""C:\8005\capture\r1\agv-capture-hmi-screen.ps1""')) { throw "path not quoted for VBScript: $vbs" }
         if (@([System.Text.Encoding]::UTF8.GetBytes($vbs) | Where-Object { $_ -gt 127 }).Count) { throw 'non-ASCII' }
     }
+    Check 'the main flow fetches a result before it deletes the run directory' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref] $null, [ref] $null)
+        $try = @($ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.TryStatementAst] -and $_.Finally }) | Select-Object -Last 1
+        if (-not $try) { throw 'no top-level try/finally' }
+        $finally = $try.Finally.Extent.Text
+        $fetch = $finally.IndexOf('Save-RunResult'); $cleanup = $finally.IndexOf('New-CleanupScript')
+        if ($fetch -lt 0 -or $cleanup -lt 0 -or $fetch -gt $cleanup) { throw "in the finally block Save-RunResult is at $fetch and New-CleanupScript at $cleanup" }
+    }
+
     foreach ($case in @(
-            @{ Name = 'launch output with marker and a running task passes'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41301', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'launch output with marker and a running task passes'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41301 startTick=1', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'launch output with marker and a finished task passes'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x0 startTick=1', 'LAUNCH_DONE'); Expect = $true },
             @{ Name = 'empty launch output fails'; Out = @(); Expect = $false },
             @{ Name = 'launch output without the marker fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41301'); Expect = $false },
-            @{ Name = 'launch output with a failed task result fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x80070002', 'LAUNCH_DONE'); Expect = $false })) {
+            @{ Name = 'a failed launch (0x80070002) fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x80070002', 'LAUNCH_DONE'); Expect = $false },
+            @{ Name = 'a scheduler error (0x8004131F) fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x8004131F', 'LAUNCH_DONE'); Expect = $false },
+            @{ Name = 'a task that has not run yet (0x41303) fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41303', 'LAUNCH_DONE'); Expect = $false },
+            @{ Name = 'a queued task (0x41325) fails'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x41325', 'LAUNCH_DONE'); Expect = $false },
+            @{ Name = 'a task already ended with 0x1 counts as started'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0x1', 'LAUNCH_DONE'); Expect = $true },
+            @{ Name = 'a task already ended with 0xC000013A counts as started'; Out = @('TASK_STARTED lastRunTime=x lastTaskResult=0xC000013A', 'LAUNCH_DONE'); Expect = $true })) {
         Check $case.Name {
             $got = Test-LaunchOutput $case.Out
             if ($got -ne $case.Expect) { throw "got $got" }
+        }
+    }
+    foreach ($case in @(
+            @{ Name = 'no result with a started marker is TIMEOUT and says it started'; Proved = $true; Started = $true; Expect = 'TIMEOUT'; Says = 'started \(its \.started' },
+            @{ Name = 'no result, a proved launch and no marker is TIMEOUT that never reached its first line'; Proved = $true; Started = $false; Expect = 'TIMEOUT'; Says = 'never reached its first line' },
+            @{ Name = 'no result, an unproved launch and no marker is TOOL_FAILURE'; Proved = $false; Started = $false; Expect = 'TOOL_FAILURE'; Says = 'did not prove' },
+            @{ Name = 'a marker outranks an unproved launch'; Proved = $false; Started = $true; Expect = 'TIMEOUT'; Says = 'started \(its \.started' })) {
+        Check $case.Name {
+            $v = Get-NoResultVerdict -LaunchProved $case.Proved -StartedMarkerPresent $case.Started -TimeoutSeconds 90
+            if ($v.outcome -ne $case.Expect -or $v.detail -notmatch $case.Says) { throw "got $($v.outcome): $($v.detail)" }
         }
     }
 
@@ -284,7 +423,21 @@ function Invoke-SelfTest {
         }
     }
 
-    "SELFTEST $(if ($failures.Count -eq 0) { 'PASS' } else { "FAIL ($($failures -join '; '))" })"
+    . $vehicleScript
+    foreach ($case in @(
+            @{ Name = 'an unlocked desktop is not locked'; D = 'Default'; L = $false; F = 'SQCD.Agv.Wpf'; Expect = $false },
+            @{ Name = 'the 2026-10-11 20:04 agv02 lock is locked'; D = 'Default'; L = $true; F = 'LockApp'; Expect = $true },
+            @{ Name = 'LogonUI alone is a lock'; D = 'Default'; L = $true; F = 'SQCD.Agv.Wpf'; Expect = $true },
+            @{ Name = 'LockApp in the foreground alone is a lock'; D = 'Default'; L = $false; F = 'LockApp'; Expect = $true },
+            @{ Name = 'the secure desktop alone is a lock'; D = 'Winlogon'; L = $false; F = 'SQCD.Agv.Wpf'; Expect = $true },
+            @{ Name = 'an unreadable input desktop is a lock'; D = $null; L = $false; F = $null; Expect = $true })) {
+        Check $case.Name {
+            $state = Get-LockState -InputDesktop $case.D -OpenError 0 -LogonUiInSession $case.L -ForegroundProcess $case.F
+            if ($state.locked -ne $case.Expect) { throw "locked=$($state.locked) signals=$($state.lockSignals -join ',')" }
+        }
+    }
+
+    "SELFTEST $(if ($failures.Count -eq 0) { 'PASS' } else { "FAIL ($($failures -join '; '))" }) ($($failures.Count) failed)"
     if ($failures.Count -ne 0) { exit 1 }
 }
 
@@ -304,6 +457,25 @@ function Invoke-Vehicle {
     return $text
 }
 
+<#
+    Copies the run directory back and keeps this run's JSON and PNGs. Fetched by scp, never printed through
+    ssh: the console code page garbles the Chinese on the way back. Returns the parsed vehicle JSON.
+#>
+function Save-RunResult {
+    $fetch = Join-Path ([System.IO.Path]::GetTempPath()) "capture-hmi-fetch-$runId"
+    New-Item -ItemType Directory -Force -Path $fetch | Out-Null
+    try {
+        scp -q -r -o BatchMode=yes -o ConnectTimeout=15 "${SshAlias}:$remoteDirectory" $fetch
+        if ($LASTEXITCODE -ne 0) { throw "Copying the capture back from $SshAlias failed (exit $LASTEXITCODE)." }
+        $kept = @(Get-ChildItem -LiteralPath $fetch -Recurse -File | Where-Object { $_.Name -like "$name-*" -and $_.Extension -in '.json', '.png' })
+        foreach ($file in $kept) { Copy-Item -LiteralPath $file.FullName -Destination $EvidenceDirectory -Force }
+        $run.files = @($kept | ForEach-Object Name)
+    } finally {
+        Remove-Item -LiteralPath $fetch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return Get-Content -LiteralPath (Join-Path $EvidenceDirectory "$name-uia.json") -Raw -Encoding utf8 | ConvertFrom-Json
+}
+
 New-Item -ItemType Directory -Force -Path $EvidenceDirectory | Out-Null
 $EvidenceDirectory = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
 # Named by the control host's clock: the vehicles' clocks have been months off before (fleet.md, constraint 2).
@@ -311,14 +483,15 @@ $name = '{0}-{1}' -f $SshAlias, (Get-Date -Format 'yyyyMMdd\THHmmss')
 $runId = [guid]::NewGuid().ToString('N').Substring(0, 8)
 $runDirectory = "$vehicleBase\$runId"
 $remoteDirectory = $runDirectory -replace '\\', '/'
+$resultFile = "$runDirectory\$name-uia.json"
+$startedFile = "$runDirectory\$name.started"
 $run = [ordered]@{
     tool = '17-capture-hmi-screen'; sshAlias = $SshAlias; name = $name; runId = $runId
-    startedAt = [DateTimeOffset]::Now.ToString('o'); preflight = $null; launch = $null; outcome = $null
-    files = @(); leftoverTasksAfter = $null; vehicleCleanup = $null; error = $null
+    startedAt = [DateTimeOffset]::Now.ToString('o'); preflight = $null; launch = $null; launchProved = $false
+    startedMarker = $null; outcome = $null; detail = $null; files = @()
+    vehicleCleanup = $null; leftoverTasksAfter = $null; leftoverProcessesAfter = $null; cleanupTickCount64 = $null; error = $null
 }
 $vehicle = $null
-$timedOut = $false
-$launched = $false
 $runDirectoryCreated = $false
 
 try {
@@ -345,71 +518,78 @@ try {
         }
 
         $launchOutput = @(ssh -o BatchMode=yes -o ConnectTimeout=15 $SshAlias "pwsh -NoProfile -File `"$runDirectory\launch-$runId.ps1`"" 2>&1 | ForEach-Object { "$_" })
+        $launchExit = $LASTEXITCODE
         $run.launch = $launchOutput
         $launchOutput | ForEach-Object { Write-Host "  $_" }
-        if ($LASTEXITCODE -ne 0 -or -not (Test-LaunchOutput $launchOutput)) {
-            throw "Launching the capture task on $SshAlias did not report LAUNCH_DONE with a started task (exit $LASTEXITCODE)."
+        $run.launchProved = $launchExit -eq 0 -and (Test-LaunchOutput $launchOutput)
+        if (-not $run.launchProved) {
+            Write-Host "  the launch did not prove a started task (exit $launchExit); checking for a result once, not waiting" -ForegroundColor Yellow
         }
-        $launched = $true
 
-        $resultFile = "$runDirectory\$name-uia.json"
-        $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        # An unproved launch is looked at once, not waited on: the result file, if any, still decides.
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds($run.launchProved ? $TimeoutSeconds : 0)
         do {
             Start-Sleep -Seconds 2
             $present = Invoke-Vehicle "Test-Path -LiteralPath '$resultFile'"
         } until ($present -match 'True' -or [DateTimeOffset]::UtcNow -ge $deadline)
-        $timedOut = $present -notmatch 'True'
 
-        if (-not $timedOut) {
-            # Fetched by scp, never printed through ssh: the console code page garbles the Chinese on the way back.
-            $fetch = Join-Path ([System.IO.Path]::GetTempPath()) "capture-hmi-fetch-$runId"
-            New-Item -ItemType Directory -Force -Path $fetch | Out-Null
-            try {
-                scp -q -r -o BatchMode=yes -o ConnectTimeout=15 "${SshAlias}:$remoteDirectory" $fetch
-                if ($LASTEXITCODE -ne 0) { throw "Copying the capture back from $SshAlias failed (exit $LASTEXITCODE)." }
-                $kept = @(Get-ChildItem -LiteralPath $fetch -Recurse -File | Where-Object { $_.Name -like "$name-*" -and $_.Extension -in '.json', '.png' })
-                foreach ($file in $kept) { Copy-Item -LiteralPath $file.FullName -Destination $EvidenceDirectory -Force }
-                $run.files = @($kept | ForEach-Object Name)
-            } finally {
-                Remove-Item -LiteralPath $fetch -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            $vehicle = Get-Content -LiteralPath (Join-Path $EvidenceDirectory "$name-uia.json") -Raw -Encoding utf8 | ConvertFrom-Json
+        if ($present -match 'True') {
+            $vehicle = Save-RunResult
+        } else {
+            $run.startedMarker = (Invoke-Vehicle "if (Test-Path -LiteralPath '$startedFile') { Get-Content -LiteralPath '$startedFile' -Raw } else { 'ABSENT' }").Trim()
+            $verdict = Get-NoResultVerdict -LaunchProved $run.launchProved -StartedMarkerPresent ($run.startedMarker -ne 'ABSENT') -TimeoutSeconds $TimeoutSeconds
+            $run.outcome = $verdict.outcome
+            $run.detail = $verdict.detail
         }
     }
 } catch {
     $run.error = $_.Exception.Message
 } finally {
     if ($runDirectoryCreated) {
-        # The run directory goes whatever happened; on a timeout the hidden pwsh may still hold a file, which
-        # is reported rather than retried.
         try {
-            $run.vehicleCleanup = Invoke-Vehicle @"
-Remove-Item -LiteralPath '$runDirectory' -Recurse -Force -ErrorAction SilentlyContinue
-if (Test-Path -LiteralPath '$runDirectory') { 'RUN_DIRECTORY_LEFT' } else { 'RUN_DIRECTORY_REMOVED' }
-"@
-            $run.leftoverTasksAfter = @((Invoke-Vehicle "@(Get-ScheduledTask -TaskName '$taskPrefix*' -ErrorAction SilentlyContinue | ForEach-Object { `$_.TaskName }) -join ','") -split ',' | Where-Object { $_ })
+            # A result written before an error above is fetched before the directory goes.
+            if (-not $vehicle -and (Invoke-Vehicle "Test-Path -LiteralPath '$resultFile'") -match 'True') {
+                $vehicle = Save-RunResult
+                $run.outcome = $null
+                $run.detail = 'Fetched in cleanup, after an earlier step failed.'
+            }
+        } catch {
+            $run.error = (@($run.error, "fetch in cleanup: $($_.Exception.Message)") | Where-Object { $_ }) -join '; '
+        }
+        try {
+            # Deletes this run's directory and lists what is left; on a timeout the hidden pwsh may still be
+            # running and hold a file. Reported, not retried, and nothing is stopped.
+            $cleanup = Invoke-Vehicle (New-CleanupScript -RunDirectory $runDirectory -RunId $runId) | ConvertFrom-Json
+            $run.vehicleCleanup = $cleanup.vehicleCleanup
+            $run.leftoverTasksAfter = @($cleanup.leftoverTasksAfter)
+            $run.leftoverProcessesAfter = @($cleanup.leftoverProcessesAfter)
+            $run.cleanupTickCount64 = $cleanup.tickCount64
         } catch {
             $run.error = (@($run.error, "cleanup: $($_.Exception.Message)") | Where-Object { $_ }) -join '; '
         }
     }
 }
 
-$run.outcome = if ($run.error -and -not $vehicle -and -not ($run.preflight -and -not $run.preflight.consoleSessionId)) {
-    if ($launched -and $timedOut) { 'TIMEOUT' } else { 'TOOL_FAILURE' }
-} else {
-    Get-CaptureOutcome $run.preflight $vehicle $timedOut
+if (-not $run.outcome) {
+    $run.outcome = if ($vehicle) { Get-CaptureOutcome $run.preflight $vehicle $false }
+        elseif ($run.error) { 'TOOL_FAILURE' }
+        # Nothing failed and nothing was launched: the preflight said no (no session, no WSH, entry running).
+        elseif ($run.preflight -and -not $runDirectoryCreated) { Get-CaptureOutcome $run.preflight $null $false }
+        else { 'TOOL_FAILURE' }
 }
 $run.finishedAt = [DateTimeOffset]::Now.ToString('o')
 $runFile = Join-Path $EvidenceDirectory "$name-run.json"
 $run | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $runFile -Encoding utf8NoBOM
 
 $colour = if ($run.outcome -eq 'CAPTURED') { 'Green' } else { 'Yellow' }
-Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $($run.outcome)$(if ($run.error) { ": $($run.error)" })" -ForegroundColor $colour
+Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $($run.outcome)$(if ($run.detail) { ": $($run.detail)" })$(if ($run.error) { " ($($run.error))" })" -ForegroundColor $colour
 if ($vehicle) {
     Write-Host "  visible text: $((@($vehicle.visibleTexts) | Select-Object -First 30) -join ' | ')"
     if (@($vehicle.errors).Count) { Write-Host "  vehicle errors: $($vehicle.errors -join '; ')" -ForegroundColor Yellow }
 }
 if ($run.vehicleCleanup -and $run.vehicleCleanup -ne 'RUN_DIRECTORY_REMOVED') { Write-Host "  vehicle cleanup: $($run.vehicleCleanup)" -ForegroundColor Yellow }
 if (@($run.leftoverTasksAfter).Count) { Write-Host "  capture task(s) still registered: $($run.leftoverTasksAfter -join ', ')" -ForegroundColor Yellow }
+if (@($run.leftoverProcessesAfter).Count) { Write-Host "  capture process(es) still running: $($run.leftoverProcessesAfter -join ', ')" -ForegroundColor Yellow }
 foreach ($file in @($run.files) + "$name-run.json") { Write-Host "  $(Join-Path $EvidenceDirectory $file)" }
-exit $exitCodes[$run.outcome]
+# ?? 1: a missing key must never exit 0 (exit $null does). -SelfTest also checks every outcome has a key.
+exit ($exitCodes[$run.outcome] ?? 1)
