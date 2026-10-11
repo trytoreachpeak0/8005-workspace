@@ -45,6 +45,11 @@
 .PARAMETER MemoryBytes
     Static memory. Dynamic memory is switched off: the golden renderer wants a
     predictable machine, and a build under memory pressure is the slow path.
+    10.5 GB since 2026-10-11 (8 GB before), approved by the user: the 2.5 GB was
+    freed on the host first (SQL Server max server memory 8192 -> 6144 MB, an idle
+    RDP session logged off), and the host keeps at least 4 GB available with the
+    v2 instance running. The v2 workspace's ci-research/memory-budget.md has the
+    measurements. Do not raise it out of the host's free memory.
 
 .PARAMETER GuestPageFile
     Run inside the guest instead of on the host: set the fixed page file size and
@@ -66,7 +71,7 @@
 param(
     [string]$VMName = 'win11-01',
     [int]$ProcessorCount = 20,
-    [long]$MemoryBytes = 8GB,
+    [long]$MemoryBytes = 10752MB,
     [int]$HorizontalResolution = 1920,
     [int]$VerticalResolution = 1080,
     [int]$ShutdownTimeoutSeconds = 180,

@@ -360,7 +360,7 @@ ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VM | Select-Object N
 | 数据根 | `D:\zhengyushao\Hyper-V\{VirtualMachines,VirtualHardDisks}` |
 | 虚拟交换机 | `AGV-Internal`（Internal，**不绑定物理网卡**），宿主侧 `192.168.200.1/24` |
 | NAT | `AGV-NAT`，`192.168.200.0/24`。**不带 DHCP，客户机必须配静态地址** |
-| 虚拟机 | `win11-01`（Gen 2 / **20 vCPU** / **8 GB 静态** / 显示 **Single 1920x1080** / VHDX 上限 110 GB（动态，2026-10-11 由 80 GB 扩，见下） / Secure Boot + vTPM） |
+| 虚拟机 | `win11-01`（Gen 2 / **20 vCPU** / **10.5 GB 静态**（2026-10-11 由 8 GB 扩，见下） / 显示 **Single 1920x1080** / VHDX 上限 110 GB（动态，2026-10-11 由 80 GB 扩，见下） / Secure Boot + vTPM） |
 | 客户机 | `DESKTOP-F9HC40O`，Windows 11 专业版 `26200.9168`，已激活，pwsh 7.6.5，`agvops` 本地管理员 |
 | **进客户机** | **`ssh vm01`**（经 `factory01` 跳板，仅公钥，密钥 `~/.ssh/agv_vm_ed25519`） |
 | 安装介质 | `D:\zhengyushao\installer\Windows.iso` = Windows 11 24H2 build `10.0.26100.1` |
@@ -376,7 +376,7 @@ GitHub Actions runner。三项配置是这两个角色要求的，不要"顺手"
 | 配置 | 为什么 |
 | --- | --- |
 | 显示 `Single 1920x1080` | `ResolutionType` 是 `Default` 时，客户机在没有 vmconnect 会话连着的情况下报 1024x768，直接过不了渲染机的环境门禁。改成 `Single` 后即使无人登录也稳定报 1920x1080 |
-| 8 GB **静态** | 原来是动态 4/2/8 GB，实际只分到 2.5 GB，restore/build/test 会被内存拖垮。渲染机也需要可预测的机器 |
+| 10.5 GB **静态** | 原来是动态 4/2/8 GB，实际只分到 2.5 GB，restore/build/test 会被内存拖垮。渲染机也需要可预测的机器。2026-10-11 由 8 GB 扩到 10.5 GB（用户批准）：一轮 l2 加一轮 test 时客户机已提交 11.65 GiB、可用只剩 0.4 GB，在换页。多出的 2.5 GB 只从宿主腾出来的部分拿——SQL Server `max server memory` 8192→6144 MB、注销一个闲置的远程桌面会话——宿主在 v2 实例运行时仍留至少 4 GB 可用，这条下限是用户定的，**不要再从宿主的空闲内存里往上加**。实测与算法见 `8005-workspace-v2/ci-research/memory-budget.md` |
 | 20 vCPU | 宿主有 36 个逻辑核且长期负载 1%，给足以后挂钟类测试才不会假失败 |
 
 重配用 `../scripts/06-configure-golden-renderer-vm.ps1`（幂等，已符合规格时不重启）。

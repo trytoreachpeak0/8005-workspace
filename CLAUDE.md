@@ -726,7 +726,7 @@ own Hyper-V. As of 2026-09-02 there is one guest:
 
 | Alias | Guest | Address | Notes |
 | --- | --- | --- | --- |
-| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, `agvops` local admin, 20 vCPU, 8 GB static, 1920x1080. pwsh 7.6.5, .NET SDK 8.0.425, git 2.55.0.5 |
+| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, `agvops` local admin, 20 vCPU, 10.5 GB static (8 GB until 2026-10-11), 1920x1080. pwsh 7.6.5, .NET SDK 8.0.425, git 2.55.0.5 |
 
 Key-only, via `ProxyJump factory01` — the guest sits on the Internal switch
 `AGV-Internal` (`192.168.200.0/24`) with NAT out, so there is no route to it
@@ -739,8 +739,15 @@ runner, and the golden WPF renderer that replaces the control machine's
 `gpt_win11`. Its specification is not scratch configuration — 1920x1080 comes
 from `Set-VMVideo -ResolutionType Single`, without which a guest with no
 vmconnect session attached reports 1024x768 and fails the renderer's
-environment gate; the 8 GB is static because dynamic memory had been assigning
-it 2.5 GB, which starves a restore/build/test cycle. Reproduce both with
+environment gate; the memory is static because dynamic memory had been assigning
+it 2.5 GB, which starves a restore/build/test cycle. It went from 8 GB to 10.5 GB
+on 2026-10-11 (user-approved): an l2 plus a test round had pushed the guest to
+11.65 GiB committed and 0.4 GB available, paging. The 2.5 GB came out of factory01
+only by freeing it -- SQL Server's max server memory 8192 -> 6144 MB and an idle
+RDP session logged off -- and the host keeps at least 4 GB available with the v2
+instance running. Measurements, what else could be freed and the 14 GB the guest
+would really want: `8005-workspace-v2/ci-research/memory-budget.md`. Do not grow it
+further out of factory01's free memory; that floor is the user's. Reproduce both with
 `remote-ops/factory-server/scripts/06-configure-golden-renderer-vm.ps1`.
 
 **The guest reaches `github.com` through the control machine's Clash proxy**
