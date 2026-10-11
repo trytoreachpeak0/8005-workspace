@@ -1025,7 +1025,9 @@ Host 会以 `BindingMapMismatch` 拒绝启动，照原样装会半装。**打开
 做的那些事——配置叠加、写 MesIngest token、部署替身、注册计划任务、开防火墙、代际对调——任何
 一步失败，都会留下一个半装的实例，而首次安装此时没有 `.previous` 可以换回去。
 
-脚本在这种情况下会明确打出「没有完成、可能半装」，并把 MVP 指纹的前后值打出来。然后：
+脚本在这种情况下会明确打出「没有完成、可能半装」，并把 MVP 指纹的前后值打出来。产品脚本返回之前就失败的
+（control-server#605 起）不打这段：那时实例仍是旧版本，照下面去卸载会卸掉一个能用的实例；它打的是
+`PARALLEL_INSTALL_FAILED_STATE`，见故障表。半装时会同时打出两者。然后：
 
 1. **先看 MVP**：指纹前后是否一致；再用第 12 节的巡检确认 58005／58007 仍在应答。
 2. 用 `-Uninstall -WhatIf` 看半装实例留下了哪些东西，再 `-Uninstall` 拿掉（默认保留数据根与运维
@@ -1086,6 +1088,7 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 一开始就报 `INSTALLED_CONFIGURATION_MISSING` 或 `INSTALLED_CONFIGURATION_UNREADABLE` | 服务在，但安装目录里的 `appsettings.Production.json` 不在或读不出来。任何一次安装或回滚都不会留下这种状态，**先查明原因**（被手工删了？备份根下最近一次升级的备份里有没有？），弄清之前不要重跑，更不要用 `-Rollback` 试——以前这里会先对调包目录再失败。机器还没被动过 |
 | 部署报「has no 'vehicleFaultRecovery' section」 | `-ControlServerRepository` 指向的 checkout 早于 control-server#454。换一个包含它的 checkout |
 | 升级或回滚失败，输出里有 `JOURNEY_RUNTIME_LEFT_DISABLED` | 设计如此：升级前关掉的运行时开关留在 false，实例不派车。升级脚本在自己的预检里失败（比如包清单不对、输出路径已存在）时服务停着；预检之后失败时它的回退用旧二进制加 false 把服务拉起来。按失败原因处理后，**重新部署当前在跑的那个 commit（或修好的新包）**，成功后叠加会写回定义里的值。**不要用 `-Rollback` 来恢复开关**：安装失败时代际对调还没发生，`-Rollback` 会装上更早一代，车载端可能对不上（第 10 节） |
+| 部署失败，输出末尾有 `PARALLEL_INSTALL_FAILED_STATE`（control-server#605 起） | 这几行列的是本次失败后**仍然改着**的东西，每行带复原办法。`INSTALLED_RECORD=RESTORED`：已装记录 `installed-instance.json` 已放回上一次的，本次的定义没装上，19 号脚本的版本下限照旧，按上一条重新部署当前在跑的 commit 即可。`INSTALLED_RECORD=NEW, STATE UNKNOWN`：产品脚本自己的回滚也失败了，先按它报的步骤人工恢复，恢复到旧版本后**还要**把行里给的旧记录副本（结果目录里的 `install-<runId>.previous-installed-instance.json`）拷回 `installed-instance.json`，否则下一次部署会被卡在本次从没装上的准入策略版本上。`INSTALLED_RECORD=NOT_RESTORED`：放回失败，照行里的路径手工拷回。`JOURNEY_RUNTIME=false`：见上一条。`PACKAGE_DIRECTORIES_SWAPPED`（只在 `-Rollback`）：包目录已对调没换回，行里给了三条 `Move-Item` |
 | 部署报 "MVP service changed" | **立刻停下**。这条断言就是为了不让任何东西悄悄碰生产那套。把前后两次指纹发出来再判断 |
 
 诊断日志和结果 JSON 在 `D:\zhengyushao\control-server-v2-ops\results\`，一次安装一对。
