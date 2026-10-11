@@ -127,15 +127,24 @@ ssh agv01 "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"
 
 ### 读车载端应用日志（中文）
 
-车载端日志在 `C:\8005\OnboardHmi\logs\agv-yyyyMMdd.log`，由 `FileAppLogger` 写成**无 BOM 的
-UTF-8**。文件本身是好的（hmi#292：2026-10-11 从 agv02 原样取回 `agv-20261010.log`、
+车载端日志在 `C:\Users\HT\AppData\Local\SQCD\8005AGV\logs\agv-yyyyMMdd.log`，由 `FileAppLogger`
+写成**无 BOM 的 UTF-8**，每行 `时间戳<Tab>等级<Tab>类别<Tab>来源<Tab>消息`，类别是 REQ-0272 的七个面之一。
+
+这个位置是 `%LOCALAPPDATA%\SQCD\8005AGV\logs`（与日志簿同处），**只在车载端以 `HT` 账号运行时**
+才落在上面那条路径；换了运行账号，路径跟着那个账号的 `%LOCALAPPDATA%` 变。车载端自己清理超过 30 天的
+`agv-yyyyMMdd.log`，同目录别的文件不碰。
+
+**版本分界（onboard-hmi#312）**：含该票的车载端之前，日志写在程序目录 `C:\8005\OnboardHmi\logs\`。
+部署脚本每次把程序目录整个改名成 `.previous`、再删掉上一代 `.previous`，所以那里的日志会随部署消失，
+这正是改位置的原因。升级时旧日志**不迁移**：升级那次部署把旧包连同旧日志改名到
+`C:\8005\OnboardHmi.previous\logs\`，下一次部署就删掉，要留就在那之前拷走。文件本身是好的（hmi#292：2026-10-11 从 agv02 原样取回 `agv-20261010.log`、
 `agv-20261011.log`，2135 行全部带中文，严格 UTF-8 解码通过，`EF BF BD` 计数为 0）。
 看到中文变成一串 `�`（U+FFFD）而英文正常，是**读取链路**上的编码错配，不是日志坏了。
 
 推荐读法：先原样拷回本机，再按 UTF-8 读。字节不经过任何控制台，不会被转码。
 
 ```bash
-scp agv02:C:/8005/OnboardHmi/logs/agv-20261010.log ./evidence/
+scp agv02:C:/Users/HT/AppData/Local/SQCD/8005AGV/logs/agv-20261010.log ./evidence/
 ```
 
 ```powershell
@@ -146,7 +155,7 @@ Get-Content ./evidence/agv-20261010.log -Encoding utf8 | Select-String 'RECOVERY
 的 UTF-8 profile（第 6 节）：
 
 ```bash
-ssh agv02 "Get-Content C:\8005\OnboardHmi\logs\agv-20261010.log -Tail 50"
+ssh agv02 "Get-Content C:\Users\HT\AppData\Local\SQCD\8005AGV\logs\agv-20261010.log -Tail 50"
 ```
 
 会出 `�` 的读法，别用：
