@@ -8,9 +8,9 @@
   "_ioModule": "八仓 Modbus IO 模块。2026-09-13 从这台车上实测：局域网里 192.168.71.50 与 192.168.71.150 的 502 都应答；150 读 DO 100 起 16 路、DI 200 起 16 路得到输出全 0、锁反馈全 1、光幕全 1，是仓位模块；50 对 DI 200 返回 Modbus 异常 0x02（没有这段地址），是另一种设备。三台车都是这个形状。",
   "_clock": "已于 2026-09-03 修复。上线时读到 2027-02-09、快 158.1 天、源 Local CMOS Clock、NTP 配的是 172.19.206.222——与 1、2 号车完全一致，确认是镜像的固有属性。修后偏移 +0.0001s，源 172.19.205.222,0x9。",
   "agvId": "老厂前线新多仓位3",
-  "onboardInstanceId": "REPLACE_WITH_REAL_ONBOARD_INSTANCE_ID",
+  "onboardInstanceId": "OBU-LAOCHANG-XDCW-03",
   "wireToGate": {
-    "onboardInstanceId": "REPLACE_WITH_STABLE_UUID"
+    "onboardInstanceId": "dce47db2-b531-4f27-9737-af60bec96beb"
   },
   "vehicleSafety": {
     "expectedVehicleKey": "BROKERX-7daca4ee91da498d8026c68b7b941127"
