@@ -1,4 +1,4 @@
-18:49:28.934 query session: SESSIONNAME USERNAME ID STATE TYPE DEVICE services 0 Disc console 8 Conn >rdp-tcp#0 szy 9 Active rdp-tcp 65536 Listen
+18:49:28.934 query session: [redacted for the repository: local account name and session list, same reason probe-*.txt is gitignored; the active desktop was an RDP session, rdp-tcp#N]
 18:49:34.657 simulator up pid=24260
 18:49:48.717 hmi up pid=13940
 18:50:53.136 verify1 task=0x41301@10/11/2026 6:49:49 PM called=18:49:48.780 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True

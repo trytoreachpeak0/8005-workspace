@@ -15,7 +15,9 @@
 | 互斥 | 整轮持有 `Global\W2G-InteractiveDesktop`；构建与复现都经 `Invoke-HeavyLocal.ps1 -Ticket ws#20`，持有者「ws#20 封锁」 |
 | 车 | 未碰 agv02／agv03，未动车 |
 
-与车上的偏差（都写在 `repro.ps1` 开头）：启动段只认 `console` 会话，本机是 RDP，复现时放宽为 `console|rdp-tcp#N`；工作目录在 scratch；循环 20 次在车端参数后追加 `-WaitSeconds 3`（现场那次在任务启动 3 秒内就被结束，等待时长不影响）。
+与车上的偏差（都写在 `repro.ps1` 开头）：启动段只认 `console` 会话，本机是 RDP，复现时放宽为 `console|rdp-tcp#N`；工作目录在 scratch；循环 20 次在车端参数后追加 `-WaitSeconds 3`（现场那次在启动段第 3 秒检查时任务已报 `0xC000013A`，等待时长不影响；它在这 3 秒里的哪一刻结束、是否早于脚本首行，不知道）。
+
+入库时的处理：`log.txt` 第 1 行原为本机 `query session` 输出（含本机账户名与会话列表），已打码，理由与 `probe-*.txt` 不入库相同；`repro.ps1` 入库时把写死的路径改成参数（`-Root`、`-NewScripts`、`-OldScripts`），并改为只记录活动会话类型，其余逻辑与产出 `log.txt`、`runs.jsonl` 的那次相同。
 
 ## 结果（`runs.jsonl`、`log.txt`）
 
@@ -28,4 +30,5 @@
 ## 局限
 
 - 探针 `entryWindowVisible` 对新旧两版都报 `no-main-window`（两次为空），分不出「旧版有可见控制台、新版没有」：控制台窗口可能由 Windows Terminal／conhost 托管，不挂在 pwsh 进程上。所以「隐藏后不再有可见窗口」**没有得到实证**，只实证了「隐藏后 UIA 仍可用」。
+- `-WindowStyle Hidden` 要等 pwsh 自己初始化后才生效，在那之前控制台照样弹出；本机大概率跑在 Windows Terminal 下，车上是 Win10 conhost，两者不同。`conhost.exe --headless` 没在车上验证过，列为下次上车时验证的候选，本次不换。
 - 本机是 RDP 会话、无服务端、条码框始终禁用，与车上（console 会话、真实会话就绪）不同；现场那次的触发条件未知，21 次不复现不能排除它。

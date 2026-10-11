@@ -12,10 +12,18 @@
         to rdp-tcp#N;
       * -VehicleRoot is a scratch directory;
       * for the loop runs -WaitSeconds is appended to the vehicle arguments so one run takes seconds,
-        not a minute (the 2026-10-11 kill happened within 3 s of the task start).
+        not a minute (on 2026-10-11 the task already reported 0xC000013A at the launch script's
+        3-second check; when inside those seconds it ended is not known).
+
+    -Root holds bin\sim and bin\hmi (published builds) and receives repro\<timestamp>. -NewScripts is
+    the directory with the scripts under test, -OldScripts a directory with the origin/main copies.
+    As committed, the paths are parameters and the session list is no longer logged (it carries the
+    local account name); otherwise the logic is the one that produced log.txt and runs.jsonl.
 #>
 param(
-    [string] $Root = 'F:\8005-scratch\ws20',
+    [Parameter(Mandatory)][string] $Root,
+    [Parameter(Mandatory)][string] $NewScripts,
+    [Parameter(Mandatory)][string] $OldScripts,
     [int] $Iterations = 10,
     [switch] $VerifyOnly
 )
@@ -114,7 +122,8 @@ function Invoke-Entry([string] $Variant, [string] $LaunchSource, [string] $Vehic
 $mutex = [System.Threading.Mutex]::new($false, 'Global\W2G-InteractiveDesktop')
 if (-not $mutex.WaitOne([TimeSpan]::FromSeconds(60))) { throw 'Desktop lock Global\W2G-InteractiveDesktop is held by someone else.' }
 try {
-    Note "query session: $((query session 2>&1 | Out-String).Trim() -replace '\s+', ' ')"
+    $active = (query session 2>&1 | Select-String -Pattern '^\s*>?(console|rdp-tcp#\d+)\s+\S+\s+\d+\s+Active').Matches
+    Note "active desktop session type: $(if ($active) { $active[0].Groups[1].Value -replace '#\d+$', '#N' } else { 'none' })"
     $s = Get-Stack
     if ($s.Sim.Count -or $s.Hmi.Count) { throw "A simulator or HMI is already running here (sim $($s.Sim -join ','), hmi $($s.Hmi -join ','))." }
     Start-Interactive $simExe 'Simulator'
@@ -130,10 +139,10 @@ try {
     Start-Sleep -Seconds 10
     Note "hmi up pid=$((Get-Stack).Hmi -join ',')"
 
-    $new16 = 'F:\8005-wt\ws20-8005-workspace\remote-ops\onboard-hmi\scripts\16-enter-sublot-uia.ps1'
-    $newVeh = 'F:\8005-wt\ws20-8005-workspace\remote-ops\onboard-hmi\scripts\agv-enter-sublot-uia.ps1'
-    $old16 = Join-Path $Root 'old\16-enter-sublot-uia.ps1'
-    $oldVeh = Join-Path $Root 'old\agv-enter-sublot-uia.ps1'
+    $new16 = Join-Path $NewScripts '16-enter-sublot-uia.ps1'
+    $newVeh = Join-Path $NewScripts 'agv-enter-sublot-uia.ps1'
+    $old16 = Join-Path $OldScripts '16-enter-sublot-uia.ps1'
+    $oldVeh = Join-Path $OldScripts 'agv-enter-sublot-uia.ps1'
 
     # 1. The fix as shipped: hidden console, unmodified arguments. Does UIA still attach to the HMI?
     $null = Invoke-Entry 'verify' $new16 $newVeh 1 0

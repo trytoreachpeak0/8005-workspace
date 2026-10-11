@@ -29,7 +29,8 @@
       * The input must be open (CanSubmit) before typing; typing into a closed box is a timing
         error of this tool, not something to force.
 
-    Writes a JSON result to -ResultPath whatever happens, so the control host never has to
+    Writes <ResultPath>.started (outcome STARTED) as its first act, then a JSON result to
+    -ResultPath whatever happens, so the control host never has to
     guess from silence, and exits non-zero unless the sublot was submitted: 0 submitted,
     2 not submitted (INPUT_NOT_OPEN, READBACK_MISMATCH), 1 error (no HMI process, no scan box).
 
@@ -180,6 +181,14 @@ function Get-EntryExitCode {
 
 # Dot-sourced by the self-test: define the functions and stop.
 if ($MyInvocation.InvocationName -eq '.') { return }
+
+# First act: a marker that this script ran at all, next to the result and never in its place (the control
+# host polls for the result file, and a STARTED record there would be read as the final answer). Without
+# it a missing result cannot tell "died before the first line" from "died later" (8005-workspace#20).
+if (-not [string]::IsNullOrWhiteSpace($ResultPath)) {
+    [ordered]@{ outcome = 'STARTED'; pid = $PID; sublot = $Sublot; startedAt = [DateTimeOffset]::Now.ToString('o') } |
+        ConvertTo-Json | Set-Content -LiteralPath "$ResultPath.started" -Encoding utf8NoBOM
+}
 
 $result = [ordered]@{
     autoEntered = $true
