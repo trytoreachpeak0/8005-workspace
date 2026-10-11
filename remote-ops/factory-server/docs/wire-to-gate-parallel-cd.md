@@ -664,6 +664,10 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
   -ControlServerRepository <干净 checkout> -Rollback -AdmissionPolicyVersionOverride <装过的最高版本 + 1>
 ```
 
+**先确认上一代的包不早于 control-server#605。**服务器上的安装脚本是 19 号脚本每次从控制端 checkout 用 scp 送过去的，
+但升级与回滚真正执行的 `Update-ControlServerLocal.ps1` 取自**被装的那个包**。早于 #605 的包里，这个脚本在数据目录没有或只有
+一个锁文件时（正常停服就是这样）必在同一处 `.Count` 失败。所以回滚到这样一代，几乎一定失败在停服之后。
+
 **回滚必须显式给准入版本（control-server#552）。**回滚换回的是服务器上的上一代包，覆盖层却按控制端这一次传的
 定义重写，所以第 1 节的「包与克隆同一提交」对回滚不适用，也不检查（克隆干净、定义来自克隆这两条照样检查）。而库里
 绑过的准入版本只能往上走：用和库里相同的版本，内容不同判漂移；用更低的版本，判倒退；两种都让新需求停止受理
@@ -716,6 +720,8 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 失败后服务的状态取决于升级脚本在哪一步失败：在它自己的预检里失败，服务停在我们停下的状态；预检之后再失败，升级脚本自己的回退会用
 **旧二进制加 false** 把服务拉起来。**恢复办法是重新部署当前在跑的那个 commit（或修好的新包），不要用 `-Rollback` 来恢复开关**：
 安装模式失败时代际对调还没发生，这时再跑 `-Rollback`，装上的是 `.previous`，也就是更早一代，车载端版本可能对不上。
+**例外：当前在跑的包早于 control-server#605 时，重新部署它也会失败**——升级执行的是包里的 `Update-ControlServerLocal.ps1`，
+旧包里的那份在同一处 `.Count` 再失败一次。这时只能部署包含 #605 修复的包。
 
 回滚还会沿用服务里已有的恢复凭据（第 7.1 节）。
 
@@ -1004,6 +1010,19 @@ Host 会以 `BindingMapMismatch` 拒绝启动，照原样装会半装。**打开
 定义里 `journeyRuntime.enabled` 与 `routeGraph.enabled` 都改成 `false` 再装即可（两者必须同时
 改，只关前者会被校验拒绝），之后单独再开。
 
+### 现状（2026-10-11）：升级失败后的半态，只能用修复包恢复
+
+control-server#566 现场续场二（11:46，包 `da6e40e2`）原地升级失败在 `Update-ControlServerLocal.ps1:307` 的 `.Count`
+（control-server#605）。以下是从该票证据读到的，没有到服务器上复核：
+
+- 失败在停服之后、备份与换二进制之前，库与二进制没动，升级脚本把服务拉了回来。
+- 安装目录里 `JourneyRuntime.enabled` 是 false，实例不派车。
+- `installed-instance.json` 已经记成本次要装的新定义，与实际在跑的不一致（那次的安装脚本还不会放回旧记录）。
+
+**恢复只能部署包含 #605 修复的包。**不要重新部署 `da6e40e2`，也不要 `-Rollback`：两者执行的都是旧包里的升级脚本，
+会在同一处再失败一次。用修复包、照常带实例定义部署即可：这次送的准入策略版本只要不低于失败那次已经记下的（同一份定义就是相等），
+19 号脚本的版本下限就放行；部署走完后叠加会把定义里的 `JourneyRuntime.enabled` 写回去。部署 factory01 由现场票另行安排。
+
 ### 申请材料
 
 | 项 | 内容 |
@@ -1087,8 +1106,8 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 回滚一开始就报「No previous generation to roll back to」 | `D:\zhengyushao\ControlServer.V2.previous\controlserver` 不存在，没有可退的上一代。首次安装后的第一次升级之前就是这样。机器还没被动过 |
 | 一开始就报 `INSTALLED_CONFIGURATION_MISSING` 或 `INSTALLED_CONFIGURATION_UNREADABLE` | 服务在，但安装目录里的 `appsettings.Production.json` 不在或读不出来。任何一次安装或回滚都不会留下这种状态，**先查明原因**（被手工删了？备份根下最近一次升级的备份里有没有？），弄清之前不要重跑，更不要用 `-Rollback` 试——以前这里会先对调包目录再失败。机器还没被动过 |
 | 部署报「has no 'vehicleFaultRecovery' section」 | `-ControlServerRepository` 指向的 checkout 早于 control-server#454。换一个包含它的 checkout |
-| 升级或回滚失败，输出里有 `JOURNEY_RUNTIME_LEFT_DISABLED` | 设计如此：升级前关掉的运行时开关留在 false，实例不派车。升级脚本在自己的预检里失败（比如包清单不对、输出路径已存在）时服务停着；预检之后失败时它的回退用旧二进制加 false 把服务拉起来。按失败原因处理后，**重新部署当前在跑的那个 commit（或修好的新包）**，成功后叠加会写回定义里的值。**不要用 `-Rollback` 来恢复开关**：安装失败时代际对调还没发生，`-Rollback` 会装上更早一代，车载端可能对不上（第 10 节） |
-| 部署失败，输出末尾有 `PARALLEL_INSTALL_FAILED_STATE`（control-server#605 起） | 这几行列的是本次失败后**仍然改着**的东西，每行带复原办法。`INSTALLED_RECORD=RESTORED`：已装记录 `installed-instance.json` 已放回上一次的，本次的定义没装上，19 号脚本的版本下限照旧，按上一条重新部署当前在跑的 commit 即可。`INSTALLED_RECORD=NEW, STATE UNKNOWN`：产品脚本自己的回滚也失败了，先按它报的步骤人工恢复，恢复到旧版本后**还要**把行里给的旧记录副本（结果目录里的 `install-<runId>.previous-installed-instance.json`）拷回 `installed-instance.json`，否则下一次部署会被卡在本次从没装上的准入策略版本上。`INSTALLED_RECORD=NOT_RESTORED`：放回失败，照行里的路径手工拷回。`JOURNEY_RUNTIME=false`：见上一条。`PACKAGE_DIRECTORIES_SWAPPED`（只在 `-Rollback`）：包目录已对调没换回，行里给了三条 `Move-Item` |
+| 升级或回滚失败，输出里有 `JOURNEY_RUNTIME_LEFT_DISABLED` | 设计如此：升级前关掉的运行时开关留在 false，实例不派车。升级脚本在自己的预检里失败（比如包清单不对、输出路径已存在）时服务停着；预检之后失败时它的回退用旧二进制加 false 把服务拉起来。按失败原因处理后，**重新部署当前在跑的那个 commit（或修好的新包）**，成功后叠加会写回定义里的值。**不要用 `-Rollback` 来恢复开关**：安装失败时代际对调还没发生，`-Rollback` 会装上更早一代，车载端可能对不上（第 10 节）。**当前在跑的包早于 control-server#605 时，重新部署它也会在同一处 `.Count` 失败**（升级执行的是包里的升级脚本），只能部署含修复的包 |
+| 部署失败，原始错误之前打出 `PARALLEL_INSTALL_FAILED_STATE`（control-server#605 起） | 这几行告警先打，原始错误随后抛出；列的是本次失败后**仍然改着**的东西，每行带复原办法。`INSTALLED_RECORD=RESTORED`：已装记录 `installed-instance.json` 已放回上一次的，本次的定义没装上，19 号脚本的版本下限照旧。这时再看 `JOURNEY_RUNTIME` 那一行：是 `false` 且带说明，说明升级动过开关，按上一条重新部署；只报了当前值（失败在产品脚本开始之前，开关没动过），实例照旧在跑，修好原因再部署即可，不必为了恢复而重新部署。`INSTALLED_RECORD=NEW:`：产品脚本已经装上了本次的二进制，记录与之相符，实例是半装，按第 11 节「装到一半失败怎么办」处理。`INSTALLED_RECORD=NEW (first install…)`：首次安装，没有旧记录可放回；保留新记录是为了让 `-Uninstall` 知道要删什么。`INSTALLED_RECORD=NEW, STATE UNKNOWN`：产品脚本自己的回滚也失败了，先按它报的步骤人工恢复，恢复到旧版本后**还要**把行里给的旧记录副本（结果目录里的 `install-<runId>.previous-installed-instance.json`）拷回 `installed-instance.json`，否则下一次部署会被卡在本次从没装上的准入策略版本上。`INSTALLED_RECORD=NOT_RESTORED`：放回失败，照行里的路径手工拷回。`JOURNEY_RUNTIME=false`：见上一条。`PACKAGE_DIRECTORIES_SWAPPED`（只在 `-Rollback`）：包目录已对调没换回，行里给了三条 `Move-Item` |
 | 部署报 "MVP service changed" | **立刻停下**。这条断言就是为了不让任何东西悄悄碰生产那套。把前后两次指纹发出来再判断 |
 
 诊断日志和结果 JSON 在 `D:\zhengyushao\control-server-v2-ops\results\`，一次安装一对。
