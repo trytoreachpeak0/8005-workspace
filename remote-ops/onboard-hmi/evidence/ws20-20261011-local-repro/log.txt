@@ -1,0 +1,26 @@
+18:49:28.934 query session: SESSIONNAME USERNAME ID STATE TYPE DEVICE services 0 Disc console 8 Conn >rdp-tcp#0 szy 9 Active rdp-tcp 65536 Listen
+18:49:34.657 simulator up pid=24260
+18:49:48.717 hmi up pid=13940
+18:50:53.136 verify1 task=0x41301@10/11/2026 6:49:49 PM called=18:49:48.780 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:51:02.028 old1 task=0x41301@10/11/2026 6:50:54 PM called=18:50:53.246 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:51:09.265 new1 task=0x41301@10/11/2026 6:51:03 PM called=18:51:02.054 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:51:16.830 old2 task=0x41301@10/11/2026 6:51:11 PM called=18:51:09.305 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:51:33.258 new2 task=0x41301@10/11/2026 6:51:21 PM called=18:51:16.882 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:51:47.067 old3 task=0x41301@10/11/2026 6:51:37 PM called=18:51:33.282 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:51:59.127 new3 task=0x41301@10/11/2026 6:51:52 PM called=18:51:47.128 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:06.868 old4 task=0x41301@10/11/2026 6:52:00 PM called=18:51:59.215 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:14.325 new4 task=0x41301@10/11/2026 6:52:08 PM called=18:52:06.893 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:20.896 old5 task=0x41301@10/11/2026 6:52:15 PM called=18:52:14.342 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:27.797 new5 task=0x41301@10/11/2026 6:52:21 PM called=18:52:20.915 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:34.848 old6 task=0x41301@10/11/2026 6:52:29 PM called=18:52:27.818 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:41.508 new6 task=0x41301@10/11/2026 6:52:35 PM called=18:52:34.870 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:47.862 old7 task=0x41301@10/11/2026 6:52:42 PM called=18:52:41.528 visible= outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:52:55.320 new7 task=0x41301@10/11/2026 6:52:48 PM called=18:52:47.882 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:53:01.914 old8 task=0x41301@10/11/2026 6:52:56 PM called=18:52:55.339 visible= outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:53:08.727 new8 task=0x41301@10/11/2026 6:53:02 PM called=18:53:01.936 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:53:15.312 old9 task=0x41301@10/11/2026 6:53:09 PM called=18:53:08.744 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:53:22.026 new9 task=0x41301@10/11/2026 6:53:16 PM called=18:53:15.330 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:53:28.676 old10 task=0x41301@10/11/2026 6:53:23 PM called=18:53:22.045 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:53:35.996 new10 task=0x41301@10/11/2026 6:53:30 PM called=18:53:28.701 visible=no-main-window outcome=INPUT_NOT_OPEN window=8005 多仓位AGV车载端 sim=True hmi=True
+18:53:36.025 final stack: sim=24260 hmi=13940
+18:53:37.259 output: F:\8005-scratch\ws20\repro\20261011-184928
