@@ -125,6 +125,44 @@ ssh agv01 "Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 20 | Select-Ob
 ssh agv01 "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"
 ```
 
+### 读车载端应用日志（中文）
+
+车载端日志在 `C:\8005\OnboardHmi\logs\agv-yyyyMMdd.log`，由 `FileAppLogger` 写成**无 BOM 的
+UTF-8**。文件本身是好的（hmi#292：2026-10-11 从 agv02 原样取回 `agv-20261010.log`、
+`agv-20261011.log`，2135 行全部带中文，严格 UTF-8 解码通过，`EF BF BD` 计数为 0）。
+看到中文变成一串 `�`（U+FFFD）而英文正常，是**读取链路**上的编码错配，不是日志坏了。
+
+推荐读法：先原样拷回本机，再按 UTF-8 读。字节不经过任何控制台，不会被转码。
+
+```bash
+scp agv02:C:/8005/OnboardHmi/logs/agv-20261010.log ./evidence/
+```
+
+```powershell
+Get-Content ./evidence/agv-20261010.log -Encoding utf8 | Select-String 'RECOVERY'
+```
+
+一定要隔着 SSH 直接看时，只用 `ssh agvNN "<命令>"` 让远端默认 shell 执行，它会加载 `agvops`
+的 UTF-8 profile（第 6 节）：
+
+```bash
+ssh agv02 "Get-Content C:\8005\OnboardHmi\logs\agv-20261010.log -Tail 50"
+```
+
+会出 `�` 的读法，别用：
+
+- 远端绕开 profile：`pwsh -NoProfile ...`、`powershell.exe ...`、`cmd /c type ...`。SSH 会话的
+  控制台代码页是 936（GBK），没有 profile 把它改成 65001，中文就以 GBK 字节发回来，本机按
+  UTF-8 解码时每个汉字都变成 `�`，ASCII 部分不受影响——正是 hmi#292 现场看到的样子。
+  （本机已验证「GBK 字节按 UTF-8 解码」得到的正是这个形状，反方向错配得到的是错字而不是 `�`；
+  现场当时具体用了哪条命令没有记录，「绕开 profile」是按这个形状推断的。带 profile 的会话实测
+  `[Console]::OutputEncoding.CodePage` 为 65001。）
+- 本机用 pwsh 接 `ssh` 的输出（`$x = ssh agv02 "..."`）：本机控制台默认也是 936，pwsh 会把
+  原生命令的 UTF-8 输出按 GBK 解码，得到一堆错字。要这么接，先在本机执行
+  `[Console]::OutputEncoding = [Text.Encoding]::UTF8`。
+
+判断一份日志到底坏没坏，只看拷回来的原始字节（`EF BF BD` 出现几次），不看屏幕上的字。
+
 ### 完整环境快照
 
 `scripts/01-probe.ps1` 是只读的，随时可跑，用来对比现状与基线：
