@@ -1010,18 +1010,24 @@ Host 会以 `BindingMapMismatch` 拒绝启动，照原样装会半装。**打开
 定义里 `journeyRuntime.enabled` 与 `routeGraph.enabled` 都改成 `false` 再装即可（两者必须同时
 改，只关前者会被校验拒绝），之后单独再开。
 
-### 现状（2026-10-11）：升级失败后的半态，只能用修复包恢复
+### 历史：2026-10-11 11:46 那次失败（control-server#605）
 
-control-server#566 现场续场二（11:46，包 `da6e40e2`）原地升级失败在 `Update-ControlServerLocal.ps1:307` 的 `.Count`
-（control-server#605）。以下是从该票证据读到的，没有到服务器上复核：
+control-server#566 现场续场二用包 `da6e40e2` 原地升级 v2 并行实例，失败在 `Update-ControlServerLocal.ps1:307` 的 `.Count`。
+出处都是 `8005-agv-control-server` 证据分支 `evidence/cs566b-resume2`（`3e6d5c228`）上的 `evidence/field/20261011-W2-prep2/19-upgrade-single-car.txt`，行号是该文件的行号：
 
-- 失败在停服之后、备份与换二进制之前，库与二进制没动，升级脚本把服务拉了回来。
-- 安装目录里 `JourneyRuntime.enabled` 是 false，实例不派车。
-- `installed-instance.json` 已经记成本次要装的新定义，与实际在跑的不一致（那次的安装脚本还不会放回旧记录）。
+- 安装脚本在失败之前已把 `installed-instance.json` 记成本次定义（第 43 行 `Installed definition recorded at ...`）。那次的安装脚本还不会放回旧记录。
+  这一次两边的准入策略版本都是 3（第 9 行），所以版本下限本身没有卡住下一次部署；新定义升了版本时会卡住，见第 12 节故障表 `PARALLEL_INSTALL_FAILED_STATE` 一行。
+- 失败后 `JourneyRuntime.enabled` 是 false、服务在运行（第 49 行 `JOURNEY_RUNTIME_LEFT_DISABLED ... JourneyRuntime.enabled=False (service status: Running)`）。
+- 抛错原文是 `The property 'Count' cannot be found on this object.`（第 59 行）。它在停服之后、备份与换二进制之前，
+  这一点是按 `Update-ControlServerLocal.ps1` 在 `da6e40e2` 上的代码顺序推的（停服、等锁、`:307`、再备份），证据里没有单独一行记它。
 
-**恢复只能部署包含 #605 修复的包。**不要重新部署 `da6e40e2`，也不要 `-Rollback`：两者执行的都是旧包里的升级脚本，
-会在同一处再失败一次。用修复包、照常带实例定义部署即可：这次送的准入策略版本只要不低于失败那次已经记下的（同一份定义就是相等），
-19 号脚本的版本下限就放行；部署走完后叠加会把定义里的 `JourneyRuntime.enabled` 写回去。部署 factory01 由现场票另行安排。
+之后实例怎么恢复、现在跑的是哪个提交，不写在这里：那是状态，会过期。查服务器，或看现场票。
+
+**通用规则：凡是 control-server#605 合入之前的包（包括 `da6e40e2`、`0c396ba`、`83a76689`），重新部署它们或 `-Rollback`
+到它们，都会在同一处失败，只能部署含修复的包。**出处：这三个提交的 `scripts/Update-ControlServerLocal.ps1` 里都还是
+`$releasedLocks = Wait-DataRootReleased ...` 这种不经 `@()` 的写法，修复提交（`808551ffb`）都不是它们的祖先
+（`git merge-base --is-ancestor`，2026-10-11 核对）；升级与回滚执行的是被装那个包里的这份脚本（第 10 节）。没有或只有一个
+锁文件时它必抛，这是 control-server#605 的自检 U2、U3 在严格模式下复现的（PR 8005-agv-control-server#613 的「红」一节）。
 
 ### 申请材料
 
