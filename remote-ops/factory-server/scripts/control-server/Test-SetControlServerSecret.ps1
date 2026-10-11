@@ -145,6 +145,57 @@ Write-Result -Ok ($lines.Count -eq 5 -and $columns.Count -eq 1 -and ($lines[-1] 
     -Name '-Show pads every key to the longest name; the optional key reads "missing (optional)"' -Detail ($lines -join ' | ')
 Write-Result -Ok (-not ($lines -join "`n").Contains('value-of-')) -Name '-Show never prints a value' -Detail ($lines -join ' | ')
 
+# 6. control-server#600: one vehicle-safety projection credential per vehicle, generated here, never typed.
+Write-Host ''
+Write-Host 'Per-vehicle projection credentials (control-server#600)' -ForegroundColor Cyan
+foreach ($name in @('Get-VehicleSafetySecretKey', 'New-VehicleSafetySecret', 'Add-VehicleSafetySecret')) {
+    $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    Write-Result -Ok ($null -ne $definition) -Name "$name is defined in Set-ControlServerSecret.ps1" -Detail 'missing'
+    if ($null -ne $definition) { . ([scriptblock]::Create($definition.Extent.Text)) }
+}
+$agv02Key = 'BROKERX-f38975561adf46ccb1d2f23833c7d0e4'
+$agv03Key = 'BROKERX-7daca4ee91da498d8026c68b7b941127'
+$err = $null
+try {
+    Write-Result -Ok ((Get-VehicleSafetySecretKey -VehicleKey $agv02Key) -ceq "OnboardSafetyCredential:$agv02Key") `
+        -Name 'the store key is OnboardSafetyCredential:<vehicleKey>' -Detail (Get-VehicleSafetySecretKey -VehicleKey $agv02Key)
+    $a = & $plainOf (New-VehicleSafetySecret); $b = & $plainOf (New-VehicleSafetySecret)
+    Write-Result -Ok ($a.Length -ge 43 -and $a -cne $b -and $a -match '^[A-Za-z0-9_-]+$') `
+        -Name 'a generated credential is at least 256 bits, URL- and header-safe, and different every time' -Detail "lengths $($a.Length)/$($b.Length)"
+
+    $counter = @{ N = 0 }
+    $fixed = { $counter.N++; & $secure "generated-$($counter.N)" }.GetNewClosure()
+    $store = New-MvpStore
+    $added = Add-VehicleSafetySecret -Store $store -VehicleKey $agv02Key -NewSecret $fixed
+    Write-Result -Ok ((& $plainOf $added["OnboardSafetyCredential:$agv02Key"]) -ceq 'generated-1') -Name 'a missing vehicle credential is generated into the store' -Detail ''
+
+    $refused = $null
+    try { $null = Add-VehicleSafetySecret -Store $store -VehicleKey $agv02Key -NewSecret $fixed } catch { $refused = $_.Exception.Message }
+    Write-Result -Ok ($null -ne $refused -and $refused.Contains('VEHICLE_SAFETY_CREDENTIAL_PRESENT') -and $refused.Contains('-Rotate') -and
+        (& $plainOf $store["OnboardSafetyCredential:$agv02Key"]) -ceq 'generated-1' -and -not $refused.Contains('generated-')) `
+        -Name 'a present vehicle credential is not replaced without -Rotate, and the refusal shows no value' -Detail "error: $refused"
+    $null = Add-VehicleSafetySecret -Store $store -VehicleKey $agv02Key -NewSecret $fixed -Rotate
+    Write-Result -Ok ((& $plainOf $store["OnboardSafetyCredential:$agv02Key"]) -cne 'generated-1') -Name '-Rotate replaces it' -Detail ''
+
+    # A generator that hands back the shared onboard credential, or another vehicle's, is refused rather than stored.
+    $store = New-MvpStore
+    $store["OnboardSafetyCredential:$agv03Key"] = & $secure 'agv03-value'
+    foreach ($case in @(@{ Name = 'the shared onboard credential'; Value = 'value-of-OnboardCredential' }, @{ Name = 'another vehicle''s'; Value = 'agv03-value' })) {
+        $same = { & $secure $case.Value }.GetNewClosure()
+        $refused = $null
+        try { $null = Add-VehicleSafetySecret -Store $store -VehicleKey $agv02Key -NewSecret $same } catch { $refused = $_.Exception.Message }
+        Write-Result -Ok ($null -ne $refused -and -not $store.ContainsKey("OnboardSafetyCredential:$agv02Key") -and -not $refused.Contains($case.Value)) `
+            -Name "a generated value equal to $($case.Name) is refused, not stored" -Detail "error: $refused"
+    }
+} catch { $err = $_.Exception.Message }
+Write-Result -Ok ($null -eq $err) -Name 'the per-vehicle credential cases ran to the end' -Detail "threw: $err"
+
+# The two deployment scripts read the same store key; the name is the contract between the three files.
+foreach ($consumer in @('..\19-deploy-control-server-parallel.ps1', '..\..\..\onboard-hmi\scripts\06-deploy-onboard-hmi.ps1')) {
+    $text = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $consumer)
+    Write-Result -Ok ($text.Contains("'OnboardSafetyCredential:'")) -Name "$(Split-Path -Leaf $consumer) reads the per-vehicle store key OnboardSafetyCredential:<vehicleKey>" -Detail 'literal not found'
+}
+
 Write-Host ''
 Write-Host ("{0} passed, {1} failed" -f $script:Passed, $script:Failed) -ForegroundColor ($script:Failed -eq 0 ? 'Green' : 'Red')
 exit ($script:Failed -eq 0 ? 0 : 1)

@@ -566,6 +566,30 @@ v2 实例。
   名单为空就是这样），打 `CLEARANCE_EXIT_UNAVAILABLE` 警告并列原因码，不算失败。它读的是服务将读的文件，不是运行中进程的
   判定——服务端没有对外暴露这个状态，只有自己日志里的 2271/2272。
 
+
+### 7.2 多车实例每台车一个出发安全投影凭据（control-server#600）
+
+车载端每秒向 v2 实例要一次「这台车在 RIoT 上停稳了没有」（`/api/onboard/v1/vehicle-safety`）。以前全车共用一个凭据、请求里不带
+车号，服务端一律回 `JourneyRuntime.vehicleKey` 那一台的投影：两车实例里另一台车按车号不符拒收，永远「出发安全未就绪」
+（control-server#566 现场续场二，agv03 拿到 agv02 的投影）。现在服务端凭凭据认车，部署要多做一步：
+
+- **生成**：控制端跑 `control-server/Set-ControlServerSecret.ps1 -NewVehicleSafetyCredential agv02, agv03`。脚本从
+  `remote-ops/onboard-hmi/config/site-<别名>.json` 读 `vehicleSafety.expectedVehicleKey`，随机生成 256 位凭据，存进同一个 DPAPI
+  秘密存储，键名 `OnboardSafetyCredential:<vehicleKey>`。只打印键名，不打印值。已有的不覆盖，要换加 `-Rotate`，换完服务端和
+  那台车都要重新部署。`-Show` 会列出已有哪些车的凭据。
+- **服务端**：定义带车队表（`journeyRuntime.fleet`）时，`19-deploy` 按每行的 `vehicleKey` 从存储取凭据，缺哪台就在下载之前拒绝；
+  放进 `deploy-config.json` 的 `onboardSafetyCredentials`。服务器端安装脚本把每台车的值写进 v2 服务自己的 `Environment`，变量名
+  按 RIoT id 取 `CONTROL_SERVER_V2_ONBOARD_SAFETY_CREDENTIAL_RIOT59`（agv02）、`..._RIOT60`（agv03），并在配置里写
+  `OnboardSafetyProjection:vehicleCredentials`。单车定义不需要、也不发送。
+- **服务端拒绝启动的三种情况**：车队表两台以上而没有按车凭据；两台车同值；某台车的值等于共享的
+  `CONTROL_SERVER_ONBOARD_CREDENTIAL`。服务器端安装脚本在停任何东西之前就按同样规则拒绝。
+- **车载端**：车载端生产模板把投影的凭据变量单独设成 `CONTROL_SERVER_ONBOARD_SAFETY_CREDENTIAL`，地址带 `?vehicleKey=`。
+  `06-deploy` 从存储取**这台车自己的**凭据写进车上这个变量，部署探针也用它；存储里没有就拒绝。车连的是单车 v2 实例时（只认共享
+  凭据），加 `-SharedSafetyCredential`，脚本就把共享凭据写进这个变量；这台车在存储里有按车凭据也一样，开关优先，脚本会说明它忽略了按车凭据。猜错的方向是安全的：多车实例不认共享凭据（401），车只会
+  未就绪。MVP 车载端（agv01）的模板仍与会话共用变量，不受影响。
+- 顺序：先生成凭据，再 `19-deploy` 服务端，再逐台 `06-deploy` 车载端。只部署了一半时，车处于「出发安全未就绪」，不会误放行。
+- TCP 会话仍然是全车共用一个凭据、车靠握手自报身份，这一步没有改它。
+
 ---
 
 ## 8. 三处不显然的隔离细节
@@ -1077,6 +1101,9 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 输出里有 `CLEARANCE_EXIT_UNAVAILABLE` | 清桩出口不可用，后面列着原因码。第一阶段（入口关、名单为空）就是这样，**是预期**。不是第一阶段时：`FIELD_OPERATOR_ROSTER_EMPTY` 填名单（每台车的操作员号各一条，必须写 `operatorId`），`STATION_CLEARANCE_ENTRY_NOT_OFFERED`／`CHARGING_RECOVERY_ENTRY_NOT_OFFERED` 看定义里的 `vehicleFaultRecovery.enabled` 与凭据（第 7.1 节） |
 | 安装报 `CLEARANCE_EXIT_BROKEN` | 生效配置里缺了那两节，或入口开着而服务 `Environment` 里没有 `CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL`。后者先跑 `Set-ControlServerSecret.ps1` 录入 `V2FaultRecoveryCredential` 再重装 |
 | 部署一开始就报「'V2FaultRecoveryCredential' is missing」 | 定义里开了恢复入口，但控制端秘密存储里没有这个键（第 7.1 节）。机器还没被碰；用 `Set-ControlServerSecret.ps1` 录入后重跑 |
+| 部署一开始就报「needs one vehicle-safety projection credential per vehicle」 | 定义带车队表，控制端存储里缺那几台车的投影凭据（第 7.2 节）。机器还没被碰；跑 `Set-ControlServerSecret.ps1 -NewVehicleSafetyCredential <别名>` 后重跑，之后逐台重新部署车载端 |
+| 服务器端报 `ONBOARD_SAFETY_CREDENTIAL_MISSING`／`ONBOARD_SAFETY_CREDENTIAL_SHARED` | 车队表里某台车两处都没有投影凭据（多见于回滚或手工运行），或两台车同值、某台等于共享凭据（第 7.2 节）。机器还没被动过 |
+| 车载端一直「出发安全未就绪」，探针报 `vehicle-safety 401` 或 `403` | 401：车上的 `CONTROL_SERVER_ONBOARD_SAFETY_CREDENTIAL` 不是这台车在服务端的那一份（或连的是多车实例却用了 `-SharedSafetyCredential`）。403：地址里的 `vehicleKey` 与凭据的车不符或不在车队表里。重新 `06-deploy` 这台车（第 7.2 节） |
 | 服务器端报「there is no value for CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL」 | 定义里开了恢复入口，`deploy-config.json` 里没有凭据、服务里也没有（多见于回滚或手工运行）。机器还没被动过 |
 | 升级或回滚一开始就报 `UPGRADE_REFUSED_DISPATCH_OPEN` | 已装配置的派车闸门开着，车可能在途。经用户授权后用 `20-set-control-server-parallel-dispatch-gate.ps1 -State Closed` 关（第 10 节「关、开派车闸门」）；脚本跑不了时才照第 10 节的三步手工关：先停注入新需求、等 `agv02`／`agv03` 都 `Completed`；再改 **`C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json`**（不是 MVP 的 `...\ControlServer\`，不要用记事本另存为）；再重启 **「8005 AGV ControlServer V2」**（不是「8005 AGV ControlServer」）。机器还没被动过 |
 | 一开始就报 `CONFIGURATION_CHANGED_SINCE_START` | V2 的已装配置在服务进程启动之后被改过，进程还按旧配置跑。多半是关闸门时改了文件、忘了重启。重启「8005 AGV ControlServer V2」再跑。机器还没被动过 |

@@ -40,6 +40,13 @@
     reads nothing and writes nothing; Test-SetControlServerSecret.ps1 drives it
     and Update-SecretStore offline, without DPAPI.
 
+    Since control-server#600 the store also holds one vehicle-safety projection
+    credential per vehicle, under OnboardSafetyCredential:<vehicleKey>. Those are
+    never typed: -NewVehicleSafetyCredential generates them. The v2 server answers
+    a vehicle's projection only to its own credential, 19-deploy sends each
+    roster vehicle's to the parallel instance, and 06-deploy writes a vehicle's
+    own into CONTROL_SERVER_ONBOARD_SAFETY_CREDENTIAL on that vehicle.
+
 .PARAMETER Import
     Take whatever is already on this machine instead of retyping it:
     CONTROL_SERVER_RIOT_CALL_API_KEY and CONTROL_SERVER_OPERATOR_ID from the
@@ -52,6 +59,16 @@
     value. An empty answer keeps the old one. Without it a key that is present is
     never asked for, so this is the only way to change a stored value.
 
+.PARAMETER NewVehicleSafetyCredential
+    Generate the vehicle-safety projection credential of these vehicles, by SSH
+    alias (agv02, agv03). The vehicleKey comes from
+    remote-ops/onboard-hmi/config/site-<alias>.json. A vehicle that already has
+    one is refused unless -Rotate; a rotated credential needs the server and
+    that vehicle deployed again. Prints names only, never a value.
+
+.PARAMETER Rotate
+    With -NewVehicleSafetyCredential: replace a credential that is present.
+
 .PARAMETER Show
     List which secrets are present and how long they are. Never prints a value.
 
@@ -63,6 +80,9 @@
 
 .EXAMPLE
     ./Set-ControlServerSecret.ps1 -Show
+
+.EXAMPLE
+    ./Set-ControlServerSecret.ps1 -NewVehicleSafetyCredential agv02, agv03
 #>
 [CmdletBinding(DefaultParameterSetName = 'Set')]
 param(
@@ -75,6 +95,16 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Show')]
     [switch] $Show,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'VehicleSafety')]
+    [ValidatePattern('^agv0[23]$')]
+    [string[]] $NewVehicleSafetyCredential,
+
+    [Parameter(ParameterSetName = 'VehicleSafety')]
+    [switch] $Rotate,
+
+    [Parameter(ParameterSetName = 'VehicleSafety')]
+    [string] $SiteDirectory = (Join-Path $PSScriptRoot '..\..\..\onboard-hmi\config'),
 
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\control-server-deployment.xml'),
 
@@ -152,6 +182,59 @@ function Format-SecretPresence {
     }
 }
 
+function Get-VehicleSafetySecretKey {
+    <#
+        control-server#600. The store key of one vehicle's projection credential. The name is the contract with
+        19-deploy-control-server-parallel.ps1 and 06-deploy-onboard-hmi.ps1, which read it by the same literal.
+    #>
+    param([Parameter(Mandatory = $true)][string] $VehicleKey)
+    return 'OnboardSafetyCredential:' + $VehicleKey
+}
+
+function New-VehicleSafetySecret {
+    <#
+        32 random bytes, base64url without padding: 43 characters that a Bearer header, a service Environment entry and
+        a machine variable all carry as they are. Returned as a SecureString; the text exists only inside this call.
+    #>
+    $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+    try {
+        $text = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        return ConvertTo-SecureString $text -AsPlainText -Force
+    } finally {
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+}
+
+function Add-VehicleSafetySecret {
+    <#
+        Puts a new projection credential for one vehicle into the store and returns the store. Refuses a vehicle that
+        has one unless -Rotate, and refuses a value equal to the shared onboard credential or another vehicle's: the
+        server would refuse to start on either (control-server#600). Pure apart from -NewSecret, which the self-test
+        replaces. Errors name the vehicle, never a value.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable] $Store,
+        [Parameter(Mandatory = $true)][string] $VehicleKey,
+        [Parameter(Mandatory = $true)][scriptblock] $NewSecret,
+        [switch] $Rotate
+    )
+    $key = Get-VehicleSafetySecretKey -VehicleKey $VehicleKey
+    if ($Store.ContainsKey($key) -and $Store[$key] -and -not $Rotate) {
+        throw "VEHICLE_SAFETY_CREDENTIAL_PRESENT: $VehicleKey already has a projection credential. Pass -Rotate to replace it, then deploy the server and that vehicle again."
+    }
+    $value = & $NewSecret
+    $text = [System.Net.NetworkCredential]::new('', $value).Password
+    foreach ($other in @($Store.Keys)) {
+        if ($other -ceq $key -or -not $Store[$other]) { continue }
+        if ($other -cne 'OnboardCredential' -and -not $other.StartsWith('OnboardSafetyCredential:', [StringComparison]::Ordinal)) { continue }
+        if ([System.Net.NetworkCredential]::new('', $Store[$other]).Password -ceq $text) {
+            throw "VEHICLE_SAFETY_CREDENTIAL_NOT_UNIQUE: the value generated for $VehicleKey equals the one stored as $other. Nothing was stored; run again."
+        }
+    }
+    $Store[$key] = $value
+    return $Store
+}
+
 $required = @('RiotCallApiKey', 'OnboardCredential', 'MesIngestSharedSecret', 'OperatorId')
 $optional = @('V2FaultRecoveryCredential')
 $keys = $required + $optional
@@ -160,10 +243,31 @@ $store = @{}
 if (Test-Path -LiteralPath $SecretPath) { $store = Import-Clixml -LiteralPath $SecretPath }
 
 if ($Show) {
-    foreach ($line in Format-SecretPresence -Keys $keys -Store $store -Optional $optional) {
+    # control-server#600: the per-vehicle projection credentials there are, by store key (names a vehicle, not a value).
+    $vehicleKeys = @($store.Keys | Where-Object { $_.StartsWith('OnboardSafetyCredential:', [StringComparison]::Ordinal) } | Sort-Object)
+    foreach ($line in Format-SecretPresence -Keys ($keys + $vehicleKeys) -Store $store -Optional $optional) {
         Write-Host $line -ForegroundColor ($line -match 'MISSING$' ? 'Yellow' : 'Green')
     }
     Write-Host "  store: $SecretPath"
+    return
+}
+
+if ($NewVehicleSafetyCredential) {
+    foreach ($alias in $NewVehicleSafetyCredential) {
+        $sitePath = Join-Path $SiteDirectory "site-$alias.json"
+        if (-not (Test-Path -LiteralPath $sitePath -PathType Leaf)) { throw "No site file for ${alias}: $sitePath" }
+        $vehicleKey = [string] (Get-Content -Raw -LiteralPath $sitePath | ConvertFrom-Json).vehicleSafety.expectedVehicleKey
+        if ([string]::IsNullOrWhiteSpace($vehicleKey) -or $vehicleKey -like '*REPLACE*') {
+            throw "$sitePath has no vehicleSafety.expectedVehicleKey; the credential is filed under it."
+        }
+        $store = Add-VehicleSafetySecret -Store $store -VehicleKey $vehicleKey -NewSecret { New-VehicleSafetySecret } -Rotate:$Rotate
+        Write-Host "  generated $(Get-VehicleSafetySecretKey -VehicleKey $vehicleKey) ($alias)$($Rotate ? ', replacing the old one' : '')" -ForegroundColor Green
+    }
+    $directory = Split-Path -Parent $SecretPath
+    if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $store | Export-Clixml -LiteralPath $SecretPath -Force
+    Write-Host "Stored in $SecretPath (DPAPI-encrypted; readable only by $env:USERNAME on $env:COMPUTERNAME). Values were not shown." -ForegroundColor Green
+    Write-Host 'Next: deploy the v2 server (19-deploy-control-server-parallel.ps1), then each vehicle (06-deploy-onboard-hmi.ps1).' -ForegroundColor DarkGray
     return
 }
 
