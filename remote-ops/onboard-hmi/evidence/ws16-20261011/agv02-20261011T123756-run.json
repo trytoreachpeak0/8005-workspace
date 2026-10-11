@@ -1,0 +1,32 @@
+{
+  "tool": "17-capture-hmi-screen",
+  "sshAlias": "agv02",
+  "name": "agv02-20261011T123756",
+  "runId": "8c634846",
+  "startedAt": "2026-10-11T12:37:56.2009081+08:00",
+  "preflight": {
+    "consoleUser": "HT",
+    "consoleSessionId": 1,
+    "logonUi": false,
+    "hmiPids": [
+      1800
+    ],
+    "wshDisabled": false,
+    "leftoverTasks": [],
+    "vehicleClock": "2026-10-11T12:38:05.0920173+08:00"
+  },
+  "launch": [
+    "TASK_STARTED lastRunTime=2026/10/11 12:38:38 lastTaskResult=0x41301",
+    "LAUNCH_DONE"
+  ],
+  "outcome": "CAPTURED",
+  "files": [
+    "agv02-20261011T123756-screen.png",
+    "agv02-20261011T123756-uia.json",
+    "agv02-20261011T123756-window-1.png"
+  ],
+  "leftoverTasksAfter": [],
+  "vehicleCleanup": "RUN_DIRECTORY_REMOVED",
+  "error": null,
+  "finishedAt": "2026-10-11T12:38:32.1118657+08:00"
+}
