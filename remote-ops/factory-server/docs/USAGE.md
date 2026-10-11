@@ -360,7 +360,7 @@ ssh factory01 "Import-Module Hyper-V -SkipEditionCheck; Get-VM | Select-Object N
 | 数据根 | `D:\zhengyushao\Hyper-V\{VirtualMachines,VirtualHardDisks}` |
 | 虚拟交换机 | `AGV-Internal`（Internal，**不绑定物理网卡**），宿主侧 `192.168.200.1/24` |
 | NAT | `AGV-NAT`，`192.168.200.0/24`。**不带 DHCP，客户机必须配静态地址** |
-| 虚拟机 | `win11-01`（Gen 2 / **20 vCPU** / **8 GB 静态** / 显示 **Single 1920x1080** / VHDX 上限 80 GB / Secure Boot + vTPM） |
+| 虚拟机 | `win11-01`（Gen 2 / **20 vCPU** / **8 GB 静态** / 显示 **Single 1920x1080** / VHDX 上限 110 GB（动态，2026-10-11 由 80 GB 扩，见下） / Secure Boot + vTPM） |
 | 客户机 | `DESKTOP-F9HC40O`，Windows 11 专业版 `26200.9168`，已激活，pwsh 7.6.5，`agvops` 本地管理员 |
 | **进客户机** | **`ssh vm01`**（经 `factory01` 跳板，仅公钥，密钥 `~/.ssh/agv_vm_ed25519`） |
 | 安装介质 | `D:\zhengyushao\installer\Windows.iso` = Windows 11 24H2 build `10.0.26100.1` |
@@ -381,6 +381,27 @@ GitHub Actions runner。三项配置是这两个角色要求的，不要"顺手"
 
 重配用 `../scripts/06-configure-golden-renderer-vm.ps1`（幂等，已符合规格时不重启）。
 改 vCPU、内存和分辨率都必须关机，脚本会优雅关机并在完成后开回来；它**不会**强制断电。
+
+### 系统盘：110 GB，没有恢复分区，WinRE 停用
+
+2026-10-11 用户定把 C 盘从约 79 GB 扩到 110 GB（起因是 C 盘只剩约 7.5 GB，当晚一轮 G3 构建峰值又把它压到 4.07 GB）。
+在线做的，没有关机，也没有重启：宿主 `Resize-VHD` 到 110 GB，客户机里删掉挡在 C 盘后面的
+恢复分区，再把 C 盘扩到底。扩完 C 盘 109.79 GB。方案与逐步实读记录在
+`8005-workspace-v2/ds-tasks/vm01-disk-expand-plan.md`。
+
+留下的三件事，再动这块盘之前要知道：
+
+- **宿主 D 盘的余量变小了。**VHDX 是动态的，只会长、不会自动缩，客户机里删文件也还不回来。
+  扩完时文件 73.16 GB、D 盘剩 74.8 GB；客户机把 110 GB 用满时 D 盘最坏剩约 38 GB，而 D 盘
+  上还放着 MVP 的安装目录。D 盘所在 RAID 已经分满，扩不了。再往大扩之前先算这笔账。
+- **WinRE 是停用的，这是有意的。**`reagentc /enable` 原文报错是
+  `Windows RE cannot be enabled on a volume with BitLocker Drive Encryption enabled.`：
+  C 盘是 BitLocker 加密卷（`FullyEncrypted`，保护器 Off），WinRE 不能放在加密卷上，而原来那个
+  不加密的恢复分区已经删了。这台机器坏了走重建（`04` → 装机 → `05` → `06` → 重新注册
+  runner），不靠 WinRE，所以没有为它再动一次分区。映像 `C:\Windows\System32\Recovery\Winre.wim`
+  还留着；要启用，得先解决加密卷的问题（在磁盘末尾另建不加密的恢复分区，或解密 C 盘）。
+- **在线扩容的条件**：VHDX、挂在 SCSI 控制器上、不是差分盘、没有检查点。`win11-01` 四条都满足；
+  有检查点时 `Resize-VHD` 会直接拒绝。
 
 ### 客户机到 GitHub 的网络约束
 
