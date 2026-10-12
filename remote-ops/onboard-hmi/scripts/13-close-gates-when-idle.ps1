@@ -61,6 +61,27 @@
     completion path is rehearsed without moving a vehicle: the stop, the config
     write and the verification are real, only the completion signal is not.
 
+    Since workspace#35 a rehearsal gives all five instance parameters (see
+    -ServiceName), not -ServerDatabase alone, and the copy lies outside
+    C:\ProgramData\8005\ -- under it, a database that is not the instance's own is
+    another instance's, and is refused with TARGET_DATABASE_OTHER_INSTANCE.
+
+.PARAMETER ServiceName
+    -ServerDatabase, -ServerInstallRoot, -ServerConfigPath, -ServiceName and
+    -BaseUrl say which instance this watches, stops and closes, and their defaults
+    are the production MVP service. Give all five or none (workspace#35): a partial
+    set is refused with TARGET_PARTIAL, and service, install root, configuration
+    and health URL that do not all name the MVP or all name something else with
+    TARGET_MIXED_MVP -- both before anything is read on the server. Then the
+    server is asked which directory the service runs from and what its
+    configuration says about health and database; unless the service runs from
+    -ServerInstallRoot, the configuration is in that directory and binds health on
+    -BaseUrl's port, nothing is read, stopped or written (TARGET_* codes in
+    factory-server/scripts/control-server/ControlServerTarget.psm1).
+    Set-JourneyRuntime.ps1 gets all three of its own and checks them again.
+    -ServerBackupRoot is not one of them: it only holds the watcher script for the
+    length of the run.
+
 .PARAMETER DemandId
     Watch the journey carrying this demand rather than latching onto whichever
     one is unresolved.
@@ -83,6 +104,14 @@
     #   ./11-drive-journey.ps1                             load
     #   ./11-drive-journey.ps1 -SkipScan -CargoState EMPTY unload
     ./13-close-gates-when-idle.ps1 -DemandId Q26091238-16 -Force
+
+.EXAMPLE
+    # Any instance other than the MVP: all five, or it is refused before the server is touched.
+    ./13-close-gates-when-idle.ps1 -Force -ServiceName '8005 AGV ControlServer V2' `
+        -ServerInstallRoot 'C:\Program Files\8005 AGV\ControlServer.V2' `
+        -ServerConfigPath 'C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json' `
+        -ServerDatabase 'C:\ProgramData\8005\ControlServer.V2\data\controlserver.db' `
+        -BaseUrl 'http://172.19.205.222:58107'
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
@@ -102,6 +131,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($Force) { $ConfirmPreference = 'None' }
+
+# workspace#35: which instance, decided before anything reaches the server.
+Import-Module (Join-Path $PSScriptRoot '..\..\factory-server\scripts\control-server\ControlServerTarget.psm1') -Force
+$target = Assert-ControlServerTargetParameters -Bound @($PSBoundParameters.Keys) `
+    -Values ([ordered]@{ ServerDatabase = $ServerDatabase; ServerInstallRoot = $ServerInstallRoot; ServerConfigPath = $ServerConfigPath
+        ServiceName = $ServiceName; BaseUrl = $BaseUrl }) `
+    -Kinds ([ordered]@{ ServerInstallRoot = 'InstallRoot'; ServerConfigPath = 'ConfigPath'; ServiceName = 'ServiceName'; BaseUrl = 'BaseUrl' })
 
 function Write-Step { param([string] $Message) Write-Host "  $Message" -ForegroundColor Cyan }
 
@@ -152,6 +188,12 @@ $sqlitePrelude
 # ------------------------------------------------------------------ survey ---
 
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Watching $ServerAlias for the journey to finish" -ForegroundColor Green
+# The service, its install root, its configuration and the database have to be one instance before any is read for real.
+$readback = Invoke-Remote (Get-ControlServerTargetReadbackScript -ServiceName $ServiceName -ConfigPath $ServerConfigPath) | ConvertFrom-Json
+$targetFacts = Assert-ControlServerTargetReadback -Readback $readback -ServiceName $ServiceName -ConfigPath $ServerConfigPath `
+    -BaseUrl $BaseUrl -InstallRoot $ServerInstallRoot -Database $ServerDatabase
+Write-Step "Target: service '$ServiceName' ($($target.IsMvp ? 'the production MVP service' : 'not the MVP service')), $ServerInstallRoot, health $BaseUrl"
+if ($targetFacts.DatabaseIsCopy) { Write-Step "Database $ServerDatabase is a copy, not the instance's own: a rehearsal" }
 $before = Get-ServerState
 $beforeLevel = -not $before.runtime ? 'Off' : ($before.dispatch ? 'Dispatch' : 'Intake')
 Write-Step "Gates are $beforeLevel (runtime=$($before.runtime), createDispatch=$($before.dispatch)); service is $($before.service)"
@@ -170,8 +212,8 @@ if (-not $before.runtime) {
     Write-Host '  The watch still runs; it will prove the close path rather than guard a real race.' -ForegroundColor Yellow
 }
 
-$target = $DemandId ? "$ServerAlias (the journey carrying $DemandId)" : "$ServerAlias (whichever journey is in flight)"
-if (-not $PSCmdlet.ShouldProcess($target, 'Wait for Completed, then stop the service and close both journey gates')) {
+$watchTarget = $DemandId ? "$ServerAlias (the journey carrying $DemandId)" : "$ServerAlias (whichever journey is in flight)"
+if (-not $PSCmdlet.ShouldProcess($watchTarget, 'Wait for Completed, then stop the service and close both journey gates')) {
     return
 }
 
@@ -233,7 +275,16 @@ Write-Step "Service stop requested $($result.reactionMs) ms after that record, s
 # Nothing is racing any more -- the engine is down -- so the config change goes
 # through the one script that owns that file.
 Write-Step 'Closing both gates via Set-JourneyRuntime.ps1 -Off'
-& $gateScript -Off -Force -ServerAlias $ServerAlias -ServiceName $ServiceName -ConfigPath $ServerConfigPath -BaseUrl $BaseUrl
+# The service is stopped by now. Set-JourneyRuntime.ps1 checks its target again (workspace#35) and says "Nothing was
+# changed" when it refuses -- true of the file, but read at this point it invites starting the service with the
+# gates open. Say what state the refusal leaves, as STOP_FAILED does.
+try {
+    & $gateScript -Off -Force -ServerAlias $ServerAlias -ServiceName $ServiceName -ConfigPath $ServerConfigPath -BaseUrl $BaseUrl
+}
+catch {
+    if ($_.Exception.Message -notmatch '^TARGET_[A-Z_]+:') { throw }
+    throw "Journey $($result.journeyId) completed and the service was stopped, but Set-JourneyRuntime.ps1 refused to close the gates: $($_.Exception.Message) THE SERVICE IS STOPPED AND THE GATES ARE STILL OPEN -- do not start it; close them with Set-JourneyRuntime.ps1 -Off first."
+}
 
 # Set-JourneyRuntime.ps1 returns early when the booleans already say Off, and its
 # early return does not start a service. Ours is stopped by then, so bringing it

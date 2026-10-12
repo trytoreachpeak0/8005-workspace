@@ -91,10 +91,44 @@
     since 8005-agv-program#53, checked here before anything is written. With the
     battery below that floor, pass the floor itself as the trigger.
 
+.PARAMETER ServiceName
+    -ServiceName, -ConfigPath and -BaseUrl say which instance this acts on, and
+    their defaults are the production MVP service. Give all three or none
+    (workspace#35): one alone is refused with TARGET_PARTIAL, and a set where some
+    name the MVP and some do not with TARGET_MIXED_MVP, both before anything is
+    read on the server. With all three given, the server is asked first which
+    directory that service runs from and what its configuration's Health.url is;
+    unless the service runs from the configuration's directory and health is
+    bound on -BaseUrl's port, nothing is read or written
+    (TARGET_SERVICE_CONFIG_MISMATCH, TARGET_BASE_URL_MISMATCH and the other
+    TARGET_* codes in ControlServerTarget.psm1). The MVP with no instance
+    parameters is the same command as before; it now passes that read-back too.
+
+    For a target other than the MVP, the MesIngest catalog is read only when
+    -MesIngestUrl is given (the default is the production MesIngest, and its
+    WIRE_TO_GATE count says nothing about another instance), and the log tail is
+    read from the directory that instance's own configuration names.
+
+.PARAMETER ConfigPath
+    See -ServiceName.
+
+.PARAMETER BaseUrl
+    See -ServiceName.
+
 .PARAMETER Force
     Suppresses the confirmation prompt by lowering $ConfirmPreference. Do not use
     it with -Dispatch at a real vehicle: the prompt is where the authorization is
     recorded.
+
+.EXAMPLE
+    # The production MVP service: no instance parameters at all.
+    ./Set-JourneyRuntime.ps1 -Off
+
+.EXAMPLE
+    # Any other instance: all three, or it is refused before the server is touched.
+    ./Set-JourneyRuntime.ps1 -Off -ServiceName '8005 AGV ControlServer V2' `
+        -ConfigPath 'C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json' `
+        -BaseUrl 'http://172.19.205.222:58107'
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Intake')]
 param(
@@ -147,6 +181,12 @@ $wantTrigger = $wantOverride ? $ChargeTriggerBatteryPercent : $null
 $wantResume = $wantOverride ? $ChargeResumeBatteryPercent : $null
 $BaseConfigPath = Join-Path (Split-Path -Parent $ConfigPath) 'appsettings.json'
 
+# workspace#35: which instance, decided before anything reaches the server.
+Import-Module (Join-Path $PSScriptRoot 'ControlServerTarget.psm1') -Force
+$target = Assert-ControlServerTargetParameters -Bound @($PSBoundParameters.Keys) `
+    -Values ([ordered]@{ ServiceName = $ServiceName; ConfigPath = $ConfigPath; BaseUrl = $BaseUrl }) `
+    -Kinds ([ordered]@{ ServiceName = 'ServiceName'; ConfigPath = 'ConfigPath'; BaseUrl = 'BaseUrl' })
+
 function Invoke-Server {
     param([string] $Script)
 
@@ -159,6 +199,11 @@ function Invoke-Server {
 function Write-Step { param([string] $Message) Write-Host "  $Message" -ForegroundColor Cyan }
 
 # ------------------------------------------------------------------ current ---
+
+# The service and the configuration have to be one instance before either is read for real.
+$readback = Invoke-Server (Get-ControlServerTargetReadbackScript -ServiceName $ServiceName -ConfigPath $ConfigPath) | ConvertFrom-Json
+$targetFacts = Assert-ControlServerTargetReadback -Readback $readback -ServiceName $ServiceName -ConfigPath $ConfigPath -BaseUrl $BaseUrl
+Write-Host "Target: service '$ServiceName' ($($target.IsMvp ? 'the production MVP service' : 'not the MVP service')), $ConfigPath, health $BaseUrl."
 
 $current = Invoke-Server @"
 `$c = Get-Content -LiteralPath '$ConfigPath' -Raw | ConvertFrom-Json
@@ -203,39 +248,45 @@ if ($current.runtime -eq $wantRuntime -and $current.dispatch -eq $wantDispatch -
 
 # ------------------------------------------------------- what this will do ---
 
+$readCatalog = $target.IsMvp -or $PSBoundParameters.ContainsKey('MesIngestUrl')
 if ($wantRuntime) {
     # Read the catalog the engine itself reads, so the prompt names the real
     # sublot rather than a count. Same endpoint, read-only.
     $waiting = 'unknown'
     $oldest = 'unknown'
-    try {
-        $store = Import-Clixml -LiteralPath $MesIngestSecretPath
-        $key = @($store.Keys | Where-Object { $_ -match 'Secret' })[0]
-        $token = [System.Net.NetworkCredential]::new('', $store[$key]).Password
-        $catalog = (Invoke-WebRequest -Uri "$MesIngestUrl/api/v2/externally-readable-demand-catalog" `
-                -Headers @{ Authorization = "Bearer $token" } -TimeoutSec $TimeoutSec -NoProxy).Content | ConvertFrom-Json
-        # Both filters, in the engine's own order. Work type alone is not the
-        # eligibility rule: JourneyRuntimeEngine also requires the MES area to
-        # start with 'N' (OUT_OF_SCOPE_AREA otherwise), and reporting the oldest
-        # WIRE_TO_GATE demand without that check named a sublot the engine would
-        # never touch. The remaining gates -- station resolution, package
-        # capacity, box count, onboard facts -- need server state this script does
-        # not have, so treat what is printed as an upper bound on what runs next.
-        $w2g = @($catalog.items |
-            Where-Object { $_.transportDemandKey.workType -eq 'WIRE_TO_GATE' -and
-                           $_.liveMesFields.area -clike 'N*' } |
-            Sort-Object createdAt)
-        $waiting = $w2g.Count
-        if ($w2g.Count) {
-            $first = $w2g[0]
-            $oldest = "$($first.transportDemandKey.sublot) (demandId $($first.demandId), area $($first.liveMesFields.area), created $($first.createdAt))"
-        }
-        else {
-            $oldest = 'none in scope (work type WIRE_TO_GATE and area N*)'
-        }
+    if (-not $readCatalog) {
+        $oldest = 'not read: the target is not the MVP service and -MesIngestUrl was not given'
     }
-    catch {
-        Write-Warning "Could not read the MesIngest catalog: $($_.Exception.Message)"
+    else {
+        try {
+            $store = Import-Clixml -LiteralPath $MesIngestSecretPath
+            $key = @($store.Keys | Where-Object { $_ -match 'Secret' })[0]
+            $token = [System.Net.NetworkCredential]::new('', $store[$key]).Password
+            $catalog = (Invoke-WebRequest -Uri "$MesIngestUrl/api/v2/externally-readable-demand-catalog" `
+                    -Headers @{ Authorization = "Bearer $token" } -TimeoutSec $TimeoutSec -NoProxy).Content | ConvertFrom-Json
+            # Both filters, in the engine's own order. Work type alone is not the
+            # eligibility rule: JourneyRuntimeEngine also requires the MES area to
+            # start with 'N' (OUT_OF_SCOPE_AREA otherwise), and reporting the oldest
+            # WIRE_TO_GATE demand without that check named a sublot the engine would
+            # never touch. The remaining gates -- station resolution, package
+            # capacity, box count, onboard facts -- need server state this script does
+            # not have, so treat what is printed as an upper bound on what runs next.
+            $w2g = @($catalog.items |
+                Where-Object { $_.transportDemandKey.workType -eq 'WIRE_TO_GATE' -and
+                               $_.liveMesFields.area -clike 'N*' } |
+                Sort-Object createdAt)
+            $waiting = $w2g.Count
+            if ($w2g.Count) {
+                $first = $w2g[0]
+                $oldest = "$($first.transportDemandKey.sublot) (demandId $($first.demandId), area $($first.liveMesFields.area), created $($first.createdAt))"
+            }
+            else {
+                $oldest = 'none in scope (work type WIRE_TO_GATE and area N*)'
+            }
+        }
+        catch {
+            Write-Warning "Could not read the MesIngest catalog: $($_.Exception.Message)"
+        }
     }
 
     Write-Host ''
@@ -364,11 +415,15 @@ Write-Step '/health/live 200'
 # A disabled runtime logs one warning and sleeps forever; an enabled one logs an
 # iteration failure per poll if anything fails closed. The first seconds of log
 # after a restart say which.
-$log = Invoke-Server @"
-`$f = Get-ChildItem 'C:\ProgramData\8005\ControlServer\logs' -Filter 'controlserver-*.ndjson' |
+# From the directory this instance's own configuration names, never another instance's.
+$logSource = Resolve-ControlServerLogSource -Facts $targetFacts -IsMvp $target.IsMvp
+$log = if ($logSource) {
+    Invoke-Server @"
+`$f = Get-ChildItem '$($logSource.Directory -replace "'", "''")' -Filter '$($logSource.Filter -replace "'", "''")' |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 Get-Content -LiteralPath `$f.FullName -Tail 40 | Where-Object { `$_ -match 'ourney|iteration|Runtime|ispatch|emand' }
 "@
+}
 Write-Host ''
 Write-Host 'Recent runtime log lines:' -ForegroundColor DarkGray
 if ($log) { $log -split "`n" | Select-Object -Last 8 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray } }
