@@ -52,7 +52,7 @@ $source = (Resolve-Path -LiteralPath $DeployScript).Path
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$null, [ref]$errors)
 Write-Result -Ok (@($errors).Count -eq 0) -Name '06-deploy-onboard-hmi.ps1 parses' -Detail (@($errors) -join ' | ')
-foreach ($name in @('Resolve-VehicleSafetyCredential', 'Assert-VehicleSafetyEndpointNamesVehicle', 'Test-SimulatorIoHost', 'Resolve-OnboardIoTarget')) {
+foreach ($name in @('Resolve-VehicleSafetyCredential', 'Assert-VehicleSafetyEndpointNamesVehicle', 'Test-SimulatorIoHost', 'Get-IoTargetKind', 'Resolve-OnboardIoTarget')) {
     $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     Write-Result -Ok ($null -ne $definition) -Name "$name is defined in 06-deploy-onboard-hmi.ps1" -Detail 'missing'
     if ($null -eq $definition) {
@@ -131,71 +131,130 @@ Write-Result -Ok ($finally.Count -ge 1 -and @($finally | Where-Object { $_.Final
 Write-Host ''
 Write-Host 'IO target choice (workspace#28)' -ForegroundColor Cyan
 
+$realSite = '192.168.71.150'
 foreach ($h in @('127.0.0.1', '127.0.0.2', '::1', 'localhost', ' LOCALHOST ')) {
-    Write-Result -Ok (Test-SimulatorIoHost $h) -Name "'$h' is the simulator" -Detail 'classified as a real module'
+    Write-Result -Ok ((Get-IoTargetKind $h $realSite) -ceq 'simulator') -Name "'$h' is the simulator" -Detail "got $(Get-IoTargetKind $h $realSite)"
 }
-foreach ($h in @('192.168.71.150', '192.168.71.50', '', $null)) {
-    Write-Result -Ok (-not (Test-SimulatorIoHost $h)) -Name "'$h' is not the simulator" -Detail 'classified as the simulator'
+foreach ($h in @($realSite, " $realSite ")) {
+    Write-Result -Ok ((Get-IoTargetKind $h $realSite) -ceq 'real') -Name "'$h' is the site's real module" -Detail "got $(Get-IoTargetKind $h $realSite)"
+}
+# Review S3: the spellings the review found falling to "real module" under the old loopback-or-real split.
+foreach ($h in @('localhost.', '127.0.0.1:1502', 'DESKTOP-94OA6CK', '192.168.71.50', '', $null)) {
+    Write-Result -Ok ((Get-IoTargetKind $h $realSite) -ceq 'unknown') -Name "'$h' is unknown IO, neither simulator nor the site's module" -Detail "got $(Get-IoTargetKind $h $realSite)"
 }
 
-$realSite = '192.168.71.150'
-$installedSim = @{ State = 'present'; Host = '127.0.0.1'; Port = 1502 }
-$installedReal = @{ State = 'present'; Host = $realSite; Port = 502 }
-$installedAbsent = @{ State = 'absent' }
-$installedUnreadable = @{ State = 'unreadable'; Error = 'Conversion from JSON failed' }
 function Invoke-Io([hashtable] $Arguments) {
     $all = @{ SiteHost = $realSite; TemplatePort = 502 }
     foreach ($key in $Arguments.Keys) { $all[$key] = $Arguments[$key] }
     try { return @{ Value = (Resolve-OnboardIoTarget @all); Error = $null } }
     catch { return @{ Value = $null; Error = $_.Exception.Message } }
 }
-function Test-Target($r, [string] $IoHost, [int] $Port) {
-    return $null -eq $r.Error -and $r.Value.Host -ceq $IoHost -and $r.Value.Port -eq $Port -and $r.Value.Port -is [int]
+
+# Every installed state against no switch, -KeepCurrentIo and -UseSiteIo. An expectation is either an error code, or
+# the rendered host:port plus whether the switch-to-real-IO warning appears.
+$sim = @{ State = 'present'; Host = '127.0.0.1'; Port = 1502 }
+$real = @{ State = 'present'; Host = $realSite; Port = 502 }
+$absent = @{ State = 'absent' }
+$unreadable = @{ State = 'unreadable'; Error = 'Conversion from JSON failed' }
+$previousSim = @{ State = 'previous-only'; PreviousHost = '127.0.0.1'; PreviousPort = 1502 }
+$previousBroken = @{ State = 'previous-only'; Error = 'Conversion from JSON failed' }
+$site = "${realSite}:502"
+$matrix = @(
+    @{ Name = 'simulator';                     Installed = $sim;            None = 'IO_SIMULATOR_TO_REAL_REFUSED'; Keep = '127.0.0.1:1502';      Use = "$site warn" }
+    @{ Name = 'real module (agv01)';           Installed = $real;           None = "$site";                        Keep = "$site";               Use = "$site" }
+    @{ Name = 'first deployment';              Installed = $absent;         None = "$site";                        Keep = 'IO_KEEP_NO_INSTALLED_CONFIG'; Use = "$site" }
+    @{ Name = 'unreadable';                    Installed = $unreadable;     None = 'IO_SIMULATOR_TO_REAL_REFUSED'; Keep = 'IO_KEEP_UNREADABLE';  Use = "$site warn" }
+    @{ Name = 'no host';                       Installed = @{ State = 'present'; Host = ''; Port = 1502 }; None = 'IO_SIMULATOR_TO_REAL_REFUSED'; Keep = 'IO_KEEP_UNREADABLE'; Use = "$site warn" }
+    @{ Name = 'port 0';                        Installed = @{ State = 'present'; Host = '127.0.0.1'; Port = 0 }; None = 'IO_SIMULATOR_TO_REAL_REFUSED'; Keep = 'IO_KEEP_UNREADABLE'; Use = "$site warn" }
+    @{ Name = 'placeholder host';              Installed = @{ State = 'present'; Host = 'REPLACE_IO_MODULE_IP'; Port = 502 }; None = 'IO_SIMULATOR_TO_REAL_REFUSED'; Keep = 'IO_KEEP_UNREADABLE'; Use = "$site warn" }
+    @{ Name = 'unknown localhost.';            Installed = @{ State = 'present'; Host = 'localhost.'; Port = 1502 }; None = 'IO_UNKNOWN_TO_REAL_REFUSED'; Keep = 'localhost.:1502'; Use = "$site warn" }
+    @{ Name = 'unknown 127.0.0.1:1502 as host'; Installed = @{ State = 'present'; Host = '127.0.0.1:1502'; Port = 1502 }; None = 'IO_UNKNOWN_TO_REAL_REFUSED'; Keep = '127.0.0.1:1502:1502'; Use = "$site warn" }
+    @{ Name = 'unknown machine name';          Installed = @{ State = 'present'; Host = 'DESKTOP-94OA6CK'; Port = 1502 }; None = 'IO_UNKNOWN_TO_REAL_REFUSED'; Keep = 'DESKTOP-94OA6CK:1502'; Use = "$site warn" }
+    @{ Name = 'unknown other module';          Installed = @{ State = 'present'; Host = '192.168.71.50'; Port = 502 }; None = 'IO_UNKNOWN_TO_REAL_REFUSED'; Keep = '192.168.71.50:502'; Use = "$site warn" }
+    @{ Name = 'only .previous (simulator)';    Installed = $previousSim;    None = 'IO_PREVIOUS_INSTALL_ONLY';     Keep = 'IO_PREVIOUS_INSTALL_ONLY'; Use = "$site warn" }
+    @{ Name = 'only .previous (unreadable)';   Installed = $previousBroken; None = 'IO_PREVIOUS_INSTALL_ONLY';     Keep = 'IO_PREVIOUS_INSTALL_ONLY'; Use = "$site warn" }
+)
+foreach ($row in $matrix) {
+    foreach ($mode in @('None', 'Keep', 'Use')) {
+        $arguments = @{ Installed = $row.Installed }
+        if ($mode -eq 'Keep') { $arguments.KeepCurrentIo = $true }
+        if ($mode -eq 'Use') { $arguments.UseSiteIo = $true }
+        $expect = $row[$mode]
+        $r = Invoke-Io $arguments
+        $got = $r.Error ? $r.Error : ('{0}:{1}{2}' -f $r.Value.Host, $r.Value.Port, ($r.Value.Warning ? ' warn' : ''))
+        $ok = ($expect -like 'IO_*') ?
+            ($null -ne $r.Error -and $r.Error.StartsWith("${expect}:")) :
+            ($null -eq $r.Error -and $got -ceq $expect -and $r.Value.Port -is [int] -and $r.Value.Line.StartsWith('IO target: '))
+        if ($ok -and $expect -like 'IO_*_REFUSED') {
+            $ok = $r.Error.Contains('-KeepCurrentIo') -and $r.Error.Contains('-UseSiteIo')
+        }
+        if ($ok -and $mode -eq 'Use' -and $expect -notlike 'IO_*') {
+            $ok = $r.Value.Line.Contains('REAL IO') -and $r.Value.Line.Contains('authorisation') -and $r.Value.Line.Contains('on site')
+        }
+        if ($ok -and $mode -eq 'None' -and $expect -notlike 'IO_*') {
+            $ok = -not $r.Value.Line.Contains('-UseSiteIo')
+        }
+        $switchName = @{ None = 'no switch'; Keep = '-KeepCurrentIo'; Use = '-UseSiteIo' }[$mode]
+        Write-Result -Ok $ok -Name "$($row.Name) + ${switchName}: $expect" -Detail "got: $got; line: $($r.Value ? $r.Value.Line : '')"
+    }
 }
 
-$r = Invoke-Io @{ Installed = $installedSim }
-Write-Result -Ok ($null -ne $r.Error -and $r.Error.Contains('IO_SIMULATOR_TO_REAL_REFUSED') -and $r.Error.Contains('-KeepCurrentIo') -and $r.Error.Contains('-UseSiteIo')) `
-    -Name 'simulator -> site real module without a switch is refused, naming both switches' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedSim; KeepCurrentIo = $true }
-Write-Result -Ok ((Test-Target $r '127.0.0.1' 1502) -and $null -eq $r.Value.Warning -and $r.Value.Line.Contains('simulator 127.0.0.1:1502') -and $r.Value.Line.Contains('-KeepCurrentIo')) `
-    -Name 'simulator + -KeepCurrentIo keeps 127.0.0.1:1502, no warning' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedSim; UseSiteIo = $true }
-Write-Result -Ok ((Test-Target $r $realSite 502) -and $r.Value.Warning -and $r.Value.Warning.Contains('127.0.0.1:1502') -and $r.Value.Line.Contains("REAL MODULE ${realSite}:502") -and
-    $r.Value.Line.Contains('REAL IO') -and $r.Value.Line.Contains('authorisation') -and $r.Value.Line.Contains('on site')) `
-    -Name 'simulator + -UseSiteIo takes the site module, says real IO needs authorisation, and warns' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedReal }
-Write-Result -Ok ((Test-Target $r $realSite 502) -and $null -eq $r.Value.Warning -and $r.Value.Line.Contains("REAL MODULE ${realSite}:502") -and -not $r.Value.Line.Contains('-UseSiteIo')) `
-    -Name 'real module -> site (agv01) is unchanged: site value, no switch needed, no warning' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedReal; KeepCurrentIo = $true }
-Write-Result -Ok (Test-Target $r $realSite 502) -Name 'real module + -KeepCurrentIo keeps it' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedAbsent }
-Write-Result -Ok ((Test-Target $r $realSite 502) -and $null -eq $r.Value.Warning -and $r.Value.Line.Contains('first deployment')) `
-    -Name 'first deployment without a switch takes the site value, as before' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedAbsent; KeepCurrentIo = $true }
-Write-Result -Ok ($null -ne $r.Error -and $r.Error.Contains('IO_KEEP_NO_INSTALLED_CONFIG')) `
-    -Name 'first deployment + -KeepCurrentIo is refused, not silently given the site value' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-foreach ($bad in @($installedUnreadable, @{ State = 'present'; Host = '127.0.0.1'; Port = 0 }, @{ State = 'present'; Host = ''; Port = 1502 }, @{ State = 'present'; Host = 'REPLACE_IO_MODULE_IP'; Port = 502 })) {
-    $label = $bad | ConvertTo-Json -Compress
-    $r = Invoke-Io @{ Installed = $bad; KeepCurrentIo = $true }
-    Write-Result -Ok ($null -ne $r.Error -and $r.Error.Contains('IO_KEEP_UNREADABLE')) -Name "-KeepCurrentIo refuses an unusable installed IO $label" -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-    $r = Invoke-Io @{ Installed = $bad }
-    Write-Result -Ok ($null -ne $r.Error -and $r.Error.Contains('IO_SIMULATOR_TO_REAL_REFUSED')) -Name "an unusable installed IO $label counts as maybe-simulator: refused without a switch" -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-}
 $r = Invoke-Io @{ Installed = @{ State = 'present'; Host = '127.0.0.1'; Port = '1502' }; KeepCurrentIo = $true }
-Write-Result -Ok (Test-Target $r '127.0.0.1' 1502) -Name 'an installed port read as text is kept as the number' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedSim; SiteHost = '127.0.0.1'; TemplatePort = 1502 }
-Write-Result -Ok ((Test-Target $r '127.0.0.1' 1502) -and $null -eq $r.Value.Warning) -Name 'a site file that itself names the simulator is not a switch to real IO' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
-$r = Invoke-Io @{ Installed = $installedSim; KeepCurrentIo = $true; UseSiteIo = $true }
+Write-Result -Ok ($null -eq $r.Error -and $r.Value.Port -eq 1502 -and $r.Value.Port -is [int]) -Name 'an installed port read as text is kept as the number' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
+$r = Invoke-Io @{ Installed = $sim; SiteHost = '127.0.0.1'; TemplatePort = 1502 }
+Write-Result -Ok ($null -eq $r.Error -and $r.Value.Host -ceq '127.0.0.1' -and $null -eq $r.Value.Warning) -Name 'a site file that itself names the simulator is not a switch to real IO' -Detail "error: $($r.Error); got $($r.Value | ConvertTo-Json -Compress)"
+$r = Invoke-Io @{ Installed = $sim; KeepCurrentIo = $true; UseSiteIo = $true }
 Write-Result -Ok ($null -ne $r.Error -and $r.Error.Contains('IO_OPTIONS_EXCLUSIVE')) -Name '-KeepCurrentIo and -UseSiteIo together are refused' -Detail "error: $($r.Error)"
+$r = Invoke-Io @{ Installed = $sim; UseSiteIo = $true }
+Write-Result -Ok ($null -eq $r.Error -and $r.Value.Warning.Contains('simulator 127.0.0.1:1502') -and $r.Value.Warning.Contains("REAL MODULE ${realSite}:502")) `
+    -Name 'the switch-to-real-IO warning names both ends' -Detail "got $($r.Value.Warning)"
 
+# Review L2: the read-back in the place script, run for real. The snippet from "$placed = Get-Content" to the
+# "ioModule read back" line is taken out of the here-string, expanded the way the deploy script expands it, and run
+# against an install root on this machine.
+Write-Host ''
+Write-Host 'The place script''s read-back and the hand-off summary (workspace#28 review L2)' -ForegroundColor Cyan
+$placeAssignment = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$place' }, $true)
+$placeText = $placeAssignment ? $placeAssignment.Right.Extent.Text : ''
+$from = $placeText.IndexOf('`$placed = Get-Content')
+$lastLine = $placeText.IndexOf('"ioModule read back:')
+Write-Result -Ok ($from -ge 0 -and $lastLine -gt $from) -Name 'the place script reads the placed configuration and reports ioModule' -Detail "from $from, last $lastLine"
+if ($from -ge 0 -and $lastLine -gt $from) {
+    $snippet = $placeText.Substring($from, $placeText.IndexOf("`n", $lastLine) - $from)
+    $readBackRoot = Join-Path ([IO.Path]::GetTempPath()) "ws28-readback-$PID"
+    New-Item -ItemType Directory -Force -Path $readBackRoot | Out-Null
+    try {
+        function Invoke-ReadBack([string] $PlacedHost, [int] $PlacedPort) {
+            $ControlServerHost = '172.19.205.222'; $OnboardPort = 58105
+            $ioTarget = [pscustomobject]@{ Host = '127.0.0.1'; Port = 1502 }
+            @{ wireToGate = @{ host = $ControlServerHost; port = $OnboardPort }; ioModule = @{ host = $PlacedHost; port = $PlacedPort } } |
+                ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $readBackRoot 'appsettings.json')
+            $code = "`$root = '$readBackRoot'`n" + $ExecutionContext.InvokeCommand.ExpandString($snippet)
+            try { return @{ Output = (& ([scriptblock]::Create($code)) | Out-String); Error = $null } }
+            catch { return @{ Output = $null; Error = $_.Exception.Message } }
+        }
+        $rb = Invoke-ReadBack '127.0.0.1' 1502
+        Write-Result -Ok ($null -eq $rb.Error -and $rb.Output.Contains('ioModule read back: 127.0.0.1:1502')) `
+            -Name 'read-back passes when the placed ioModule is the chosen target' -Detail "error: $($rb.Error); output: $($rb.Output)"
+        foreach ($wrong in @(@($realSite, 502), @('127.0.0.1', 502))) {
+            $rb = Invoke-ReadBack $wrong[0] $wrong[1]
+            Write-Result -Ok ($null -ne $rb.Error -and $rb.Error.Contains("Placed ioModule is $($wrong[0]):$($wrong[1]), expected 127.0.0.1:1502")) `
+                -Name "read-back throws when the placed ioModule is $($wrong[0]):$($wrong[1])" -Detail "error: $($rb.Error); output: $($rb.Output)"
+        }
+    } finally {
+        Remove-Item -LiteralPath $readBackRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 $text = Get-Content -Raw -LiteralPath $source
-Write-Result -Ok ($text.Contains('if (`$ioPlaced -ne ''$($ioTarget.Host):$($ioTarget.Port)'') { throw')) `
-    -Name 'the place script reads ioModule back on the vehicle and compares it with the chosen target' -Detail 'read-back line not found'
+Write-Result -Ok ($text -match "Write-Step 'Staged\. NOT started[^\r\n]*\r?\n\s*Write-Step \`$ioTarget\.Line\r?\n\s*if \(\`$ioTarget\.Warning\) \{ Write-Warning \`$ioTarget\.Warning \}") `
+    -Name 'the hand-off repeats the IO summary line and the warning after "Staged. NOT started"' -Detail 'hand-off lines not found'
 
 # The whole script, -WhatIf, against an ssh shim. The alias resolves nowhere, so if the shim were bypassed the real ssh
 # would fail to resolve the host rather than reach a vehicle; the shim log proves it was the shim that answered.
+# Review S1: the shim runs the deploy script's own IO probe, with its install root pointed at a fixture directory, so a
+# probe that misreads the vehicle fails here rather than passing on a canned answer.
 Write-Host ''
-Write-Host 'The deploy script end to end, -WhatIf, ssh shim (workspace#28)' -ForegroundColor Cyan
+Write-Host 'The deploy script end to end, -WhatIf, ssh shim running the real probe (workspace#28)' -ForegroundColor Cyan
 $work = Join-Path ([IO.Path]::GetTempPath()) "ws28-deploy-selftest-$PID"
 $fakeAlias = 'ws28-offline-fake'
 $commit = 'a' * 39 + 'b'
@@ -226,10 +285,27 @@ try {
     $secretPath = Join-Path $work 'secrets.xml'
     @{ OnboardCredential = (ConvertTo-SecureString 'fake-onboard' -AsPlainText -Force); OperatorId = (ConvertTo-SecureString 'fake-operator' -AsPlainText -Force) } |
         Export-Clixml -LiteralPath $secretPath
+
+    # One fixture vehicle per installed state: <state>/OnboardHmi is what the probe reads as the install root.
+    function New-InstalledConfig([string] $Directory, [string] $Content) {
+        New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+        Set-Content -LiteralPath (Join-Path $Directory 'appsettings.json') -Value $Content
+    }
+    $io = { param($h, $p) @{ wireToGate = @{ host = '172.19.205.222'; port = 58105 }; ioModule = @{ host = $h; port = $p; unitId = 255 } } | ConvertTo-Json -Depth 4 }
+    $vehicles = Join-Path $work 'vehicles'
+    New-InstalledConfig (Join-Path $vehicles 'simulator/OnboardHmi') (& $io '127.0.0.1' 1502)
+    New-InstalledConfig (Join-Path $vehicles 'real/OnboardHmi') (& $io $realSite 502)
+    New-InstalledConfig (Join-Path $vehicles 'unknown/OnboardHmi') (& $io 'localhost.' 1502)
+    New-InstalledConfig (Join-Path $vehicles 'unreadable/OnboardHmi') '{ "ioModule": { "host": '
+    New-InstalledConfig (Join-Path $vehicles 'nohost/OnboardHmi') '{ "ioModule": { "port": 1502 } }'
+    New-InstalledConfig (Join-Path $vehicles 'previous-only/OnboardHmi.previous') (& $io '127.0.0.1' 1502)
+    New-Item -ItemType Directory -Force -Path (Join-Path $vehicles 'absent') | Out-Null
+
     $sshLog = Join-Path $work 'ssh-calls.log'
     @'
 #Requires -Version 7
 # ssh shim for Test-DeployOnboardHmi.ps1. Answers the deploy script's two read-only probes; anything else fails.
+# The IO probe is the deploy script's own, decoded, with its install root pointed at a fixture and run in a fresh pwsh.
 $alias = [string] $args[0]
 $command = ($args | Select-Object -Skip 1) -join ' '
 # -WhatIf:$false: the deploy script runs under -WhatIf, and that preference reaches this script too.
@@ -237,16 +313,14 @@ Add-Content -LiteralPath $env:WS28_SSH_LOG -Value "$alias | $command" -WhatIf:$f
 if ($alias -cne $env:WS28_FAKE_ALIAS) { "shim: unexpected alias $alias"; exit 255 }
 if ($command -match 'Get-Process SQCD\.Agv\.Wpf') { 'STOPPED'; exit 0 }
 if ($command -match '-EncodedCommand (\S+)') {
+    if ($env:WS28_IO_STATE -ceq 'garbage') { 'no state line at all'; exit 0 }
     $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
-    if (-not $decoded.Contains("Join-Path 'C:\8005\OnboardHmi' 'appsettings.json'")) { 'shim: the IO probe does not read the installed appsettings.json'; exit 255 }
-    switch ($env:WS28_IO_STATE) {
-        'absent'     { 'IO-STATE {"State":"absent"}' }
-        'simulator'  { 'IO-STATE {"State":"present","Host":"127.0.0.1","Port":1502}' }
-        'real'       { 'IO-STATE {"State":"present","Host":"192.168.71.150","Port":502}' }
-        'unreadable' { 'IO-STATE {"State":"unreadable","Error":"Conversion from JSON failed"}' }
-        default      { 'no state line at all' }
-    }
-    exit 0
+    $rootLine = "`$root = 'C:\8005\OnboardHmi'"
+    if (([regex]::Matches($decoded, [regex]::Escape($rootLine))).Count -ne 1) { "shim: the IO probe does not set `$root from the install root once"; exit 255 }
+    $fixture = Join-Path $env:WS28_VEHICLES "$env:WS28_IO_STATE\OnboardHmi"
+    $rewritten = $decoded.Replace($rootLine, "`$root = '$fixture'")
+    & pwsh -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rewritten))) 2>&1
+    exit $LASTEXITCODE
 }
 "shim: unhandled command: $command"
 exit 255
@@ -255,6 +329,7 @@ exit 255
     $env:PATH = (Join-Path $work 'shim') + [IO.Path]::PathSeparator + $env:PATH
     $env:WS28_SSH_LOG = $sshLog
     $env:WS28_FAKE_ALIAS = $fakeAlias
+    $env:WS28_VEHICLES = $vehicles
     function Invoke-Deploy([string] $IoState, [string[]] $Switches) {
         $env:WS28_IO_STATE = $IoState
         if (Test-Path -LiteralPath $sshLog) { Remove-Item -LiteralPath $sshLog }
@@ -274,10 +349,11 @@ exit 255
         return [pscustomobject]@{ Code = $code; Output = $output; Calls = $calls; Config = $rendered; Warned = $warning.Count -gt 0 }
     }
     function Get-Io($d) { return ($null -eq $d.Config) ? '(none rendered)' : ('{0}:{1}' -f $d.Config.ioModule.host, $d.Config.ioModule.port) }
+    function Test-Refused($d, [string] $Code) { return $d.Code -ne 0 -and $d.Output.Contains("${Code}:") -and $null -eq $d.Config }
 
     $d = Invoke-Deploy 'simulator' @()
-    Write-Result -Ok ($d.Code -ne 0 -and $d.Output.Contains('IO_SIMULATOR_TO_REAL_REFUSED') -and $null -eq $d.Config -and $d.Calls.Count -eq 2) `
-        -Name 'E2E simulator -> site, no switch: refused, nothing rendered (2 read-only ssh probes, both the shim)' -Detail "exit $($d.Code), io $(Get-Io $d), calls $($d.Calls.Count)`n$($d.Output)"
+    Write-Result -Ok ((Test-Refused $d 'IO_SIMULATOR_TO_REAL_REFUSED') -and $d.Calls.Count -eq 2 -and $d.Output.Contains('Installed IO on ws28-offline-fake: present 127.0.0.1:1502')) `
+        -Name 'E2E simulator -> site, no switch: the probe reads 127.0.0.1:1502, refused, nothing rendered (2 ssh calls, both the shim)' -Detail "exit $($d.Code), io $(Get-Io $d), calls $($d.Calls.Count)`n$($d.Output)"
     $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo')
     Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq '127.0.0.1:1502' -and $d.Config.ioModule.unitId -eq 255 -and $d.Config.ioModule.doStartAddress -eq 100 -and
         $d.Output.Contains('IO target: simulator 127.0.0.1:1502, kept from the installed configuration') -and -not $d.Warned) `
@@ -287,23 +363,35 @@ exit 255
         $d.Output.Contains('this connects the vehicle to REAL IO') -and $d.Warned) `
         -Name 'E2E simulator + -UseSiteIo: renders the real module, summary line says real IO needs authorisation, warns' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
     $d = Invoke-Deploy 'real' @()
-    Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq "${realSite}:502" -and $d.Output.Contains("IO target: REAL MODULE ${realSite}:502, from the site file; before: REAL MODULE") -and -not $d.Warned) `
+    Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq "${realSite}:502" -and $d.Output.Contains("IO target: REAL MODULE ${realSite}:502, from the site file; before: REAL MODULE ${realSite}:502") -and -not $d.Warned) `
         -Name 'E2E real module -> site, no switch: renders the site module as before, summary line, no warning' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
     $d = Invoke-Deploy 'absent' @()
     Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq "${realSite}:502" -and $d.Output.Contains('first deployment') -and -not $d.Warned) `
         -Name 'E2E first deployment, no switch: renders the site module as before' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
     $d = Invoke-Deploy 'absent' @('-KeepCurrentIo')
-    Write-Result -Ok ($d.Code -ne 0 -and $d.Output.Contains('IO_KEEP_NO_INSTALLED_CONFIG') -and $null -eq $d.Config) `
-        -Name 'E2E first deployment + -KeepCurrentIo: refused, nothing rendered' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    Write-Result -Ok (Test-Refused $d 'IO_KEEP_NO_INSTALLED_CONFIG') -Name 'E2E first deployment + -KeepCurrentIo: refused, nothing rendered' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'unreadable' @()
+    Write-Result -Ok ((Test-Refused $d 'IO_SIMULATOR_TO_REAL_REFUSED') -and $d.Output.Contains('Installed IO on ws28-offline-fake: unreadable')) `
+        -Name 'E2E an installed configuration that does not parse: the probe says unreadable, refused' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'nohost' @('-KeepCurrentIo')
+    Write-Result -Ok (Test-Refused $d 'IO_KEEP_UNREADABLE') -Name 'E2E an installed ioModule without host + -KeepCurrentIo: refused' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'unknown' @()
+    Write-Result -Ok (Test-Refused $d 'IO_UNKNOWN_TO_REAL_REFUSED') -Name 'E2E unknown IO (localhost.) -> site, no switch: refused' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'unknown' @('-KeepCurrentIo')
+    Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq 'localhost.:1502' -and $d.Output.Contains('IO target: UNKNOWN IO localhost.:1502, kept')) `
+        -Name 'E2E unknown IO + -KeepCurrentIo: kept as it is' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'previous-only' @()
+    Write-Result -Ok ((Test-Refused $d 'IO_PREVIOUS_INSTALL_ONLY') -and $d.Output.Contains('simulator 127.0.0.1:1502')) `
+        -Name 'E2E no install root but a .previous on the simulator: refused, not taken as a first deployment' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
     $d = Invoke-Deploy 'garbage' @()
-    Write-Result -Ok ($d.Code -ne 0 -and $d.Output.Contains('IO_SIMULATOR_TO_REAL_REFUSED') -and $d.Output.Contains('no IO-STATE line')) `
+    Write-Result -Ok ((Test-Refused $d 'IO_SIMULATOR_TO_REAL_REFUSED') -and $d.Output.Contains('no IO-STATE line')) `
         -Name 'E2E a probe that answers nothing usable: refused, not taken as a first deployment' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
     $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo', '-UseSiteIo')
     Write-Result -Ok ($d.Code -ne 0 -and $d.Output.Contains('IO_OPTIONS_EXCLUSIVE') -and $d.Calls.Count -eq 0) `
         -Name 'E2E both switches: refused before any ssh' -Detail "exit $($d.Code), calls $($d.Calls.Count)`n$($d.Output)"
 } finally {
     $env:PATH = $savedPath
-    Remove-Item Env:WS28_SSH_LOG, Env:WS28_FAKE_ALIAS, Env:WS28_IO_STATE -ErrorAction SilentlyContinue
+    Remove-Item Env:WS28_SSH_LOG, Env:WS28_FAKE_ALIAS, Env:WS28_IO_STATE, Env:WS28_VEHICLES -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -80,20 +80,22 @@
     workspace#28. Keep the IO target the vehicle's installed configuration
     points at (ioModule.host and ioModule.port, nothing else -- the other
     ioModule keys are this package's wiring and follow the template). Without
-    an installed configuration (a first deployment), or with one that cannot be
-    read, the deployment is refused rather than falling back to the site file.
+    an installed configuration (a first deployment), with one that cannot be
+    read, or with only a .previous, the deployment is refused rather than
+    falling back to the site file.
     Excludes -UseSiteIo.
 
 .PARAMETER UseSiteIo
     workspace#28. Render the site file's IO module even though the vehicle's
-    installed configuration points at the slot simulator (loopback). THIS
-    CONNECTS THE VEHICLE TO REAL IO: switching to the real module is in the
-    "moves a vehicle" class, so get the user's authorisation for this occasion
-    and have someone on site before passing it. Without it, a deployment that
-    would switch a simulator-backed vehicle to the real module is refused.
-    A vehicle already on the real module (agv01) and a first deployment take
-    the site value without either switch, as they always did. Excludes
-    -KeepCurrentIo.
+    installed configuration does not already point at it: the slot simulator
+    (loopback), an IO host that is neither (unknown), a configuration that
+    cannot be read, or an install root with only a .previous. THIS CONNECTS
+    THE VEHICLE TO REAL IO: switching to the real module is in the "moves a
+    vehicle" class, so get the user's authorisation for this occasion and have
+    someone on site before passing it. Without it, each of those deployments
+    is refused. A vehicle already on the site file's module (agv01) and a
+    first deployment take the site value without either switch, as they always
+    did. Excludes -KeepCurrentIo.
 
 .PARAMETER WhatIf
     Stage, verify and render the configuration locally, then stop before the
@@ -215,8 +217,8 @@ function Assert-VehicleSafetyEndpointNamesVehicle {
 
 function Test-SimulatorIoHost {
     <#
-        workspace#28. The slot simulator runs on the vehicle itself, so a loopback IO host is the simulator and anything
-        else is a real module (the real ones sit on 192.168.71.x). Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+        workspace#28. The slot simulator runs on the vehicle itself, so a loopback IO host is the simulator. Only these
+        spellings count: 127.x, ::1 and localhost. Pure: Test-DeployOnboardHmi.ps1 lifts it out.
     #>
     param([AllowNull()][AllowEmptyString()][string] $IoHost)
     if ([string]::IsNullOrWhiteSpace($IoHost)) { return $false }
@@ -226,15 +228,30 @@ function Test-SimulatorIoHost {
     return [ipaddress]::TryParse($trimmed, [ref]$address) -and [ipaddress]::IsLoopback($address)
 }
 
+function Get-IoTargetKind {
+    <#
+        workspace#28 review S3. 'simulator' (loopback), 'real' (exactly the site file's module) or 'unknown'
+        (anything else: localhost., a host with a port in it, the machine's own name, another module). Unknown is
+        never taken for the real module, so a spelling nobody listed fails towards a refusal rather than a pass.
+        Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+    #>
+    param([AllowNull()][AllowEmptyString()][string] $IoHost, [Parameter(Mandatory = $true)][string] $SiteHost)
+    if (Test-SimulatorIoHost $IoHost) { return 'simulator' }
+    if (-not [string]::IsNullOrWhiteSpace($IoHost) -and $IoHost.Trim() -ieq $SiteHost.Trim()) { return 'real' }
+    return 'unknown'
+}
+
 function Resolve-OnboardIoTarget {
     <#
         workspace#28. Which IO target the rendered configuration gets: ioModule.host and ioModule.port only.
         $Installed describes the vehicle's installed appsettings.json: State is 'absent' (first deployment), 'present'
-        (with Host and Port) or 'unreadable' (with Error). Returns Host, Port, Line (the summary line) and Warning.
-        Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+        (with Host and Port), 'unreadable' (with Error) or 'previous-only' (no install root, but <root>.previous has a
+        configuration -- a placement that died between its two moves; with PreviousHost and PreviousPort, or Error).
+        Returns Host, Port, Line (the summary line) and Warning. Pure: Test-DeployOnboardHmi.ps1 lifts it out.
 
-        The rule it holds: no combination of switches turns a simulator-backed vehicle onto the real module unless
-        -UseSiteIo says so, because switching to real IO needs the user's authorisation for that occasion.
+        The rule it holds: no combination of switches moves a vehicle that is not already on the site file's real
+        module onto it unless -UseSiteIo says so, because switching to real IO needs the user's authorisation for that
+        occasion. The one exception is a genuine first deployment, which has always taken the site value.
     #>
     param(
         [Parameter(Mandatory = $true)][hashtable] $Installed,
@@ -246,7 +263,9 @@ function Resolve-OnboardIoTarget {
     if ($KeepCurrentIo -and $UseSiteIo) {
         throw 'IO_OPTIONS_EXCLUSIVE: -KeepCurrentIo and -UseSiteIo contradict each other; pass one.'
     }
-    $describe = { param($h, $p) '{0} {1}:{2}' -f ((Test-SimulatorIoHost $h) ? 'simulator' : 'REAL MODULE'), $h, $p }
+    $labels = @{ simulator = 'simulator'; real = 'REAL MODULE'; unknown = 'UNKNOWN IO' }
+    $describe = { param($h, $p) '{0} {1}:{2}' -f $labels[(Get-IoTargetKind $h $SiteHost)], $h, $p }
+    $errorText = $Installed['Error'] ? ": $($Installed['Error'])" : ''
 
     $state = [string] $Installed['State']
     $installedHost = [string] $Installed['Host']
@@ -254,11 +273,19 @@ function Resolve-OnboardIoTarget {
     $installedValid = $state -ceq 'present' -and -not [string]::IsNullOrWhiteSpace($installedHost) -and
         $installedHost -notlike '*REPLACE*' -and [int]::TryParse([string] $Installed['Port'], [ref]$installedPort) -and
         $installedPort -ge 1 -and $installedPort -le 65535
+    $installedKind = $installedValid ? (Get-IoTargetKind $installedHost $SiteHost) : $null
     $previous = switch ($true) {
         ($state -ceq 'absent') { 'none (no installed configuration: first deployment)'; break }
+        ($state -ceq 'previous-only') {
+            "none in the install root, but its .previous holds one ($(& $describe ([string] $Installed['PreviousHost']) $Installed['PreviousPort'])$errorText)"; break
+        }
         $installedValid { & $describe $installedHost $installedPort; break }
-        default { "unknown ($state$(if ($Installed['Error']) { ": $($Installed['Error'])" }); host '$installedHost', port '$($Installed['Port'])')" }
+        default { "unknown ($state$errorText; host '$installedHost', port '$($Installed['Port'])')" }
     }
+    $previousOnly = 'IO_PREVIOUS_INSTALL_ONLY: the install root has no configuration but its .previous does -- a ' +
+        "placement that stopped between its two moves leaves exactly this. Before: $previous. Check on the vehicle what " +
+        'happened and restore or remove the .previous directory before deploying; this script will not guess which IO ' +
+        'the vehicle was meant to use.'
 
     if ($KeepCurrentIo) {
         if ($state -ceq 'absent') {
@@ -266,6 +293,7 @@ function Resolve-OnboardIoTarget {
                 'vehicle has none (first deployment). Refusing rather than silently using the site file''s IO module. ' +
                 'Deploy without -KeepCurrentIo to take the site value, then 09-switch-io-module.ps1 -Simulator if the simulator is wanted.')
         }
+        if ($state -ceq 'previous-only') { throw $previousOnly }
         if (-not $installedValid) {
             throw "IO_KEEP_UNREADABLE: -KeepCurrentIo could not read a usable ioModule.host/port from the installed configuration: $previous. Refusing rather than guessing."
         }
@@ -277,20 +305,28 @@ function Resolve-OnboardIoTarget {
         }
     }
 
-    $toReal = -not (Test-SimulatorIoHost $SiteHost)
-    # An installed configuration this script cannot read may well point at the simulator; treat it as one.
-    $fromSimulator = ($installedValid -and (Test-SimulatorIoHost $installedHost)) -or ($state -cne 'absent' -and -not $installedValid)
+    $toReal = (Get-IoTargetKind $SiteHost $SiteHost) -ceq 'real'
+    # Anything but the site's own module already, or a genuine first deployment, is a switch onto real IO.
+    $switching = $toReal -and $state -cne 'absent' -and $installedKind -cne 'real'
     $target = & $describe $SiteHost $TemplatePort
-    if ($toReal -and $fromSimulator -and -not $UseSiteIo) {
+    $choose = 'Pass one of: -KeepCurrentIo to keep the current IO target, or -UseSiteIo to switch to the real module ' +
+        '(authorised, with someone on site).'
+    if ($switching -and -not $UseSiteIo) {
+        if ($state -ceq 'previous-only') { throw $previousOnly }
+        if ($installedKind -ceq 'unknown') {
+            throw ("IO_UNKNOWN_TO_REAL_REFUSED: the installed configuration's IO is $previous -- neither the simulator (loopback) " +
+                "nor the site file's module -- and the site file would switch it to $target. Switching a vehicle to real IO " +
+                "needs the user's authorisation. $choose")
+        }
+        # Simulator, or an installed configuration this script cannot read, which may well point at the simulator.
         throw ("IO_SIMULATOR_TO_REAL_REFUSED: the installed configuration's IO is $previous, and the site file would switch it to " +
-            "$target. Switching a vehicle to real IO needs the user's authorisation. Pass one of: -KeepCurrentIo to keep the " +
-            'current IO target, or -UseSiteIo to switch to the real module (authorised, with someone on site).')
+            "$target. Switching a vehicle to real IO needs the user's authorisation. $choose")
     }
     $line = "IO target: $target, from the site file; before: $previous"
     if ($UseSiteIo -and $toReal) {
         $line += ' -- -UseSiteIo: this connects the vehicle to REAL IO; deploy only with the user''s authorisation and someone on site'
     }
-    $warning = ($toReal -and $fromSimulator) ?
+    $warning = $switching ?
         "This deployment switches the vehicle's IO from $previous to $target (-UseSiteIo). The vehicle will drive real slot IO the next time the client starts." :
         $null
     return [pscustomobject]@{ Host = $SiteHost; Port = $TemplatePort; Line = $line; Warning = $warning }
@@ -370,13 +406,28 @@ Write-Step "Onboard client state on ${SshAlias}: $($running -join ' ')"
 # workspace#28. Where the installed configuration's IO points, read before the -WhatIf gate (read-only, like the
 # check above) so a dry run shows the IO decision too. Encoded, so no quoting survives two shells by accident.
 $ioProbe = @"
-`$path = Join-Path '$installRoot' 'appsettings.json'
-if (-not (Test-Path -LiteralPath `$path -PathType Leaf)) { 'IO-STATE ' + (@{ State = 'absent' } | ConvertTo-Json -Compress); return }
+`$root = '$installRoot'
+function Read-IoTarget([string] `$file) {
+    `$io = (Get-Content -Raw -LiteralPath `$file | ConvertFrom-Json -AsHashtable)['ioModule']
+    if (`$io -isnot [System.Collections.IDictionary]) { return @{ Host = `$null; Port = `$null } }
+    return @{ Host = `$io['host']; Port = `$io['port'] }
+}
+`$path = Join-Path `$root 'appsettings.json'
+if (-not (Test-Path -LiteralPath `$path -PathType Leaf)) {
+    # Review S2: a placement that died between its two moves leaves no root but a .previous; that is not a first deployment.
+    `$previous = Join-Path "`$root.previous" 'appsettings.json'
+    if (Test-Path -LiteralPath `$previous -PathType Leaf) {
+        try { `$t = Read-IoTarget `$previous; `$state = @{ State = 'previous-only'; PreviousHost = `$t.Host; PreviousPort = `$t.Port } }
+        catch { `$state = @{ State = 'previous-only'; Error = `$_.Exception.Message } }
+    } else {
+        `$state = @{ State = 'absent' }
+    }
+    'IO-STATE ' + (`$state | ConvertTo-Json -Compress)
+    return
+}
 try {
-    `$io = (Get-Content -Raw -LiteralPath `$path | ConvertFrom-Json -AsHashtable)['ioModule']
-    `$h = (`$io -is [System.Collections.IDictionary]) ? `$io['host'] : `$null
-    `$p = (`$io -is [System.Collections.IDictionary]) ? `$io['port'] : `$null
-    'IO-STATE ' + (@{ State = 'present'; Host = `$h; Port = `$p } | ConvertTo-Json -Compress)
+    `$t = Read-IoTarget `$path
+    'IO-STATE ' + (@{ State = 'present'; Host = `$t.Host; Port = `$t.Port } | ConvertTo-Json -Compress)
 } catch {
     'IO-STATE ' + (@{ State = 'unreadable'; Error = `$_.Exception.Message } | ConvertTo-Json -Compress)
 }
