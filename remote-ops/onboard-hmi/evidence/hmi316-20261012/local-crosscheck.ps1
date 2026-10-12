@@ -154,6 +154,8 @@ try {
         }
     }
     Get-ScheduledTask -TaskName 'W2G-hmi316-*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+    # After the cleanup too, so "nothing left" is in the log and not only in the operator's word (review L5).
+    Note "after cleanup: sim=$((Get-Stack).Sim -join ',') hmi=$((Get-Stack).Hmi -join ',') tasks=$(@(Get-ScheduledTask -TaskName 'W2G-hmi316-*' -ErrorAction SilentlyContinue).Count)"
     $mutex.ReleaseMutex(); $mutex.Dispose()
     Note "output: $out"
 }

@@ -146,8 +146,11 @@ ssh agv01 "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"
 **版本分界（onboard-hmi#312）**：含该票的车载端之前，日志写在程序目录 `C:\8005\OnboardHmi\logs\`。
 部署脚本每次把程序目录整个改名成 `.previous`、再删掉上一代 `.previous`，所以那里的日志会随部署消失，
 这正是改位置的原因。升级时旧日志**不迁移**：升级那次部署把旧包连同旧日志改名到
-`C:\8005\OnboardHmi.previous\logs\`，下一次部署就删掉，要留就在那之前拷走。文件本身是好的（hmi#292：2026-10-11 从 agv02 原样取回 `agv-20261010.log`、
-`agv-20261011.log`，2135 行全部带中文，严格 UTF-8 解码通过，`EF BF BD` 计数为 0）。
+`C:\8005\OnboardHmi.previous\logs\`，下一次部署就删掉，要留就在那之前拷走。文件本身是好的：hmi#292 在 2026-10-11
+从 agv02 原样取回 `agv-20261010.log`、`agv-20261011.log`，2135 行全部带中文，严格 UTF-8 解码通过，`EF BF BD` 计数为 0。
+**那次取的是当时的程序目录 `C:\8005\OnboardHmi\logs\`**（提交 `2202b24` 写的命令是 `scp agv02:C:/8005/OnboardHmi/logs/...`），
+那台车当时还不含 hmi#312。下面的 `%LOCALAPPDATA%` 路径是 hmi#312 搬家之后的新位置（本段 2026-10-12 由 `8fedb5c` 改写时换入）；
+`agvops` 经 SSH 能不能读 `HT` 的这个目录，到 2026-10-12 为止还没有实测过（onboard-hmi#316 审查 S1）。
 看到中文变成一串 `�`（U+FFFD）而英文正常，是**读取链路**上的编码错配，不是日志坏了。
 
 推荐读法：先原样拷回本机，再按 UTF-8 读。字节不经过任何控制台，不会被转码。
