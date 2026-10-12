@@ -237,6 +237,13 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
   安装器在安装与回滚之后从 Host 自己的日志里找本次进程启动以来的这条事件、与定义逐项比对，打出
   `EFFECTIVE_CONFIGURATION=...` 结果行；19 再核一次。`production` 下读不到或不一致都算失败
   （`EFFECTIVE_CONFIGURATION_UNREAD`／`EFFECTIVE_CONFIGURATION_MISMATCH`）；`fake` 下读不到只警告，因为 #535 之前的包不记这条。
+- **自动清桩开关也按 Host 实际绑定的值核**（control-server#638，两种模式都适用）。`journeyRuntime.clearanceToWaitingPointEnabled`
+  （REQ-0178：清桩中的车自己开往等待点）不写即关，两份出厂定义都不写。19 在部署前的摘要里打一行它的值（`-WhatIf` 也打），
+  打开时另打一条 Warning：这是会让车动的运行，每次都要授权、现场有人。Host 在 `EFFECTIVE_CONFIGURATION` 事件里记下它实际绑定的值，
+  安装器与定义比对：不一致报 `EFFECTIVE_CONFIGURATION_MISMATCH` 并停服务；定义打开而事件里没有这个字段（#638 之前的包，
+  包括 `-Rollback` 回到这样的包）报 `EFFECTIVE_CONFIGURATION_CLEARANCE_UNREAD` 并停服务——把定义里的开关去掉再装或再回滚即可；
+  定义打开而完全读不到事件，`fake` 下也停服务，不走上面那条「只警告」。它**不进** `EFFECTIVE_CONFIGURATION=` 结果行，
+  因为 19 整行比对那一行；安装器单独打一行 `clearanceToWaitingPointEnabled=...`。
 - **从 `fake` 换成 `production`**：安装器在记录新定义之前，先撤掉上一次安装留下的替身（计划任务、
   进程、目录）。否则 `installed-instance.json` 换成新定义之后就再没有东西指向它，卸载会找不到。
 - **从 `production` 换回 `fake`**：用出厂定义完整装一次（会重新构建并装替身）。不要用 `-Rollback`：

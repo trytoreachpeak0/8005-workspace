@@ -262,6 +262,11 @@ try {
     # R7 (review): the version line the deployment record is written from.
     Write-Result -Ok ($run.Text.Contains("ADMISSION_POLICY_VERSION=$definitionVersion -- write it into the deployment record")) `
         -Name 'the output carries ADMISSION_POLICY_VERSION=<n> for the deployment record' -Detail (Get-Detail $run)
+    # control-server#638 (PR #640 review M1): the clearance switch is shown before anything is touched, under -WhatIf too.
+    # The shipped definition leaves it out, which is off, and off warns about nothing.
+    Write-Result -Ok ($run.Text.Contains('Clearance to a waiting point (REQ-0178): journeyRuntime.clearanceToWaitingPointEnabled=False') -and
+            -not $run.Text.Contains('will drive themselves to a waiting point')) `
+        -Name 'the summary shows the clearance switch (off when the definition leaves it out), under -WhatIf' -Detail (Get-Detail $run)
     Write-Result -Ok ($global:SshCalls.Count -eq 1 -and $run.Text.Contains('INSTALLED_ADMISSION_POLICY_VERSION=none')) `
         -Name 'one read-only ssh for the installed version; none installed reads as a first install' -Detail ("ssh: $($global:SshCalls -join ' / ')`n        " + (Get-Detail $run))
 
