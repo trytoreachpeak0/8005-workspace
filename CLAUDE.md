@@ -475,10 +475,16 @@ release.yml (workflow_dispatch, headless runner) → zip + sha256 → GitHub art
 2. **部署编排脚本不能进安装包。**`Test-ReleasePackage.ps1` 递归扫包内所有 `.ps1` 找
    未授权的 `DROP DATABASE`，并且只允许两个 canonical `.sql` 路径。往包里塞脚本会让
    每次发布验证直接失败。脚本走包外的 `D:\zhengyushao\mes-ingest-ops\`。
-3. **`agvops` 在 SQL Server 上有 `dbcreator` + `ALTER ANY LOGIN`，没有 sysadmin。**
-   这是为了让 CD 自助建库而开的口子，代价真实：`ALTER ANY LOGIN` 能改包括 `sa` 在内
-   的登录密码，所以那把 SSH 私钥理论上顺着它能碰到同实例的 `SQAGV`。收回语句在
-   `scripts/mes-ingest/grant-agvops-sql-access.sql` 末尾。
+3. **`agvops` 在 SQL Server 上是 sysadmin。**最初 CD 只给了 `dbcreator` + `ALTER ANY LOGIN`
+   （`scripts/mes-ingest/grant-agvops-sql-access.sql`），2026-09-15 为了读内存、等待、计划缓存这类
+   server-state DMV，用用户提供的 `sa` 密码执行 `ALTER SERVER ROLE sysadmin ADD MEMBER` 提成了
+   sysadmin（`remote-ops/factory-server/README.md` 第 5 节有记录，`sa` 本身未改）；2026-10-11 夜
+   vm01 内存调研时实读 `IS_SRVROLEMEMBER('sysadmin')` 返回 1（`8005-workspace-v2/ci-research/memory-budget.md`）。
+   **2026-10-12 用户定：不收回，如实记录。**代价按实写：控制端那把 SSH 私钥
+   （`~/.ssh/agv_srv_ed25519`）经 `agvops` 能直接读写同实例上的一切，包括 `SQAGV` 生产库，
+   不再需要绕道 `ALTER ANY LOGIN`。所以「不碰 `SQAGV`」「CD 不碰生产库」现在只靠脚本与会话自律，
+   没有数据库权限这一层兜底。`grant-agvops-sql-access.sql` 末尾的收回语句只收回那两项，
+   **收不回 sysadmin**；真要收回是 `ALTER SERVER ROLE sysadmin DROP MEMBER`，要先问用户。
 4. **Host 绑非 localhost，于是所有请求都要 Bearer**（`MesIngest.Host/Program.cs:182`
    的中间件不区分来源）。服务器上那个走回环的 Watch 同样要带 SharedSecret，健康检查
    也要。三个秘密存控制端 `%LOCALAPPDATA%\AgvOpsSecrets\mes-ingest-deployment.xml`，
