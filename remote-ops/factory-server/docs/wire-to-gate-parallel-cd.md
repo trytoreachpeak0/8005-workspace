@@ -573,6 +573,26 @@ v2 实例。
   名单为空就是这样），打 `CLEARANCE_EXIT_UNAVAILABLE` 警告并列原因码，不算失败。它读的是服务将读的文件，不是运行中进程的
   判定——服务端没有对外暴露这个状态，只有自己日志里的 2271/2272。
 
+#### 车载屏「确认清桩」与恢复窗口（8005-workspace#25）
+
+车载屏上的「确认清桩」入口要三方面都到位，**本节的部署只管前两条，第三条由 `18-set-v2-recovery-window.ps1` 管**：
+
+1. `fieldOperatorRoles.onboardClearanceEntryDeclared = true`——服务端才受理车载端的 `ManualStationClearanceConfirmationRequested`。
+   出厂 `false`，三份 `instance-factory01-v2*.json` 都是 `false`。
+2. 车上的 `CONTROL_SERVER_OPERATOR_ID` 在 `fieldOperatorRoles.path` 那份名单里持有 R-11 或 R-13——服务端按工号判谁能清桩，
+   不在名单里答 `REJECTED`。
+3. 车上的恢复窗口：`wireToGate.recoveryResumeEnabled = true` 加车上变量 `CONTROL_SERVER_RECOVERY_PROOF`。没有它入口根本不出现
+   （10-12 agv03 就是这样）。清桩请求**不带**这个值，服务端也不核对它。
+
+恢复续作（`ExceptionRecoverySessionRequested`）不一样：车把 `CONTROL_SERVER_RECOVERY_PROOF` 的值作为 `authenticationProof` 发上来，
+服务端拿 `Recovery:AuthenticationProofEnvironmentVariable` 指的变量逐字节比对。v2 部署没有给 `Recovery` 节，所以是缺省名
+`CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF`；2026-10-12 只读查过 v2 服务 `Environment` 的变量名，**没有这一条**，所以窗口开之前
+恢复续作一律被拒。它和上面的 `CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL` 是两个凭据，互不替代。
+
+`18` 两端写同一个值、`-Revert` 两端都删；**部署脚本不碰它们，出厂是关**。所以首次安装、卸载重装 v2 服务之后（`Environment` 会重建），
+窗口内要重跑一次 `18`；普通升级保留其他条目，不受影响。怎么开、怎么关、什么时候会拒绝，见 `remote-ops/onboard-hmi/docs/USAGE.md`
+「v2 线的恢复窗口」。
+
 
 ### 7.2 多车实例每台车一个出发安全投影凭据（control-server#600）
 
