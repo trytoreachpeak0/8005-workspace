@@ -35,8 +35,8 @@ Set-StrictMode -Version 3.0
 $script:Passed = 0
 $script:Failed = 0
 function Write-Result {
-    param([bool] $Ok, [string] $Name, [string] $Detail)
-    if ($Ok) { $script:Passed++; Write-Host "  PASS  $Name" -ForegroundColor Green }
+    param([AllowNull()] $Ok, [string] $Name, [string] $Detail)
+    if ([bool]$Ok) { $script:Passed++; Write-Host "  PASS  $Name" -ForegroundColor Green }
     else { $script:Failed++; Write-Host "  FAIL  $Name" -ForegroundColor Red; Write-Host "        $Detail" -ForegroundColor Red }
 }
 
@@ -61,6 +61,16 @@ $v2 = [ordered]@{
     Database    = 'C:\ProgramData\8005\ControlServer.V2\data\controlserver.db'
 }
 
+# A call that should pass: a throw becomes a failed result instead of ending the self-test.
+function Invoke-Expected {
+    param([scriptblock] $Action)
+    try { & $Action }
+    catch {
+        [pscustomobject]@{ IsMvp = $null; Explicit = $null; LogDirectory = $null; LogFilter = $null; DatabaseIsCopy = $null
+            Directory = $null; Filter = $null; Error = $_.Exception.Message }
+    }
+}
+
 function Get-Code {
     param([scriptblock] $Action)
     try { $null = & $Action; return 'OK' }
@@ -80,7 +90,7 @@ function Test-SjrSet {
     Get-Code { Assert-ControlServerTargetParameters -Bound $Bound -Values $values -Kinds $sjrKinds }
 }
 
-$r = Assert-ControlServerTargetParameters -Bound @('Off', 'Force') -Values ([ordered]@{ ServiceName = $mvp.ServiceName; ConfigPath = $mvp.ConfigPath; BaseUrl = $mvp.BaseUrl }) -Kinds $sjrKinds
+$r = Invoke-Expected { Assert-ControlServerTargetParameters -Bound @('Off', 'Force') -Values ([ordered]@{ ServiceName = $mvp.ServiceName; ConfigPath = $mvp.ConfigPath; BaseUrl = $mvp.BaseUrl }) -Kinds $sjrKinds }
 Write-Result -Ok ($r.IsMvp -and -not $r.Explicit) -Name 'Set-JourneyRuntime: no instance parameter -> the MVP, passes' -Detail ($r | ConvertTo-Json -Compress)
 foreach ($name in @('ServiceName', 'ConfigPath', 'BaseUrl')) {
     $code = Test-SjrSet -Bound @($name) -Over ([ordered]@{ $name = $v2[$name] })
@@ -108,9 +118,9 @@ $code = Test-SjrSet -Bound $all -Over ([ordered]@{ ServiceName = ' 8005 agv cont
 Write-Result -Ok ($code -eq 'TARGET_MIXED_MVP') -Name 'Set-JourneyRuntime: MVP name and path in other case and slashes are still the MVP -> TARGET_MIXED_MVP' -Detail $code
 $code = Test-SjrSet -Bound $all -Over ([ordered]@{ ServiceName = $v2.ServiceName; ConfigPath = $v2.ConfigPath; BaseUrl = 'http://localhost:58007' })
 Write-Result -Ok ($code -eq 'TARGET_MIXED_MVP') -Name 'Set-JourneyRuntime: -BaseUrl on port 58007 of another host is still the MVP -> TARGET_MIXED_MVP' -Detail $code
-$r = Assert-ControlServerTargetParameters -Bound $all -Values ([ordered]@{ ServiceName = $v2.ServiceName; ConfigPath = $v2.ConfigPath; BaseUrl = $v2.BaseUrl }) -Kinds $sjrKinds
+$r = Invoke-Expected { Assert-ControlServerTargetParameters -Bound $all -Values ([ordered]@{ ServiceName = $v2.ServiceName; ConfigPath = $v2.ConfigPath; BaseUrl = $v2.BaseUrl }) -Kinds $sjrKinds }
 Write-Result -Ok (-not $r.IsMvp -and $r.Explicit) -Name 'Set-JourneyRuntime: all three v2 -> passes, not the MVP' -Detail ($r | ConvertTo-Json -Compress)
-$r = Assert-ControlServerTargetParameters -Bound $all -Values ([ordered]@{ ServiceName = $mvp.ServiceName; ConfigPath = $mvp.ConfigPath; BaseUrl = $mvp.BaseUrl }) -Kinds $sjrKinds
+$r = Invoke-Expected { Assert-ControlServerTargetParameters -Bound $all -Values ([ordered]@{ ServiceName = $mvp.ServiceName; ConfigPath = $mvp.ConfigPath; BaseUrl = $mvp.BaseUrl }) -Kinds $sjrKinds }
 Write-Result -Ok ($r.IsMvp -and $r.Explicit) -Name 'Set-JourneyRuntime: all three MVP values given explicitly -> passes, the MVP' -Detail ($r | ConvertTo-Json -Compress)
 
 $closeNames = [ordered]@{ ServerDatabase = 'Database'; ServerInstallRoot = 'InstallRoot'; ServerConfigPath = 'ConfigPath'; ServiceName = 'ServiceName'; BaseUrl = 'BaseUrl' }
@@ -133,11 +143,11 @@ foreach ($mvpOne in @($closeKinds.Keys)) {
     $code = Get-Code { Assert-ControlServerTargetParameters -Bound $allClose -Values $over -Kinds $closeKinds }
     Write-Result -Ok ($code -eq 'TARGET_MIXED_MVP') -Name "13: all five given, only -$mvpOne the MVP's -> TARGET_MIXED_MVP" -Detail $code
 }
-$r = Assert-ControlServerTargetParameters -Bound @('Force') -Values (Get-CloseValues $mvp ([ordered]@{})) -Kinds $closeKinds
+$r = Invoke-Expected { Assert-ControlServerTargetParameters -Bound @('Force') -Values (Get-CloseValues $mvp ([ordered]@{})) -Kinds $closeKinds }
 Write-Result -Ok $r.IsMvp -Name '13: no instance parameter -> the MVP, passes' -Detail ($r | ConvertTo-Json -Compress)
-$r = Assert-ControlServerTargetParameters -Bound $allClose -Values (Get-CloseValues $v2 ([ordered]@{})) -Kinds $closeKinds
+$r = Invoke-Expected { Assert-ControlServerTargetParameters -Bound $allClose -Values (Get-CloseValues $v2 ([ordered]@{})) -Kinds $closeKinds }
 Write-Result -Ok (-not $r.IsMvp) -Name '13: all five v2 -> passes' -Detail ($r | ConvertTo-Json -Compress)
-$r = Assert-ControlServerTargetParameters -Bound $allClose -Values (Get-CloseValues $mvp ([ordered]@{ ServerDatabase = 'D:\rehearsal\controlserver.db' })) -Kinds $closeKinds
+$r = Invoke-Expected { Assert-ControlServerTargetParameters -Bound $allClose -Values (Get-CloseValues $mvp ([ordered]@{ ServerDatabase = 'D:\rehearsal\controlserver.db' })) -Kinds $closeKinds }
 Write-Result -Ok $r.IsMvp -Name '13: all five, MVP with a rehearsal copy -> passes the parameter check (the database is the read-back''s)' -Detail ($r | ConvertTo-Json -Compress)
 
 # ---------------------------------------------------------------------------------------------------- read-back ---
@@ -168,10 +178,10 @@ foreach ($t in @(@{ Name = 'MVP'; T = $mvp }, @{ Name = 'v2'; T = $v2 })) {
     $code = Test-Readback $t.T (New-Readback $t.T @{}) (& $closeExtraFor $t.T)
     Write-Result -Ok ($code -eq 'OK') -Name "$($t.Name) read-back consistent -> passes (13, with install root and database)" -Detail $code
 }
-$facts = Assert-ControlServerTargetReadback -Readback (New-Readback $v2 @{}) -ServiceName $v2.ServiceName -ConfigPath $v2.ConfigPath -BaseUrl $v2.BaseUrl
+$facts = Invoke-Expected { Assert-ControlServerTargetReadback -Readback (New-Readback $v2 @{}) -ServiceName $v2.ServiceName -ConfigPath $v2.ConfigPath -BaseUrl $v2.BaseUrl }
 Write-Result -Ok ($facts.LogDirectory -eq 'C:\ProgramData\8005\ControlServer.V2\logs' -and $facts.LogFilter -eq 'controlserver-*.ndjson') `
     -Name 'v2 read-back names its own log directory and file pattern' -Detail ($facts | ConvertTo-Json -Compress)
-$facts = Assert-ControlServerTargetReadback -Readback (New-Readback $v2 @{ logPath = $null }) -ServiceName $v2.ServiceName -ConfigPath $v2.ConfigPath -BaseUrl $v2.BaseUrl
+$facts = Invoke-Expected { Assert-ControlServerTargetReadback -Readback (New-Readback $v2 @{ logPath = $null }) -ServiceName $v2.ServiceName -ConfigPath $v2.ConfigPath -BaseUrl $v2.BaseUrl }
 Write-Result -Ok ($null -eq $facts.LogDirectory) -Name 'a configuration naming no log file gives no log directory' -Detail ($facts | ConvertTo-Json -Compress)
 
 $cases = @(
@@ -195,16 +205,16 @@ $code = Test-Readback $v2 (New-Readback $v2 @{}) @{ InstallRoot = $v2.InstallRoo
 Write-Result -Ok ($code -eq 'TARGET_DATABASE_OTHER_INSTANCE') -Name '13: v2 instance with the MVP database -> TARGET_DATABASE_OTHER_INSTANCE' -Detail $code
 $code = Test-Readback $mvp (New-Readback $mvp @{}) @{ InstallRoot = $mvp.InstallRoot; Database = $v2.Database }
 Write-Result -Ok ($code -eq 'TARGET_DATABASE_OTHER_INSTANCE') -Name '13: MVP instance with the v2 database -> TARGET_DATABASE_OTHER_INSTANCE' -Detail $code
-$facts = Assert-ControlServerTargetReadback -Readback (New-Readback $mvp @{}) -ServiceName $mvp.ServiceName -ConfigPath $mvp.ConfigPath -BaseUrl $mvp.BaseUrl -InstallRoot $mvp.InstallRoot -Database 'D:\rehearsal\controlserver.db'
+$facts = Invoke-Expected { Assert-ControlServerTargetReadback -Readback (New-Readback $mvp @{}) -ServiceName $mvp.ServiceName -ConfigPath $mvp.ConfigPath -BaseUrl $mvp.BaseUrl -InstallRoot $mvp.InstallRoot -Database 'D:\rehearsal\controlserver.db' }
 Write-Result -Ok $facts.DatabaseIsCopy -Name '13: a database outside C:\ProgramData\8005\ is a rehearsal copy, allowed and flagged' -Detail ($facts | ConvertTo-Json -Compress)
-$facts = Assert-ControlServerTargetReadback -Readback (New-Readback $mvp @{ connectionString = 'Data Source=c:/programdata/8005/controlserver/data/CONTROLSERVER.db;Mode=ReadWriteCreate' }) -ServiceName $mvp.ServiceName -ConfigPath $mvp.ConfigPath -BaseUrl $mvp.BaseUrl -InstallRoot $mvp.InstallRoot -Database $mvp.Database
+$facts = Invoke-Expected { Assert-ControlServerTargetReadback -Readback (New-Readback $mvp @{ connectionString = 'Data Source=c:/programdata/8005/controlserver/data/CONTROLSERVER.db;Mode=ReadWriteCreate' }) -ServiceName $mvp.ServiceName -ConfigPath $mvp.ConfigPath -BaseUrl $mvp.BaseUrl -InstallRoot $mvp.InstallRoot -Database $mvp.Database }
 Write-Result -Ok (-not $facts.DatabaseIsCopy) -Name '13: the own database in other case, slashes and extra keywords is the own' -Detail ($facts | ConvertTo-Json -Compress)
 
-$src = Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = 'C:\ProgramData\8005\ControlServer.V2\logs'; LogFilter = 'cs-*.ndjson' }) -IsMvp $false
+$src = Invoke-Expected { Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = 'C:\ProgramData\8005\ControlServer.V2\logs'; LogFilter = 'cs-*.ndjson' }) -IsMvp $false }
 Write-Result -Ok ($src.Directory -eq 'C:\ProgramData\8005\ControlServer.V2\logs' -and $src.Filter -eq 'cs-*.ndjson') -Name 'log tail: the directory and pattern the configuration names' -Detail ($src | ConvertTo-Json -Compress)
-$src = Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = $null; LogFilter = $null }) -IsMvp $false
+$src = Invoke-Expected { Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = $null; LogFilter = $null }) -IsMvp $false }
 Write-Result -Ok ($null -eq $src) -Name 'log tail: another instance whose configuration names no log file is not tailed (never the MVP log)' -Detail ($src | ConvertTo-Json -Compress)
-$src = Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = $null; LogFilter = $null }) -IsMvp $true
+$src = Invoke-Expected { Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = $null; LogFilter = $null }) -IsMvp $true }
 Write-Result -Ok ($src.Directory -eq 'C:\ProgramData\8005\ControlServer\logs' -and $src.Filter -eq 'controlserver-*.ndjson') -Name 'log tail: the MVP falls back to its fixed directory, as before' -Detail ($src | ConvertTo-Json -Compress)
 
 foreach ($p in @(
