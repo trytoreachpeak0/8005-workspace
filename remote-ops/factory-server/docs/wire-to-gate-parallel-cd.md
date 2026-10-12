@@ -601,9 +601,13 @@ v2 实例。
   `Safety projection returned HTTP 401.` 并自动回滚。修复后它读已装配置里的 `OnboardSafetyProjection:vehicleCredentials`：有按车凭据时，
   从 v2 服务自己的 `Environment` 取每台车的值，逐车带 `?vehicleKey=` 各读一次；某台车的变量不在服务 `Environment` 里，就在升级脚本
   自己的预检里以 `SAFETY_PROJECTION_VEHICLE_CREDENTIAL_MISSING` 拒绝，包和数据目录都没换。**但经 `19-deploy` 走到这里时服务已经停了、
-  运行时已经置为 false**：外层在调升级脚本之前先停服务、关运行时（第 10 节「升级与回滚都会先把旅程运行时关掉」）。报错里「本脚本还什么都
-  没有改」只对升级脚本自己成立。每车凭据是升级脚本返回之后才由叠加步骤写进服务 `Environment` 的，所以**按 MISSING 重新部署会再次
-  MISSING**，出路是 `-Uninstall`（保留数据）再全新安装：全新安装不做这项检查，叠加步骤会把凭据写进去。被拒时报 `SAFETY_PROJECTION_CREDENTIAL_REJECTED`（401，写明是哪台车、哪个变量，
+  运行时已经置为 false**：外层在调升级脚本之前先停服务、关运行时（第 10 节「升级与回滚都会先把旅程运行时关掉」）。
+  **control-server#652 起，外层停服务之后、调升级脚本之前，先把每车凭据写进服务 `Environment`**（取自控制端 DPAPI 存储经
+  `deploy-config.json` 传来的值，没有就沿用服务里已有的；只增改不删）。以前要等升级脚本返回之后才由叠加步骤写入，`Environment` 里缺值时
+  按 MISSING 重新部署会再次 MISSING。现在的出路：控制端先用 `Set-ControlServerSecret.ps1 -NewVehicleSafetyCredential <别名>` 存好那台车的
+  凭据，再用含 #652 的提交重新部署。仍报 MISSING 只可能是已装配置列着一台当前定义里没有的车，这时重新部署同样失败，改为 `-Uninstall`
+  （不带 `-RemoveData`，保留数据）再全新安装。升级失败时写进去的凭据不还原：它们就是下一次成功部署要写的值，变量名按 riotId、新旧两代相同，
+  服务端只读配置里点名的变量，旧二进制多看到几个变量无害。被拒时报 `SAFETY_PROJECTION_CREDENTIAL_REJECTED`（401，写明是哪台车、哪个变量，
   或者是共享凭据）或 `SAFETY_PROJECTION_VEHICLE_MISMATCH`（403，两台车的变量写反了），不再只有一个 HTTP 401。单车实例与出厂安装照旧用共享凭据、
   不带车号。凭据值不进任何输出。
 
@@ -771,11 +775,16 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 再全新安装」；后者仍然可用，适合要换端口或绑定地址时（第 3 节：这些只在首次安装时生效）。
 
 **装上 #649 之后，两车实例第一次用不了 `-Rollback`。**回滚跑的是被装那一代包里自带的 `Update-ControlServerLocal.ps1`，而两车实例的
-「上一代」是 #649 之前的包：它的升级脚本拿共享凭据读安全投影，必然 401，然后自己回滚，运行时保持 false（安全方向，实例不受理需求）。
+「上一代」是 #649 之前的包：它的升级脚本拿共享凭据读安全投影，必然 401。**control-server#652 起，安装器在动任何东西之前就拒绝这种回滚**
+（`ROLLBACK_TARGET_PREDATES_PER_VEHICLE_CHECK`）：定义带车队表，而上一代包的升级脚本没有按车读投影（看它里面有没有
+`SAFETY_PROJECTION_VEHICLE_CREDENTIAL_MISSING` 这个原因码），就不停服务、不记录定义、不对调包目录，直接报错。#652 之前的安装器不拦，
+会对调包目录、跑旧升级脚本、401 后自己回滚，留下对调过的包目录和 false 的运行时，要按 `PACKAGE_DIRECTORIES_SWAPPED` 那一行手工换回。
 这时要退回旧版本，剩下的路是 `-Uninstall`（保留数据）再用旧包全新安装，**而这条路也不稳**：全新安装跑的是旧包里的
 `Install-ControlServerLocal.ps1`，正是有 `reason` 缺陷的那一版，保留的库里已有就绪会话时首读即 ready，安装照样回滚（10-12 现场 09 就是
 这样）。要它走得通，得让首读是 not-ready，例如换一个空的数据目录（那就不再是「保留数据」）。所以在「上一代」也是包含 #649 的包之前，
-两车实例**没有可靠的退回旧版本的路**；出了问题优先往前修，部署一个修好的新包。等「上一代」也包含 #649 之后，`-Rollback` 才恢复可用。
+两车实例**没有可靠的退回旧版本的路**，这是操作约束：出了问题优先往前修，部署一个修好的新包；不要卸载后装 #649 之前的包。
+再部署一次含 #649 的提交、让「上一代」也包含 #649 之后，`-Rollback` 才恢复可用（control-server#652 决定不另做退回机制：要退到 #649 之前，
+只能给旧包打补丁或在安装器里替换旧包的脚本，等于改发布物）。
 
 回滚还会沿用服务里已有的恢复凭据（第 7.1 节）。
 
