@@ -81,7 +81,9 @@ if ($command -match "-File '[^']*\\([\w-]+)\.ps1'") {
 [ordered]@{ alias = $args[0]; command = $command; stdin = $stdin; key = $key } |
     ConvertTo-Json -Compress | Add-Content -LiteralPath $env:FAKE_SSH_LOG -Encoding utf8NoBOM
 if ($key -and $env:FAKE_SSH_FAIL_MATCH -and $key -match $env:FAKE_SSH_FAIL_MATCH) { "REFUSED (fake): $key"; exit 1 }
-if ($key -match ':check$') { 'ENTRY=absent'; 'CONNECTED_VEHICLES=0'; 'CHECK_PASSED' }
+if ($key -cmatch ':check$') { 'ENTRY=absent'; 'CONNECTED_VEHICLES=0'; 'CHECK_PASSED' }
+if ($key -cmatch ':Status$' -and $env:FAKE_VEHICLE_STATUS) { $env:FAKE_VEHICLE_STATUS -split '\|' }
+if ($key -cmatch ':status$' -and $env:FAKE_SERVER_STATUS) { $env:FAKE_SERVER_STATUS -split '\|' }
 exit 0
 '@
     Set-Content -LiteralPath (Join-Path $fakeBin 'scp.ps1') -Encoding utf8NoBOM -Value @'
@@ -93,15 +95,18 @@ exit 0
 '@
 
     function Invoke-Target {
-        param([string[]] $Arguments, [string] $FailMatch, [switch] $NoRepository)
+        param([string[]] $Arguments, [string] $FailMatch, [switch] $NoRepository, [string] $VehicleStatus, [string] $ServerStatus)
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
         Get-ChildItem -LiteralPath $staged | Remove-Item -Force
-        $saved = @{ PATH = $env:PATH; FAKE_SSH_LOG = $env:FAKE_SSH_LOG; FAKE_SCP_DIR = $env:FAKE_SCP_DIR; FAKE_SSH_FAIL_MATCH = $env:FAKE_SSH_FAIL_MATCH }
+        $saved = @{ PATH = $env:PATH; FAKE_SSH_LOG = $env:FAKE_SSH_LOG; FAKE_SCP_DIR = $env:FAKE_SCP_DIR; FAKE_SSH_FAIL_MATCH = $env:FAKE_SSH_FAIL_MATCH
+            FAKE_VEHICLE_STATUS = $env:FAKE_VEHICLE_STATUS; FAKE_SERVER_STATUS = $env:FAKE_SERVER_STATUS }
         try {
             $env:PATH = "$fakeBin;$env:PATH"
             $env:FAKE_SSH_LOG = $log
             $env:FAKE_SCP_DIR = $staged
             $env:FAKE_SSH_FAIL_MATCH = $FailMatch
+            $env:FAKE_VEHICLE_STATUS = $VehicleStatus
+            $env:FAKE_SERVER_STATUS = $ServerStatus
             $all = @($Arguments) + @('-SecretPath', $secret) + ($NoRepository ? @() : @('-ControlServerRepository', $fakeRepo))
             $output = & pwsh -NoLogo -NoProfile -NonInteractive -File $target @all 2>&1 | ForEach-Object { "$_" }
             $exit = $LASTEXITCODE
@@ -248,6 +253,40 @@ exit 0
     $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert')
     Assert-Runs $run 'factory01:server-v2-recovery-window:check > agv03:agv-v2-recovery-window:Close > factory01:server-v2-recovery-window:remove' 'close with no store closes both ends'
 
+    # ---- -VehicleOnly (review S-b) ----
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-VehicleOnly')
+    Write-Result -Ok ($run.Exit -ne 0 -and $run.Calls.Count -eq 0 -and $run.Output -match 'only closes') -Name '-VehicleOnly without -Revert is refused before any call' -Detail $run.Output
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03')
+    $proof = (Get-Store).Proof
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert') -FailMatch 'server-v2-recovery-window:check'
+    Write-Result -Ok ($run.Exit -ne 0 -and $run.Output -match '-VehicleOnly' -and @($run.Calls | Where-Object { $_.alias -eq 'agv03' }).Count -eq 0 -and (Get-Store).Open -eq 'agv03') `
+        -Name 'closing the last vehicle on a busy instance: refused, vehicle untouched, and the message names -VehicleOnly' -Detail $run.Output
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert', '-VehicleOnly') -FailMatch 'server-v2-recovery-window'
+    Assert-Runs $run 'agv03:agv-v2-recovery-window:Close' '-Revert -VehicleOnly on the last vehicle: the vehicle only, even with the server refusing everything'
+    Write-Result -Ok ($run.Exit -eq 0 -and @($run.Calls | Where-Object { $_.alias -eq 'factory01' }).Count -eq 0 -and (Get-Store).Proof -ceq $proof -and (Get-Store).Open -eq '') `
+        -Name '... factory01 not reached; the store keeps the proof with no vehicle open (the server residue)' -Detail "open: $((Get-Store).Open)"
+
+    # ---- -Status computes the residue (review L-c) ----
+    $statusCase = {
+        param([string] $Label, [string] $Vehicle, [string] $Server, [string] $Expect)
+        $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Status') -VehicleStatus $Vehicle -ServerStatus $Server
+        $line = @($run.Output -split "`n" | Where-Object { $_ -match '^RESIDUE: ' }) -join ' '
+        Write-Result -Ok ($run.Exit -eq 0 -and $line -match $Expect) -Name "-Status, $Label" -Detail "RESIDUE line: '$line'"
+    }
+    & $statusCase 'server entry left after -VehicleOnly: reported' 'recoveryResumeEnabled=False|CONTROL_SERVER_RECOVERY_PROOF=absent' 'ENTRY=same' 'the server entry reads same while no vehicle is recorded open'
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert')
+    Assert-Runs $run 'factory01:server-v2-recovery-window:check > agv03:agv-v2-recovery-window:Close > factory01:server-v2-recovery-window:remove' '... and a later -Revert, with the instance idle, removes it'
+    Write-Result -Ok (-not (Test-Path -LiteralPath $secret)) -Name '... and deletes the store' -Detail ''
+    & $statusCase 'nothing open, nothing left: none' 'recoveryResumeEnabled=False|CONTROL_SERVER_RECOVERY_PROOF=absent' 'ENTRY=absent' '^RESIDUE: none$'
+    & $statusCase 'a close stopped after the switch (variable left): reported' 'recoveryResumeEnabled=False|CONTROL_SERVER_RECOVERY_PROOF=different' 'ENTRY=absent' 'not recorded open but CONTROL_SERVER_RECOVERY_PROOF reads different'
+    & $statusCase 'a switch left on: reported' 'recoveryResumeEnabled=True|CONTROL_SERVER_RECOVERY_PROOF=absent' 'ENTRY=absent' 'not recorded open but its switch reads True'
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03')
+    & $statusCase 'open and consistent: none' 'recoveryResumeEnabled=True|CONTROL_SERVER_RECOVERY_PROOF=same' 'ENTRY=same' '^RESIDUE: none$'
+    & $statusCase 'an open stopped after the variable (switch still off): reported' 'recoveryResumeEnabled=False|CONTROL_SERVER_RECOVERY_PROOF=same' 'ENTRY=same' 'recorded open but reads switch=False'
+    & $statusCase 'an open whose server write was refused: reported' 'recoveryResumeEnabled=True|CONTROL_SERVER_RECOVERY_PROOF=same' 'ENTRY=absent' 'the server entry reads absent while agv03 is recorded open'
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert')
+    Remove-Item -LiteralPath $secret -Force -ErrorAction SilentlyContinue
+
     # ---- an unreadable store ----
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $secret) | Out-Null
     Set-Content -LiteralPath $secret -Value 'not a clixml file'
@@ -258,18 +297,58 @@ exit 0
     # ================================================================ Part 2 ===
 
     Write-Host ''
-    Write-Host 'Part 2: the remote halves, run for real against a temporary install root and registry key'
+    Write-Host 'Part 2: the remote halves with the production actions (New-V2VehicleActions, New-V2ServerActions), run for real'
 
     Import-Module (Join-Path $csParallel 'ParallelInstance.psm1') -Force
+    Import-Module (Join-Path $csParallel 'ParallelHost.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot 'V2RecoveryWindow.psm1') -Force
     $testProof = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant()
     $otherProof = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant()
+    $hkcu = [Microsoft.Win32.Registry]::CurrentUser
+    $hkcu.CreateSubKey("$testKeyPath\Environment").Close()
 
     function Invoke-Captured([scriptblock] $Block) {
         # Every stream, Write-Host included, as text; the error too.
         $text = ''; $failure = $null
         try { $text = (& $Block *>&1 | ForEach-Object { "$_" }) -join "`n" } catch { $failure = $_.Exception.Message }
         return @{ Text = $text; Error = $failure; All = "$text`n$failure" }
+    }
+
+    # ---------------------------------------------------- the production wiring ---
+    $agvEntry = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'agv-v2-recovery-window.ps1'), [ref]$null, [ref]$null)
+    $vehicleCalls = @($agvEntry.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'New-V2VehicleActions' }, $true))
+    Write-Result -Ok ($vehicleCalls.Count -eq 1 -and $vehicleCalls[0].CommandElements.Count -eq 1) -Name 'the vehicle entry builds its actions with New-V2VehicleActions and no arguments' -Detail (@($vehicleCalls | ForEach-Object { $_.Extent.Text }) -join ' | ')
+    $serverEntryAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'server-v2-recovery-window.ps1'), [ref]$null, [ref]$null)
+    $serverCalls = @($serverEntryAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'New-V2ServerActions' }, $true))
+    $serverArgs = @($serverCalls | ForEach-Object { $_.CommandElements } | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName }) -join ','
+    $serverArgText = $serverCalls.Count ? $serverCalls[0].Extent.Text : ''
+    Write-Result -Ok ($serverCalls.Count -eq 1 -and $serverArgs -ceq 'ServiceName,InstallRoot,DataRoot,OnboardPort' -and $serverArgText.Contains('-ServiceName $layout.ServiceName') -and
+        $serverArgText.Contains('-InstallRoot $layout.InstallRoot') -and $serverArgText.Contains('-DataRoot $layout.DataRoot') -and $serverArgText.Contains('-OnboardPort $onboardPort')) `
+        -Name 'the server entry passes only the installed layout to New-V2ServerActions' -Detail $serverArgText
+    $runCalls = @($serverEntryAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -match '^Invoke-V2RecoveryWindowServer' }, $true) | ForEach-Object { $_.GetCommandName() })
+    Write-Result -Ok (($runCalls -join ',') -ceq 'Invoke-V2RecoveryWindowServerRun') -Name 'the server entry runs through Invoke-V2RecoveryWindowServerRun (elevation, MVP fingerprint)' -Detail ($runCalls -join ',')
+    $onboardPortLine = @($serverEntryAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$onboardPort' }, $true))
+    Write-Result -Ok ($onboardPortLine.Count -eq 1 -and $onboardPortLine[0].Right.Extent.Text -ceq "[int] `$definition['onboardPort']") -Name "the server entry's onboard port is the installed definition's" -Detail (@($onboardPortLine | ForEach-Object { $_.Extent.Text }) -join ' | ')
+
+    Write-Result -Ok ((New-V2VehicleActions).Description -ceq 'variables HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment; client process SQCD.Agv.Wpf') `
+        -Name 'New-V2VehicleActions defaults: machine variables in HKLM, client process SQCD.Agv.Wpf' -Detail (New-V2VehicleActions).Description
+    $defaultServer = New-V2ServerActions -ServiceName '8005 AGV ControlServer V2' -InstallRoot 'C:\Program Files\8005 AGV\ControlServer.V2' -DataRoot 'C:\ProgramData\8005\ControlServer.V2' -OnboardPort 58105
+    Write-Result -Ok ($defaultServer.Description -ceq 'registry HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\8005 AGV ControlServer V2; configuration C:\Program Files\8005 AGV\ControlServer.V2\appsettings.Production.json; onboard port 58105' -and
+        $defaultServer.RegistryPath -ceq 'SYSTEM\CurrentControlSet\Services\8005 AGV ControlServer V2') `
+        -Name "New-V2ServerActions defaults: the V2 service's own key in HKLM" -Detail $defaultServer.Description
+    $r = Invoke-Captured { New-V2ServerActions -ServiceName '8005 AGV ControlServer' -InstallRoot 'C:\x' -DataRoot 'C:\y' -OnboardPort 1 }
+    Write-Result -Ok ($r.Error -match 'MVP_SERVICE_REFUSED') -Name 'New-V2ServerActions refuses the MVP service name' -Detail $r.All
+
+    # The client check, for real: a process named SQCD.Agv.Wpf (a copy of ping.exe) is seen by the default actions.
+    $dummyDirectory = Join-Path $work 'dummy-client'
+    New-Item -ItemType Directory -Force -Path $dummyDirectory | Out-Null
+    Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\PING.EXE') -Destination (Join-Path $dummyDirectory 'SQCD.Agv.Wpf.exe')
+    $dummy = Start-Process -FilePath (Join-Path $dummyDirectory 'SQCD.Agv.Wpf.exe') -ArgumentList '-n', '60', '127.0.0.1' -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Milliseconds 300
+        Write-Result -Ok ((& (New-V2VehicleActions).ClientRunning) -eq $true) -Name 'the default actions see a running SQCD.Agv.Wpf' -Detail ''
+    } finally {
+        Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
     }
 
     # ---------------------------------------------------------------- vehicle ---
@@ -279,18 +358,22 @@ exit 0
     $instanceId = 'dce47db2-b531-4f27-9737-af60bec96beb'
     $pristine = [ordered]@{ agvId = 'test-car'; wireToGate = [ordered]@{ onboardInstanceId = $instanceId; recoveryResumeEnabled = $false; unableToChargeEntryEnabled = $true; port = 58105 } } | ConvertTo-Json -Depth 5
     $readSwitch = { (Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json).wireToGate.recoveryResumeEnabled }
+    $variableNames = { $k = $hkcu.OpenSubKey("$testKeyPath\Environment"); try { @($k.GetValueNames()) } finally { $k.Close() } }
 
+    # The production actions against a temporary key, with a recorder in front of the write. The recorder
+    # calls the real write; -SetHook / -GetOverride inject a failure.
     function New-VehicleRig {
         param([bool] $Running = $false, [scriptblock] $SetHook, [scriptblock] $GetOverride)
-        $rig = @{ Variables = @{}; Events = [System.Collections.Generic.List[string]]::new() }
+        $real = New-V2VehicleActions -EnvironmentRoot $hkcu -EnvironmentPath "$testKeyPath\Environment" -ProcessName "no-such-process-$([guid]::NewGuid().ToString('N'))"
+        $rig = @{ Events = [System.Collections.Generic.List[string]]::new(); Real = $real }
         $rig.Actions = @{
-            ClientRunning = { $Running }.GetNewClosure()
-            GetMachineVariable = $GetOverride ?? { param($n) $rig.Variables[$n] }.GetNewClosure()
+            ClientRunning = $Running ? { $true } : $real.ClientRunning
+            GetMachineVariable = $GetOverride ?? $real.GetMachineVariable
             SetMachineVariable = {
                 param($n, $v)
                 $rig.Events.Add("set $n $([string]::IsNullOrEmpty($v) ? 'delete' : 'value') with switch $(& $readSwitch)")
                 if ($SetHook) { & $SetHook }
-                if ([string]::IsNullOrEmpty($v)) { $rig.Variables.Remove($n) } else { $rig.Variables[$n] = $v }
+                & $real.SetMachineVariable $n $v
             }.GetNewClosure()
         }
         return $rig
@@ -300,12 +383,13 @@ exit 0
         if ($proofValue) { $r['proof'] = $proofValue }
         $r
     }
+    $variableNow = { & (New-V2VehicleActions -EnvironmentRoot $hkcu -EnvironmentPath "$testKeyPath\Environment").GetMachineVariable 'CONTROL_SERVER_RECOVERY_PROOF' }
 
     Set-Content -LiteralPath $settingsPath -Value $pristine -Encoding utf8NoBOM
     $rig = New-VehicleRig
     $r = Invoke-Captured { Invoke-V2RecoveryWindowVehicle -Request (& $request 'Open' $testProof) -Actions $rig.Actions }
-    Write-Result -Ok ($null -eq $r.Error -and (& $readSwitch) -eq $true -and $rig.Variables['CONTROL_SERVER_RECOVERY_PROOF'] -ceq $testProof) `
-        -Name 'vehicle open: switch true and the variable holds the proof' -Detail $r.All
+    Write-Result -Ok ($null -eq $r.Error -and (& $readSwitch) -eq $true -and (& $variableNow) -ceq $testProof) `
+        -Name 'vehicle open: switch true and the variable (in the registry) holds the proof' -Detail $r.All
     Write-Result -Ok (($rig.Events -join ';') -ceq 'set CONTROL_SERVER_RECOVERY_PROOF value with switch False') -Name 'vehicle open (S1): the variable is written while the switch is still false' -Detail ($rig.Events -join ';')
     Write-Result -Ok (-not $r.All.Contains($testProof)) -Name 'vehicle open prints no proof' -Detail ''
     $after = Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json
@@ -319,7 +403,8 @@ exit 0
 
     $rig.Events.Clear()
     $r = Invoke-Captured { Invoke-V2RecoveryWindowVehicle -Request (& $request 'Close' $null) -Actions $rig.Actions }
-    Write-Result -Ok ($null -eq $r.Error -and (& $readSwitch) -eq $false -and -not $rig.Variables.ContainsKey('CONTROL_SERVER_RECOVERY_PROOF')) -Name 'vehicle close: switch false, variable gone' -Detail $r.All
+    Write-Result -Ok ($null -eq $r.Error -and (& $readSwitch) -eq $false -and $null -eq (& $variableNow) -and (& $variableNames) -notcontains 'CONTROL_SERVER_RECOVERY_PROOF') `
+        -Name 'vehicle close: switch false, the variable deleted from the key (no empty value left)' -Detail ($r.All + ' names: ' + ((& $variableNames) -join ','))
     Write-Result -Ok (($rig.Events -join ';') -ceq 'set CONTROL_SERVER_RECOVERY_PROOF delete with switch False') -Name 'vehicle close (S1): the variable is deleted only after the switch is off' -Detail ($rig.Events -join ';')
 
     Set-Content -LiteralPath $settingsPath -Value $pristine -Encoding utf8NoBOM
@@ -330,22 +415,26 @@ exit 0
     $rig = New-VehicleRig -GetOverride { param($n) $otherProof }.GetNewClosure()
     $r = Invoke-Captured { Invoke-V2RecoveryWindowVehicle -Request (& $request 'Open' $testProof) -Actions $rig.Actions }
     Write-Result -Ok ($r.Error -match 'VARIABLE_READBACK_FAILED' -and (& $readSwitch) -eq $false) -Name 'vehicle open, variable reads back different: refused, switch still false' -Detail $r.All
+    & $rig.Real.SetMachineVariable 'CONTROL_SERVER_RECOVERY_PROOF' $null
 
     $rig = New-VehicleRig -GetOverride { param($n) $null }
     $r = Invoke-Captured { Invoke-V2RecoveryWindowVehicle -Request (& $request 'Open' $testProof) -Actions $rig.Actions }
     Write-Result -Ok ($r.Error -match 'VARIABLE_READBACK_FAILED' -and (& $readSwitch) -eq $false) -Name 'vehicle open, variable reads back absent: refused, switch still false' -Detail $r.All
+    & $rig.Real.SetMachineVariable 'CONTROL_SERVER_RECOVERY_PROOF' $null
 
     foreach ($case in @(
             @{ Name = 'a running client'; Rig = (New-VehicleRig -Running $true); Request = (& $request 'Open' $testProof); Expect = 'CLIENT_RUNNING' },
             @{ Name = 'a running client, closing'; Rig = (New-VehicleRig -Running $true); Request = (& $request 'Close' $null); Expect = 'CLIENT_RUNNING' },
             @{ Name = "another vehicle's configuration"; Rig = (New-VehicleRig); Request = (& $request 'Open' $testProof 'fb7244d8-e78f-4153-ab33-7fcb23fc67fe'); Expect = 'VEHICLE_IDENTITY_MISMATCH' },
+            @{ Name = 'a blank identity on both sides'; Rig = (New-VehicleRig); Request = (& $request 'Open' $testProof ' '); Blank = $true; Expect = 'VEHICLE_IDENTITY_MISMATCH' },
             @{ Name = 'no proof'; Rig = (New-VehicleRig); Request = (& $request 'Open' $null); Expect = 'PROOF_NOT_RECEIVED' })) {
-        Set-Content -LiteralPath $settingsPath -Value $pristine -Encoding utf8NoBOM
+        $text = $case.ContainsKey('Blank') ? $pristine.Replace($instanceId, ' ') : $pristine
+        Set-Content -LiteralPath $settingsPath -Value $text -Encoding utf8NoBOM
         $before = [IO.File]::ReadAllBytes($settingsPath)
         $rig = $case.Rig
         $r = Invoke-Captured { Invoke-V2RecoveryWindowVehicle -Request $case.Request -Actions $rig.Actions }
         $same = [Linq.Enumerable]::SequenceEqual([byte[]] $before, [byte[]] [IO.File]::ReadAllBytes($settingsPath))
-        Write-Result -Ok ($r.Error -match $case.Expect -and $same -and $rig.Events.Count -eq 0) -Name "vehicle: $($case.Name) is refused with nothing changed" -Detail $r.All
+        Write-Result -Ok ($r.Error -match $case.Expect -and $same -and $rig.Events.Count -eq 0 -and $null -eq (& $variableNow)) -Name "vehicle: $($case.Name) is refused with nothing changed" -Detail $r.All
     }
     $r = Invoke-Captured { Invoke-V2RecoveryWindowVehicle -Request @{ state = 'Open'; installRoot = (Join-Path $work 'nowhere'); onboardInstanceId = $instanceId; proof = $testProof } -Actions (New-VehicleRig).Actions }
     Write-Result -Ok ($r.Error -match 'NO_INSTALLATION') -Name 'vehicle: no installation is refused' -Detail $r.All
@@ -356,6 +445,53 @@ exit 0
     }
 
     # ----------------------------------------------------------------- server ---
+    # New-V2ServerActions with a real local service (its real status), a temporary key standing for the
+    # Services key, a temporary install and data root, a real loopback port, and a recorded restart. The
+    # SQLite reader needs Microsoft.Data.Sqlite; it is borrowed from the NuGet cache into the install root.
+    $stoppedService = (Get-Service | Where-Object { $_.Status -eq 'Stopped' -and $_.Name -notmatch '^8005|[^\w.-]' } | Select-Object -First 1).Name
+    $runningService = Get-CimInstance Win32_Service -Filter "State='Running'" | Where-Object {
+        $_.ProcessId -and $_.Name -notmatch '^8005|[^\w.-]' -and (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue)?.StartTime } | Select-Object -First 1 -ExpandProperty Name
+    $serverInstall = Join-Path $work 'ControlServer.V2'
+    $serverData = Join-Path $work 'ControlServer.V2-data'
+    New-Item -ItemType Directory -Force -Path $serverInstall, $serverData | Out-Null
+    $configPath = Join-Path $serverInstall 'appsettings.Production.json'
+    $databasePath = Join-Path $serverData 'controlserver.db'
+    $connectionString = ([ordered]@{ ControlServer = "Data Source=$databasePath" } | ConvertTo-Json -Compress)
+    function Set-Config([string] $Gate = 'false', [datetime] $WrittenUtc = [datetime]::new(2000, 1, 1, 0, 0, 0, [DateTimeKind]::Utc), [string] $Raw) {
+        [IO.File]::WriteAllText($configPath, ($Raw ? $Raw : "{`"RiotCreateDispatch`":{`"enabled`":$Gate},`"ConnectionStrings`":$connectionString}"))
+        [IO.File]::SetLastWriteTimeUtc($configPath, $WrittenUtc)
+    }
+
+    $nuget = $env:NUGET_PACKAGES ?? (Join-Path $env:USERPROFILE '.nuget\packages')
+    $pick = { param($package, $relative) Get-ChildItem -Path (Join-Path $nuget "$package\*\$relative") -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1 }
+    $sqliteParts = @(
+        (& $pick 'microsoft.data.sqlite.core' 'lib\net8.0\Microsoft.Data.Sqlite.dll'),
+        (& $pick 'sqlitepclraw.core' 'lib\netstandard2.0\SQLitePCLRaw.core.dll'),
+        (& $pick 'sqlitepclraw.provider.e_sqlite3' 'lib\net6.0-windows7.0\SQLitePCLRaw.provider.e_sqlite3.dll'),
+        (& $pick 'sqlitepclraw.bundle_e_sqlite3' 'lib\netstandard2.0\SQLitePCLRaw.batteries_v2.dll'),
+        (& $pick 'sqlitepclraw.lib.e_sqlite3' 'runtimes\win-x64\native\e_sqlite3.dll'))
+    $haveSqlite = @($sqliteParts | Where-Object { $_ }).Count -eq 5
+    if ($haveSqlite) { $sqliteParts | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $serverInstall } }
+    function New-Database([string[]] $Stages) {
+        Remove-Item -LiteralPath $databasePath -Force -ErrorAction SilentlyContinue
+        foreach ($assembly in 'SQLitePCLRaw.core.dll', 'SQLitePCLRaw.provider.e_sqlite3.dll', 'SQLitePCLRaw.batteries_v2.dll', 'Microsoft.Data.Sqlite.dll') {
+            Add-Type -LiteralPath (Join-Path $serverInstall $assembly) -ErrorAction SilentlyContinue
+        }
+        try { [SQLitePCL.Batteries_V2]::Init() } catch { }
+        $writer = [Microsoft.Data.Sqlite.SqliteConnection]::new("Data Source=$databasePath;Pooling=False")
+        $writer.Open()
+        $command = $writer.CreateCommand()
+        $i = 0
+        $rows = @($Stages | ForEach-Object { $i++; "INSERT INTO JourneyRuntimes VALUES ('j-$i', '$_', 'car', 'K', 'p$i', NULL, '2026-10-12 09:00:00+08:00');" }) -join "`n"
+        $command.CommandText = @"
+CREATE TABLE JourneyRuntimes (JourneyId TEXT PRIMARY KEY, Stage TEXT, AgvId TEXT, VehicleKey TEXT, PickupUpperId TEXT, GateUpperId TEXT, CreatedAt TEXT);
+CREATE TABLE OrderIntents (MovementLegId TEXT PRIMARY KEY, UpperId TEXT, VehicleKey TEXT, Status TEXT, OrderId TEXT, CreateAttemptCount INTEGER, CreateAttemptId TEXT, DispatchAuditVersion INTEGER, ExperimentalCreateAuthorizationId TEXT, CreatedAt TEXT);
+CREATE TABLE RiotDispatchAuditEvents (AuditEventId TEXT PRIMARY KEY, MovementLegId TEXT, Phase TEXT, Outcome TEXT, AttemptId TEXT, ReturnedOrderId TEXT, ResultPresent INTEGER);
+$rows
+"@
+        $null = $command.ExecuteNonQuery(); $command.Dispose(); $writer.Dispose()
+    }
+
     $sentinels = @{
         DOTNET_ENVIRONMENT = 'Production'
         CONTROL_SERVER_ONBOARD_CREDENTIAL = "sentinel-onboard-$([guid]::NewGuid().ToString('N'))"
@@ -364,137 +500,163 @@ exit 0
     }
     $baseEnvironment = [string[]] @('DOTNET_ENVIRONMENT', 'CONTROL_SERVER_ONBOARD_CREDENTIAL', 'CONTROL_SERVER_MES_INGEST_SHARED_SECRET', 'CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL' |
             ForEach-Object { "$_=$($sentinels[$_])" })
-    $hkcu = [Microsoft.Win32.Registry]::CurrentUser
-    $hkcu.CreateSubKey($testKeyPath).Close()
-    $configPath = Join-Path $work 'appsettings.Production.json'
-    $readRegistry = { [string[]] @(Read-V2RegistryMultiString -Root $hkcu -Path $testKeyPath) }
+    $withEntry = [string[]] @($baseEnvironment[0..1] + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof" + $baseEnvironment[2..3])
+    $servicesPath = "$testKeyPath\Services"
+    $freePort = { $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $l.Start(); $p = $l.LocalEndpoint.Port; $l.Stop(); $p }
 
     function New-ServerRig {
-        param([string[]] $Environment, [string] $Status = 'Running', [AllowNull()] $Config = '{"RiotCreateDispatch":{"enabled":false}}',
-            [datetime] $ConfigWrittenUtc = [datetime]::new(2000, 1, 1, 0, 0, 0, [DateTimeKind]::Utc), $ProcessStartedUtc = [datetime]::new(2001, 1, 1, 0, 0, 0, [DateTimeKind]::Utc),
-            $Journeys = @{ Journeys = @() }, [scriptblock] $Connections = { @() }, [scriptblock] $WriteOverride)
-        Write-V2RegistryMultiString -Root $hkcu -Path $testKeyPath -Value $Environment
-        $rig = @{ Events = [System.Collections.Generic.List[string]]::new(); Status = $Status }
-        $rig.Actions = @{
-            ReadEnvironment = { & $readRegistry }
-            WriteEnvironment = $WriteOverride ?? { param([string[]] $v) $rig.Events.Add('write'); Write-V2RegistryMultiString -Root $hkcu -Path $testKeyPath -Value $v }.GetNewClosure()
-            MergeEntry = { param($e, $n, $v) Set-ParallelServiceEnvironmentEntry -Environment $e -Name $n -Value $v }
-            ServiceStatus = { $rig.Status }.GetNewClosure()
-            PreInstallRefusal = {
-                Get-ParallelPreInstallRefusal -ServiceExists $true -ServiceStatus $Status -ServiceName '8005 AGV ControlServer V2' -ConfigurationPath $configPath `
-                    -ConfigurationText $Config -ConfigurationWriteTimeUtc $ConfigWrittenUtc -ProcessStartTimeUtc $ProcessStartedUtc
-            }.GetNewClosure()
-            JourneyState = { $Journeys }.GetNewClosure()
-            Connections = $Connections
-            RestartService = {
-                $entry = @(& $readRegistry | Where-Object { $_ -like 'CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=*' }).Count
-                $rig.Events.Add("restart with entry $entry")
-            }.GetNewClosure()
-        }
+        param([string] $Service = $stoppedService, [string[]] $Environment = $baseEnvironment, [int] $Port = (& $freePort))
+        $hkcu.CreateSubKey("$servicesPath\$Service").Close()
+        Write-V2RegistryMultiString -Root $hkcu -Path "$servicesPath\$Service" -Value $Environment
+        $rig = @{ Events = [System.Collections.Generic.List[string]]::new(); Service = $Service; Path = "$servicesPath\$Service" }
+        $rig.Actions = New-V2ServerActions -ServiceName $Service -InstallRoot $serverInstall -DataRoot $serverData -OnboardPort $Port `
+            -RegistryRoot $hkcu -ServicesPath $servicesPath -RestartService {
+            $entry = @(Read-V2RegistryMultiString -Root $hkcu -Path $rig.Path | Where-Object { $_ -like 'CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=*' }).Count
+            $rig.Events.Add("restart with entry $entry")
+        }.GetNewClosure()
+        $realWrite = $rig.Actions.WriteEnvironment
+        $rig.Actions.WriteEnvironment = { param([string[]] $v) $rig.Events.Add('write'); & $realWrite $v }.GetNewClosure()
+        $rig.Actions.IsElevated = { $true }
         return $rig
     }
-    function Invoke-Server($rig, [hashtable] $req, [string] $Service = '8005 AGV ControlServer V2') {
-        return Invoke-Captured { Invoke-V2RecoveryWindowServer -Request $req -ServiceName $Service -OnboardPort 58105 -Actions $rig.Actions }
+    function Read-Rig($rig) { [string[]] @(Read-V2RegistryMultiString -Root $hkcu -Path $rig.Path) }
+    function Invoke-Server($rig, [hashtable] $req) {
+        return Invoke-Captured { Invoke-V2RecoveryWindowServerRun -Request $req -ServiceName $rig.Service -OnboardPort 58105 -Actions $rig.Actions }
     }
     function Test-ServerLeak($r) {
         foreach ($v in @($testProof, $otherProof) + @($sentinels.Values | Where-Object { $_ -ne 'Production' })) { if ($r.All.Contains($v)) { return $true } }
         return $false
     }
-    $withEntry = [string[]] @($baseEnvironment[0..1] + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof" + $baseEnvironment[2..3])
+    function Assert-Refused($rig, [hashtable] $req, [string] $expect, [string] $name) {
+        $before = (Read-Rig $rig) -join "`n"
+        $r = Invoke-Server $rig $req
+        Write-Result -Ok ($r.Error -match [regex]::Escape($expect) -and $rig.Events.Count -eq 0 -and ((Read-Rig $rig) -join "`n") -ceq $before -and -not (Test-ServerLeak $r)) `
+            -Name "server $($req.mode): $name is refused, no write, no restart" -Detail ($r.All + ' events: ' + ($rig.Events -join ';'))
+    }
+
+    Write-Result -Ok ([bool] $stoppedService) -Name "a stopped local service stands in for the V2 service ($stoppedService)" -Detail 'none found'
+    Write-Result -Ok ([bool] $runningService) -Name "a running local service with a readable start time stands in too ($runningService)" -Detail 'none found'
+
+    # Refusals that come before the journey reader, so they need no SQLite.
+    foreach ($req in @(@{ mode = 'set'; proof = $testProof }, @{ mode = 'remove' })) {
+        $env0 = ($req.mode -eq 'set') ? $baseEnvironment : $withEntry
+        Set-Config -Gate 'true'
+        Assert-Refused (New-ServerRig -Environment $env0) $req 'UPGRADE_REFUSED_DISPATCH_OPEN' 'an open dispatch gate (the real pre-install check, a real stopped service)'
+        Set-Config -Raw 'not json'
+        Assert-Refused (New-ServerRig -Environment $env0) $req 'INSTALLED_CONFIGURATION_UNREADABLE' 'an unreadable configuration'
+        Remove-Item -LiteralPath $configPath
+        Assert-Refused (New-ServerRig -Environment $env0) $req 'INSTALLED_CONFIGURATION_MISSING' 'a missing configuration'
+        Set-Config
+        Assert-Refused (New-ServerRig -Environment ([string[]] ($env0 + 'RiotCreateDispatch__enabled=true'))) $req 'DISPATCH_GATE_OVERRIDDEN' 'a RiotCreateDispatch__ override'
+        if ($runningService) {
+            Set-Config -WrittenUtc ([datetime]::UtcNow.AddMinutes(5))
+            Assert-Refused (New-ServerRig -Service $runningService -Environment $env0) $req 'CONFIGURATION_CHANGED_SINCE_START' "a configuration newer than the running process ($runningService)"
+        }
+        Set-Config
+        # A vehicle connected: a real loopback connection on the onboard port.
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $listener.Start()
+        $busyPort = $listener.LocalEndpoint.Port
+        $client = [Net.Sockets.TcpClient]::new(); $client.Connect([Net.IPAddress]::Loopback, $busyPort); $accepted = $listener.AcceptTcpClient()
+        try {
+            Assert-Refused (New-ServerRig -Environment $env0 -Port $busyPort) $req 'CONNECTED_VEHICLES: ' 'a connected vehicle (a real loopback connection)'
+        } finally { $accepted.Dispose(); $client.Dispose(); $listener.Stop() }
+        # No database file: the real reader reports it, and that refuses.
+        Remove-Item -LiteralPath $databasePath -Force -ErrorAction SilentlyContinue
+        Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEY_STATE_UNREADABLE' 'journeys that cannot be read (no database file)'
+        $rig = New-ServerRig -Environment $env0
+        $rig.Actions.Connections = { throw 'CIM failed (injected)' }
+        Assert-Refused $rig $req 'CONNECTIONS_UNREADABLE' 'connections that cannot be read'
+    }
 
     $rig = New-ServerRig -Environment $baseEnvironment
-    $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
-    $now = & $readRegistry
-    Write-Result -Ok ($null -eq $r.Error -and ($now -join "`n") -ceq (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof") -join "`n")) `
-        -Name 'server set: every other entry kept in order, the entry appended' -Detail ($r.All + "`n" + (($now | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', '))
-    Write-Result -Ok (($rig.Events -join ';') -ceq 'write;restart with entry 1') -Name 'server set: the restart comes after the write, with the entry in place' -Detail ($rig.Events -join ';')
-    Write-Result -Ok (-not (Test-ServerLeak $r)) -Name 'server set prints no proof and no other entry value' -Detail ''
+    $rig.Actions.RegistryPath = "$servicesPath\8005 AGV ControlServer"
+    Assert-Refused $rig @{ mode = 'set'; proof = $testProof } 'REGISTRY_PATH_REFUSED' 'actions that write the MVP service key'
+    $rig = New-ServerRig -Environment $baseEnvironment
+    $rig.Actions.RegistryPath = "$servicesPath\other-service"
+    Assert-Refused $rig @{ mode = 'set'; proof = $testProof } 'REGISTRY_PATH_REFUSED' "actions that write another service's key"
+    $rig = New-ServerRig -Environment $baseEnvironment
+    $rig.Actions.IsElevated = { $false }
+    Assert-Refused $rig @{ mode = 'set'; proof = $testProof } 'NOT_ELEVATED' 'a run that is not elevated'
 
+    $rig = New-ServerRig -Environment $withEntry
+    $r = Invoke-Server $rig @{ mode = 'status'; proof = $testProof }
+    Write-Result -Ok ($r.Text -match 'ENTRY=same' -and $r.Text -match 'SERVICE=Stopped' -and $rig.Events.Count -eq 0 -and -not (Test-ServerLeak $r)) -Name 'server status: same, the real service status, nothing written, no value printed' -Detail $r.All
+    $r = Invoke-Server $rig @{ mode = 'status' }
+    Write-Result -Ok ($r.Text -match 'ENTRY=different') -Name 'server status without the stored proof: present reads different' -Detail $r.All
     $rig = New-ServerRig -Environment $withEntry
     $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
     Write-Result -Ok ($null -eq $r.Error -and $r.Text -match 'NO_CHANGE' -and $rig.Events.Count -eq 0) -Name 'server set when the entry already holds the proof: no write, no restart' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
 
-    $rig = New-ServerRig -Environment $withEntry
-    $r = Invoke-Server $rig @{ mode = 'set'; proof = $otherProof }
-    Write-Result -Ok ($null -eq $r.Error -and ((& $readRegistry) -join "`n") -ceq (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$otherProof") -join "`n") -and ($rig.Events -join ';') -ceq 'write;restart with entry 1') `
-        -Name 'server set over a different value: replaced, others kept, restarted' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
-    Write-Result -Ok (-not (Test-ServerLeak $r)) -Name '... and prints neither value' -Detail ''
-
-    $rig = New-ServerRig -Environment $withEntry
-    $r = Invoke-Server $rig @{ mode = 'remove' }
-    Write-Result -Ok ($null -eq $r.Error -and ((& $readRegistry) -join "`n") -ceq ($baseEnvironment -join "`n") -and ($rig.Events -join ';') -ceq 'write;restart with entry 0') `
-        -Name 'server remove: only the entry goes, others kept in order, restart after' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
-    $rig = New-ServerRig -Environment $baseEnvironment
-    $r = Invoke-Server $rig @{ mode = 'remove' }
-    Write-Result -Ok ($r.Text -match 'NO_CHANGE' -and $rig.Events.Count -eq 0) -Name 'server remove when absent: no write, no restart' -Detail $r.All
-
-    $rig = New-ServerRig -Environment $baseEnvironment -Status 'Stopped' -ProcessStartedUtc $null
-    $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
-    Write-Result -Ok ($null -eq $r.Error -and ($rig.Events -join ';') -ceq 'write') -Name 'server set on a stopped service: written, not restarted' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
-
-    foreach ($mode in @(@{ mode = 'check'; target = 'set'; proof = $testProof }, @{ mode = 'check'; target = 'remove' })) {
-        $rig = New-ServerRig -Environment ($mode.target -eq 'set' ? $baseEnvironment : $withEntry)
-        $before = (& $readRegistry) -join "`n"
-        $r = Invoke-Server $rig $mode
-        Write-Result -Ok ($r.Text -match 'CHECK_PASSED' -and $rig.Events.Count -eq 0 -and ((& $readRegistry) -join "`n") -ceq $before) -Name "server check ($($mode.target)): passes, writes nothing, restarts nothing" -Detail $r.All
-    }
-    $rig = New-ServerRig -Environment $withEntry
-    $r = Invoke-Server $rig @{ mode = 'status'; proof = $testProof }
-    Write-Result -Ok ($r.Text -match 'ENTRY=same' -and $rig.Events.Count -eq 0 -and -not (Test-ServerLeak $r)) -Name 'server status: same, nothing written, no value printed' -Detail $r.All
-    $r = Invoke-Server $rig @{ mode = 'status' }
-    Write-Result -Ok ($r.Text -match 'ENTRY=different') -Name 'server status without the stored proof: present reads different' -Detail $r.All
-
-    $refusals = @(
-        @{ Name = 'the MVP service name'; Rig = @{}; Service = '8005 AGV ControlServer\'; Expect = 'MVP_SERVICE_REFUSED' },
-        @{ Name = 'an open dispatch gate'; Rig = @{ Config = '{"RiotCreateDispatch":{"enabled":true}}' }; Expect = 'UPGRADE_REFUSED_DISPATCH_OPEN' },
-        @{ Name = 'an unreadable configuration'; Rig = @{ Config = 'not json' }; Expect = 'INSTALLED_CONFIGURATION_UNREADABLE' },
-        @{ Name = 'a missing configuration'; Rig = @{ Config = $null }; Expect = 'INSTALLED_CONFIGURATION_MISSING' },
-        @{ Name = 'a service not settled'; Rig = @{ Status = 'StopPending' }; Expect = 'SERVICE_NOT_SETTLED' },
-        @{ Name = 'a configuration newer than the process'; Rig = @{ ConfigWrittenUtc = [datetime]::new(2002, 1, 1, 0, 0, 0, [DateTimeKind]::Utc) }; Expect = 'CONFIGURATION_CHANGED_SINCE_START' },
-        @{ Name = 'an unknown process start time'; Rig = @{ ProcessStartedUtc = $null }; Expect = 'SERVICE_START_TIME_UNKNOWN' },
-        @{ Name = 'a RiotCreateDispatch__ override'; Rig = @{ Environment = [string[]] ($baseEnvironment + 'RiotCreateDispatch__enabled=true') }; Expect = 'DISPATCH_GATE_OVERRIDDEN' },
-        @{ Name = 'a journey not Completed'; Rig = @{ Journeys = @{ Journeys = @(@{ JourneyId = 'j-1'; Stage = 'Dispatched' }) } }; Expect = 'JOURNEYS_IN_PROGRESS' },
-        @{ Name = 'journeys that cannot be read'; Rig = @{ Journeys = @{ Error = 'there is no file' } }; Expect = 'JOURNEY_STATE_UNREADABLE' },
-        @{ Name = 'a connected vehicle'; Rig = @{ Connections = { @('172.19.204.53') } }; Expect = 'CONNECTED_VEHICLES: ' },
-        @{ Name = 'connections that cannot be read'; Rig = @{ Connections = { throw 'CIM failed (injected)' } }; Expect = 'CONNECTIONS_UNREADABLE' }
-    )
-    foreach ($case in $refusals) {
+    Write-Result -Ok $haveSqlite -Name 'Microsoft.Data.Sqlite and SQLitePCLRaw are in the NuGet cache (the journey reader needs them)' -Detail "looked under $nuget"
+    if ($haveSqlite) {
+        Set-Config
         foreach ($req in @(@{ mode = 'set'; proof = $testProof }, @{ mode = 'remove' })) {
-            $arguments = $case.Rig.Clone()
-            if (-not $arguments.ContainsKey('Environment')) { $arguments['Environment'] = ($req.mode -eq 'set') ? $baseEnvironment : $withEntry }
-            elseif ($req.mode -eq 'remove') { $arguments['Environment'] = [string[]] ($withEntry + 'RiotCreateDispatch__enabled=true') }
-            $rig = New-ServerRig @arguments
-            $before = (& $readRegistry) -join "`n"
-            $r = Invoke-Server $rig $req ($case.ContainsKey('Service') ? $case.Service : '8005 AGV ControlServer V2')
-            Write-Result -Ok ($r.Error -match [regex]::Escape($case.Expect) -and $rig.Events.Count -eq 0 -and ((& $readRegistry) -join "`n") -ceq $before -and -not (Test-ServerLeak $r)) `
-                -Name "server $($req.mode): $($case.Name) is refused, no write, no restart" -Detail ($r.All + ' events: ' + ($rig.Events -join ';'))
+            $env0 = ($req.mode -eq 'set') ? $baseEnvironment : $withEntry
+            New-Database @('Completed', 'Dispatched')
+            Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEYS_IN_PROGRESS' 'a journey not Completed (a real SQLite store)'
+            Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ allowConnectedVehicles = $true }) 'JOURNEYS_IN_PROGRESS' 'a journey not Completed, with allowConnectedVehicles'
         }
+        New-Database @('Completed')
+
+        $rig = New-ServerRig -Environment $baseEnvironment
+        $r = Invoke-Server $rig @{ mode = 'check'; target = 'set'; proof = $testProof }
+        Write-Result -Ok ($r.Text -match 'CHECK_PASSED' -and $rig.Events.Count -eq 0 -and ((Read-Rig $rig) -join "`n") -ceq ($baseEnvironment -join "`n")) -Name 'server check (set): passes on an idle instance, writes nothing' -Detail $r.All
+        $rig = New-ServerRig -Environment $withEntry
+        $r = Invoke-Server $rig @{ mode = 'check'; target = 'remove' }
+        Write-Result -Ok ($r.Text -match 'CHECK_PASSED' -and $rig.Events.Count -eq 0 -and ((Read-Rig $rig) -join "`n") -ceq ($withEntry -join "`n")) -Name 'server check (remove): passes on an idle instance, writes nothing' -Detail $r.All
+
+        $rig = New-ServerRig -Environment $baseEnvironment
+        $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
+        Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof") -join "`n") -and ($rig.Events -join ';') -ceq 'write' -and $r.Text -match 'fingerprint unchanged') `
+            -Name 'server set on a stopped service: others kept in order, entry appended, not restarted, MVP fingerprint compared' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
+        Write-Result -Ok (-not (Test-ServerLeak $r)) -Name 'server set prints no proof and no other entry value' -Detail ''
+        $rig = New-ServerRig -Environment $withEntry
+        $r = Invoke-Server $rig @{ mode = 'remove' }
+        Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq ($baseEnvironment -join "`n") -and ($rig.Events -join ';') -ceq 'write') -Name 'server remove: only the entry goes, others kept in order' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
+        $rig = New-ServerRig -Environment $baseEnvironment
+        $r = Invoke-Server $rig @{ mode = 'remove' }
+        Write-Result -Ok ($r.Text -match 'NO_CHANGE' -and $rig.Events.Count -eq 0) -Name 'server remove when absent: no write, no restart' -Detail $r.All
+
+        if ($runningService) {
+            $rig = New-ServerRig -Service $runningService -Environment $withEntry
+            $r = Invoke-Server $rig @{ mode = 'set'; proof = $otherProof }
+            Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$otherProof") -join "`n") -and ($rig.Events -join ';') -ceq 'write;restart with entry 1') `
+                -Name "server set on a running service ($runningService): replaced, others kept, restarted after the write" -Detail ($r.All + ' ' + ($rig.Events -join ';'))
+            Write-Result -Ok (-not (Test-ServerLeak $r)) -Name '... and prints neither value' -Detail ''
+            $rig = New-ServerRig -Service $runningService -Environment $withEntry
+            $r = Invoke-Server $rig @{ mode = 'remove' }
+            Write-Result -Ok ($null -eq $r.Error -and ($rig.Events -join ';') -ceq 'write;restart with entry 0') -Name 'server remove on a running service: restarted after the entry is gone' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $listener.Start()
+            $busyPort = $listener.LocalEndpoint.Port
+            $client = [Net.Sockets.TcpClient]::new(); $client.Connect([Net.IPAddress]::Loopback, $busyPort); $accepted = $listener.AcceptTcpClient()
+            try {
+                $rig = New-ServerRig -Service $runningService -Environment $baseEnvironment -Port $busyPort
+                $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof; allowConnectedVehicles = $true }
+                Write-Result -Ok ($null -eq $r.Error -and $r.Text -match 'WARNING: CONNECTED_VEHICLES' -and ($rig.Events -join ';') -ceq 'write;restart with entry 1') `
+                    -Name 'server set with allowConnectedVehicles and a real connection: a warning, then write and restart' -Detail $r.All
+            } finally { $accepted.Dispose(); $client.Dispose(); $listener.Stop() }
+        }
+
+        # The MVP fingerprint is compared: a change between before and after fails the run.
+        $rig = New-ServerRig -Environment $baseEnvironment
+        $calls = @{ n = 0 }
+        $rig.Actions.MvpFingerprint = { $calls.n++; [ordered]@{ present = $true; processId = $calls.n } }.GetNewClosure()
+        $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
+        Write-Result -Ok ($r.Error -match 'The MVP service changed' -and $calls.n -eq 2) -Name 'a changed MVP fingerprint fails the run' -Detail $r.All
+
+        # A write that does not read back: the original goes back, nothing restarts.
+        $faulty = @{ Writes = 0 }
+        $rig = New-ServerRig -Environment $baseEnvironment
+        $path = $rig.Path
+        $rig.Actions.WriteEnvironment = {
+            param([string[]] $v)
+            $faulty.Writes++
+            Write-V2RegistryMultiString -Root $hkcu -Path $path -Value @($v | Where-Object { $faulty.Writes -gt 1 -or $_ -notlike 'CONTROL_SERVER_MES_INGEST_SHARED_SECRET=*' })
+        }.GetNewClosure()
+        $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
+        Write-Result -Ok ($r.Error -match 'ENVIRONMENT_READBACK_FAILED' -and $rig.Events.Count -eq 0 -and ((Read-Rig $rig) -join "`n") -ceq ($baseEnvironment -join "`n")) `
+            -Name 'a write that drops an entry is caught, the original written back, nothing restarted' -Detail $r.All
     }
-
-    $rig = New-ServerRig -Environment $baseEnvironment -Connections { @('172.19.204.53') }
-    $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof; allowConnectedVehicles = $true }
-    Write-Result -Ok ($null -eq $r.Error -and $r.Text -match 'WARNING: CONNECTED_VEHICLES' -and ($rig.Events -join ';') -ceq 'write;restart with entry 1') `
-        -Name 'server set with allowConnectedVehicles: a warning, then write and restart' -Detail $r.All
-    $rig = New-ServerRig -Environment $baseEnvironment -Journeys @{ Journeys = @(@{ JourneyId = 'j-1'; Stage = 'Dispatched' }) }
-    $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof; allowConnectedVehicles = $true }
-    Write-Result -Ok ($r.Error -match 'JOURNEYS_IN_PROGRESS' -and $rig.Events.Count -eq 0) -Name 'allowConnectedVehicles does not let a journey through' -Detail $r.All
-
-    # A write that does not read back: the original goes back, nothing restarts.
-    # Only the first write is faulty; the write-back goes through the same action and must land.
-    $faulty = @{ Writes = 0 }
-    $rig = New-ServerRig -Environment $baseEnvironment -WriteOverride {
-        param([string[]] $v)
-        $faulty.Writes++
-        Write-V2RegistryMultiString -Root $hkcu -Path $testKeyPath -Value @($v | Where-Object { $faulty.Writes -gt 1 -or $_ -notlike 'CONTROL_SERVER_MES_INGEST_SHARED_SECRET=*' })
-    }.GetNewClosure()
-    $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
-    Write-Result -Ok ($r.Error -match 'ENVIRONMENT_READBACK_FAILED' -and $rig.Events.Count -eq 0 -and ((& $readRegistry) -join "`n") -ceq ($baseEnvironment -join "`n")) `
-        -Name 'a write that drops an entry is caught, the original written back, nothing restarted' -Detail $r.All
-
-    # Static: the server entry script reads connections without swallowing errors (review L2).
-    $serverEntry = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-v2-recovery-window.ps1'))
-    Write-Result -Ok ($serverEntry -match 'Get-NetTCPConnection -ErrorAction Stop' -and $serverEntry -notmatch 'Get-NetTCPConnection[^\r\n]*SilentlyContinue') `
-        -Name 'the server entry reads connections with -ErrorAction Stop' -Detail ''
 
     # ================================================================ Part 3 ===
 

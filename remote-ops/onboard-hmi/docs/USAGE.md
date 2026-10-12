@@ -531,7 +531,7 @@ agv01 的放行记录是 [8005-agv-program#44 的这条留言](https://github.co
    **而且没有开关可以绕过**：重启会停掉那条旅程的故障监看。有卡住的旅程，先把它处理完再开窗。
 3. 派车闸门关着（`20-set-control-server-parallel-dispatch-gate.ps1 -State Closed`），车载端客户端停着。
 
-**怎么开、怎么关、怎么查**（车载端客户端必须停着；开、关是现场操作，每次由用户授权；`-Status` 只读）：
+**怎么开、怎么关、怎么查**（车载端客户端必须停着；开、关是现场操作，每次由用户授权；`-Status` 不改两端状态）：
 
 ```bash
 pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出> -WhatIf
@@ -543,6 +543,10 @@ pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlia
 
 ```bash
 pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出> -Revert
+```
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出> -Revert -VehicleOnly
 ```
 
 ```bash
@@ -563,6 +567,11 @@ pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlia
   服务端已有同一个值（第二台车开窗）就不写、不重启。
 - 关窗：是最后一台开着的车时，先服务端只读检查 → 车（先关开关，**再**删变量）→ 存储去掉这台车 → 服务端删那一条、重启 →
   删存储。另一台还开着时只动这台车，factory01 不碰。
+- **关最后一台需要 v2 空闲**：服务端那一步要重启服务，所以和开窗一样，有车连着或有没走完的旅程就拒绝，而且拒绝发生在碰车
+  之前。v2 在生产上跑时，收工时多半不空闲——另一台车连着、库里有旅程。这时用 `-Revert -VehicleOnly`：只关这台车，服务端
+  那一条留着，存储里记成残留（凭据还在、没有车开着）。没有车持有的服务端凭据不起作用，而车上的窗一直开着就超出了授权的
+  窗口期，所以**收工时先保证车上关掉**。等 v2 空闲时，对任一台车再跑一次不带 `-VehicleOnly` 的 `-Revert`，删掉服务端那一条。
+  服务端检查拒绝时，脚本的报错会直接给出这条 `-VehicleOnly` 命令。
 - 服务端在写之前拒绝（不写、不重启）的情况：派车闸门开着或判断不了（配置缺失、读不出、在进程启动后被改过，与安装脚本
   同一道检查）；服务 `Environment` 里有 `RiotCreateDispatch__*`；实例库里有没走完（非 `Completed`）的旅程，或库读不出；
   有车连在车载端口上，或连接读不出。旅程那条没有开关；连接那条在现场确认可以接受另一台车断线重连进恢复时，可以加
@@ -574,17 +583,25 @@ pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlia
 | 情形 | 留下的状态 | 存储记的 | 怎么收拾 |
 | --- | --- | --- | --- |
 | 开窗时服务端写入被拒 | 车已开窗，服务端没有那一条（清桩入口可用，恢复续作被拒） | 这台车开着 | 条件满足后再跑一次开窗命令补上；或 `-Revert` 两端都关 |
-| 关最后一台时服务端写入被拒 | 车已关窗，服务端那一条还在 | 没有车开着，凭据还留着 | 条件满足后对任一台车再跑一次 `-Revert` |
+| 关最后一台时服务端写入被拒，或用了 `-VehicleOnly` | 车已关窗，服务端那一条还在 | 没有车开着，凭据还留着 | v2 空闲时对任一台车再跑一次 `-Revert` |
+| 开窗时车载端写完变量、开开关前失败 | 车上有变量、开关还关着（车能正常启动，入口不出现） | 这台车没开 | 再跑一次开窗命令；或 `-Revert` 把变量删掉 |
+| 关窗时车载端关了开关、删变量前失败 | 开关已关、车上变量还在（车能正常启动，入口不出现） | 这台车开着 | 再跑一次 `-Revert` |
 
-拿不准时先跑 `-Status`：它读车上的开关与变量、服务端那一条，各自与存储里的值比，打印 `same`／`different`／`absent`，不改任何东西。
+车载端那两种都不会让车起不来：开关始终是最后打开、最先关掉的。
 
-**开窗之后用 `10-start-onboard-stack.ps1` 启动车载端，不要在车上双击。**变量是从 ssh 会话写的机器级变量，桌面上已经在跑的
+拿不准时先跑 `-Status`。它不改两端的开关、变量和服务端那一条，也不改存储，只往两端的暂存目录复制脚本（与开、关时复制的是
+同一批文件）。它读车上的开关与变量、服务端那一条，各自与存储里的值比（`same`／`different`／`absent`），在控制端算出结论，
+打印一行 `RESIDUE: none`，或逐条列出哪一端与存储不符、该跑哪条命令收拾。
+
+**开窗之后用 `10-start-onboard-stack.ps1` 启动车载端，不要在车上双击。**变量是从 ssh 会话直接写进机器级变量的注册表键
+（`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`，删除用 `DeleteValue`，不会留下空值）的，桌面上已经在跑的
 Explorer 收不到更新，从它双击起的客户端看不到这个变量：开关是开的、变量却没有，Production 下直接拒绝启动。`10` 用交互会话里的
 计划任务启动，按推理会拿到新环境，**第一次现场开窗时要确认一次**；不行就注销再登录。
 
 **要重跑的两种情况**：窗口内**重新部署车载端**（`06` 把开关渲染回 `false`，车上变量还在，入口无声消失）；**首次安装或卸载重装
-v2 服务**（服务注册表 `Environment` 会重建，服务端那一条丢失，恢复续作被拒）。普通升级保留 `Environment` 里的其他条目（推断，
-未在升级前后实测对照）。
+v2 服务**（服务注册表 `Environment` 会重建，服务端那一条丢失，恢复续作被拒）。普通升级保留 `Environment` 里的其他条目
+（control-server `scripts/parallel/ParallelHost.psm1` 的 `Invoke-ParallelInstanceConfigurationStep`：只重写本实例自己的凭据与每车投影凭据，
+其余条目原样保留）。
 
 **存储读不出时**（换了账号或机器，DPAPI 解不开），脚本连关窗都会拒绝（`STORE_UNREADABLE`）。手工关窗：车上停掉客户端，把
 `appsettings.json` 的 `wireToGate.recoveryResumeEnabled` 改回 `false`，再删机器级变量 `CONTROL_SERVER_RECOVERY_PROOF`
@@ -592,7 +609,9 @@ v2 服务**（服务注册表 `Environment` 会重建，服务端那一条丢失
 保留其余各行，在闸门关着、没有在途旅程时重启 v2 服务；最后删掉那个 `.xml`。这是现场操作，同样要授权。
 
 离线自检：`pwsh -File remote-ops/onboard-hmi/scripts/Test-SetV2RecoveryWindow.ps1 -ControlServerRepository <control-server 检出>`。
-假 ssh/scp 跑 18 号的全流程；车载端与服务端两段逻辑在临时安装目录、HKCU 下的临时注册表键上真跑；不连任何机器、不读真存储。
+假 ssh/scp 跑 18 号的全流程；车载端与服务端两段逻辑连同生产上用的操作组装（`New-V2VehicleActions`、`New-V2ServerActions`）
+在临时安装目录、HKCU 下的临时注册表键、本机回环连接和真 SQLite 库上真跑（SQLite 程序集从本机 NuGet 缓存借）；只把服务重启换成
+记录。不连任何机器、不读真存储。
 
 ### 看屏上显示什么：`17-capture-hmi-screen.ps1`
 

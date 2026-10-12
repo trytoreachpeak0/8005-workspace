@@ -593,7 +593,7 @@ v2 实例。
 control-server 检出复制 `ParallelInstance.psm1`、`ParallelHost.psm1` 到 `<opsRoot>\recovery-window\<commit>`，服务名、安装根、
 车载端口都从 `installed-instance.json` 读；写之前用安装脚本同一道 `Get-ParallelPreInstallRefusal`（闸门、配置、进程启动时刻）、
 只读实例库判在途旅程，再看车载端口上的连接，任何一条不满足就不写、不重启。所以首次安装、卸载重装 v2 服务之后（`Environment`
-会重建），窗口内要重跑一次 `18`；普通升级保留其他条目（推断，未实测）。怎么开、怎么关、残留怎么收拾、`-Status` 怎么对账，见
+会重建），窗口内要重跑一次 `18`；普通升级保留其他条目（`ParallelHost.psm1` 的 `Invoke-ParallelInstanceConfigurationStep` 只重写本实例自己的凭据）。怎么开、怎么关、残留怎么收拾、`-Status` 怎么对账，见
 `remote-ops/onboard-hmi/docs/USAGE.md`「v2 线的恢复窗口」。
 
 

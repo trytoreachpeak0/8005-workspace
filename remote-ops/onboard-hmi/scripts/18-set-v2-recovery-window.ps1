@@ -35,6 +35,9 @@
       Close: when it is the last open vehicle, server check (read-only) first -> vehicle (switch off,
              then variable) -> store drops the vehicle -> server entry removed -> store deleted.
              Another vehicle still open: the vehicle only; the server entry stays.
+             Closing the last vehicle needs the V2 instance idle (the server restarts). When it is not --
+             in production it usually is not -- the check refuses before the vehicle is touched and names
+             -Revert -VehicleOnly, which closes the vehicle and leaves the entry, recorded as a residue.
     The server refuses before any change when: the dispatch gate is open or cannot be judged (the
     installer's pre-install refusal), a RiotCreateDispatch__* override is set, a journey is not
     Completed or the journeys cannot be read, a vehicle holds a connection to the onboard port (unless
@@ -45,7 +48,9 @@
     vehicle in between. A journey or a connection that appears in that gap makes the write refuse
     after the vehicle half is done (open: the vehicle open, the server without the entry; close: the
     vehicle closed, the server still holding it). The store records what was done, -Status shows both
-    ends against it, and the same command again (or -Revert) finishes or undoes it.
+    ends against it and prints a RESIDUE line computed here, and the same command again (or -Revert)
+    finishes or undoes it. -Status copies the same staged files to both ends; it changes neither end's
+    switch, variable or entry, nor the store.
 
     Shut is the factory setting, and no deployment script opens it. Re-run after re-deploying the
     onboard client (06 renders the switch back to false) or after a first install of the V2 service
@@ -73,6 +78,13 @@
 .PARAMETER AllowConnectedVehicles
     Restart the V2 service even while a vehicle is connected to it, with a warning.
 
+.PARAMETER VehicleOnly
+    With -Revert only: close the window on the vehicle and leave the server entry, recorded in the store
+    as a residue. For the end of a field window when the V2 instance is not idle (a vehicle connected, a
+    journey not Completed): the server refuses to restart then, and a vehicle left open beyond its
+    authorized window is the worse of the two -- an entry on the server that no vehicle holds is inert.
+    Run -Revert without it later, when the instance is idle, to remove the entry.
+
 .EXAMPLE
     pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <checkout> -WhatIf
 
@@ -97,6 +109,9 @@ param(
     [Parameter(ParameterSetName = 'Change')]
     [switch] $AllowConnectedVehicles,
 
+    [Parameter(ParameterSetName = 'Change')]
+    [switch] $VehicleOnly,
+
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\w2g-v2-recovery-window.xml')
 )
 
@@ -104,6 +119,7 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 $SshAlias = $SshAlias.ToLowerInvariant()
+if ($VehicleOnly -and -not $Revert) { throw '-VehicleOnly only closes (-Revert); opening needs both ends. Nothing was changed.' }
 $serverAlias = 'factory01'
 $vehicleStaging = 'C:\temp\agv\onboard-staging\v2-recovery-window'
 $toPosix = { param($p) $p.Replace('\', '/') }
@@ -165,6 +181,8 @@ function Write-Store {
 $store = Read-Store
 $others = @($store ? @($store.OpenVehicles | Where-Object { $_ -ne $SshAlias }) : @())
 $last = $others.Count -eq 0
+# Closing the last open vehicle removes the server entry too, unless -VehicleOnly leaves it for later.
+$serverClose = $Revert -and $last -and -not $VehicleOnly
 
 # -------------------------------------------------------------------- remote ---
 
@@ -214,7 +232,8 @@ if (-not $Status) {
     Write-Step ("Vehicle: CONTROL_SERVER_RECOVERY_PROOF {0}; recoveryResumeEnabled {1}" -f
         ($Revert ? 'removed after the switch is off' : 'set and read back before the switch'), (-not $Revert).ToString().ToLowerInvariant())
     Write-Step ("Server: {0}" -f $(if (-not $Revert) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF set after the vehicle (no restart when it already holds the proof)' }
-            elseif ($last) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF removed after the vehicle' }
+            elseif ($serverClose) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF removed after the vehicle (needs the V2 instance idle)' }
+            elseif ($last) { 'untouched (-VehicleOnly): its CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF stays, recorded in the store as a residue' }
             else { "untouched: still open on $($others -join ', ')" }))
     Write-Step ("Proof: {0}" -f $(if ($Revert) { 'not needed' } elseif ($store) { 'reused from the store' } else { 'to be generated and stored' }))
 }
@@ -242,11 +261,29 @@ if ($Status) {
     & $stageVehicle
     & $stageServer
     Write-Step "Vehicle $SshAlias"
-    Invoke-Remote -Alias $SshAlias -Script $vehicleScript -Request (& $vehicleRequest 'Status' $proof) | Out-Null
+    $vehicleLines = Invoke-Remote -Alias $SshAlias -Script $vehicleScript -Request (& $vehicleRequest 'Status' $proof)
     Write-Step "Server $serverAlias"
-    Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'status' $null $proof) | Out-Null
-    Write-Step ("Compare with the store: {0}. 'same' means equal to the stored proof; 'different' on either end, or an end that disagrees with the store, is a residue -- run the open or -Revert command again." -f
-        ($null -eq $store ? 'no store, so both ends should read absent and the switch False' : "open on $($recorded ? $recorded : '(no vehicle)')"))
+    $serverLines = Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'status' $null $proof)
+    $read = { param([string[]] $Lines, [string] $Key) $m = @($Lines | Where-Object { $_ -match "^$([regex]::Escape($Key))=(\S+)" } | Select-Object -First 1); $m ? ($m[0] -split '=', 2)[1] : '(not reported)' }
+    $switch = & $read $vehicleLines 'recoveryResumeEnabled'
+    $variable = & $read $vehicleLines 'CONTROL_SERVER_RECOVERY_PROOF'
+    $entry = & $read $serverLines 'ENTRY'
+    $vehicleOpen = $null -ne $store -and @($store.OpenVehicles) -contains $SshAlias
+    $serverHeld = $null -ne $store -and @($store.OpenVehicles).Count -gt 0
+    $residues = [System.Collections.Generic.List[string]]::new()
+    if ($vehicleOpen) {
+        if ($switch -cne 'True' -or $variable -cne 'same') { $residues.Add("vehicle $SshAlias is recorded open but reads switch=$switch, variable=$variable -- run the open command again, or -Revert") }
+    } else {
+        if ($switch -cne 'False') { $residues.Add("vehicle $SshAlias is not recorded open but its switch reads $switch -- run -Revert") }
+        if ($variable -cne 'absent') { $residues.Add("vehicle $SshAlias is not recorded open but CONTROL_SERVER_RECOVERY_PROOF reads $variable -- run -Revert (a close stopped after the switch, or an open stopped after the variable)") }
+    }
+    if ($serverHeld) {
+        if ($entry -cne 'same') { $residues.Add("the server entry reads $entry while $(@($store.OpenVehicles) -join ', ') is recorded open -- run the open command again") }
+    } elseif ($entry -cne 'absent') {
+        $residues.Add("the server entry reads $entry while no vehicle is recorded open -- run -Revert on either vehicle when the V2 instance is idle")
+    }
+    Write-Step ("Store: {0}" -f ($null -eq $store ? '(none)' : "open on $($recorded ? $recorded : '(no vehicle)')"))
+    Write-Host ("RESIDUE: {0}" -f ($residues.Count ? ($residues -join '; ') : 'none'))
     return
 }
 
@@ -287,10 +324,15 @@ if (-not $Revert) {
     return
 }
 
-if ($last) {
+if ($serverClose) {
     & $stageServer
     Write-Step "Server check on $serverAlias (read-only)"
-    Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'check' 'remove' $null) | Out-Null
+    try {
+        Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'check' 'remove' $null) | Out-Null
+    } catch {
+        throw ("$($_.Exception.Message) The vehicle was not touched. Removing the server entry needs the V2 instance idle; to close the " +
+            "vehicle now and leave the entry for later, run: 18-set-v2-recovery-window.ps1 -SshAlias $SshAlias -ControlServerRepository <checkout> -Revert -VehicleOnly")
+    }
 }
 & $stageVehicle
 Write-Step "Vehicle half on $SshAlias"
@@ -298,6 +340,12 @@ Invoke-Remote -Alias $SshAlias -Script $vehicleScript -Request (& $vehicleReques
 if ($store) { Write-Store -Proof $store.Proof -OpenVehicles $others }
 if (-not $last) {
     Write-Step "Recovery window closed on $SshAlias. Still open on $($others -join ', '); the server entry stays."
+    return
+}
+if ($VehicleOnly) {
+    Write-Step ("Recovery window closed on $SshAlias (-VehicleOnly). The server entry was left; " +
+        $(if ($store) { 'the store keeps the proof with no vehicle open, which -Status reports as a residue.' } else { 'there is no store, so -Status will report the entry if it is there.' }) +
+        ' Run -Revert without -VehicleOnly when the V2 instance is idle.')
     return
 }
 Write-Step "Server half on $serverAlias"

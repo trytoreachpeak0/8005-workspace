@@ -19,6 +19,9 @@ Set-StrictMode -Version 3.0
 $script:VehicleVariable = 'CONTROL_SERVER_RECOVERY_PROOF'
 $script:ServerVariable = 'CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF'
 $script:MvpServiceName = '8005 AGV ControlServer'
+$script:MachineEnvironmentPath = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+$script:ServicesPath = 'SYSTEM\CurrentControlSet\Services'
+$script:ClientProcessName = 'SQCD.Agv.Wpf'
 
 function Get-V2RecoveryWindowNames {
     [CmdletBinding()]
@@ -95,7 +98,7 @@ function Invoke-V2RecoveryWindowVehicle {
     $read = { Get-Content -Raw -LiteralPath $settingsPath -Encoding utf8 | ConvertFrom-Json }
     $settings = & $read
     $installedInstance = [string] $settings.wireToGate.onboardInstanceId
-    if ([string]::IsNullOrEmpty($expectedInstance) -or $installedInstance -cne $expectedInstance) {
+    if ([string]::IsNullOrWhiteSpace($expectedInstance) -or $installedInstance -cne $expectedInstance) {
         throw ("VEHICLE_IDENTITY_MISMATCH: wireToGate.onboardInstanceId in $settingsPath is '$installedInstance', the site file says " +
             "'$expectedInstance'. This is not the vehicle the alias names. Nothing was changed.")
     }
@@ -140,6 +143,51 @@ function Invoke-V2RecoveryWindowVehicle {
     return $lines.ToArray()
 }
 
+function New-V2VehicleActions {
+    <#
+        .SYNOPSIS
+            The actions the vehicle half runs with. agv-v2-recovery-window.ps1 calls this with no
+            arguments; the defaults are what production uses, and the self-test reads them back
+            (Description) and runs the same scriptblocks against a temporary key.
+
+        .DESCRIPTION
+            The machine variable is read and written in the registry key Windows keeps machine
+            variables in (HKLM\...\Session Manager\Environment), where
+            [Environment]::SetEnvironmentVariable(..., 'Machine') writes too. A delete is DeleteValue:
+            it cannot leave the empty REG_SZ that a "" passed for $null left on agv01 on 2026-09-10.
+            No WM_SETTINGCHANGE is broadcast; from an ssh session it would not reach the desktop
+            anyway, which is why the client is started with 10-start-onboard-stack.ps1.
+    #>
+    [CmdletBinding()]
+    param(
+        [Microsoft.Win32.RegistryKey] $EnvironmentRoot = [Microsoft.Win32.Registry]::LocalMachine,
+        [string] $EnvironmentPath = $script:MachineEnvironmentPath,
+        [string] $ProcessName = $script:ClientProcessName
+    )
+    return @{
+        Description = "variables $($EnvironmentRoot.Name)\$EnvironmentPath; client process $ProcessName"
+        ClientRunning = { @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue).Count -gt 0 }.GetNewClosure()
+        GetMachineVariable = {
+            param([string] $Name)
+            $key = $EnvironmentRoot.OpenSubKey($EnvironmentPath, $false)
+            if ($null -eq $key) { throw "No registry key $($EnvironmentRoot.Name)\$EnvironmentPath." }
+            try {
+                $value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                return ($null -eq $value) ? $null : [string] $value
+            } finally { $key.Close() }
+        }.GetNewClosure()
+        SetMachineVariable = {
+            param([string] $Name, [AllowNull()][string] $Value)
+            $key = $EnvironmentRoot.OpenSubKey($EnvironmentPath, $true)
+            if ($null -eq $key) { throw "Cannot open $($EnvironmentRoot.Name)\$EnvironmentPath for writing." }
+            try {
+                if ([string]::IsNullOrEmpty($Value)) { $key.DeleteValue($Name, $false) }
+                else { $key.SetValue($Name, $Value, [Microsoft.Win32.RegistryValueKind]::String) }
+            } finally { $key.Close() }
+        }.GetNewClosure()
+    }
+}
+
 # ------------------------------------------------------------------ server ---
 
 function Read-V2RegistryMultiString {
@@ -182,15 +230,16 @@ function Invoke-V2RecoveryWindowServer {
               4. Before a restart: the installer's own pre-install refusal (configuration present and
                  readable, service Running or Stopped, a Running process newer than the file, the
                  dispatch gate closed -- Get-ParallelPreInstallRefusal); no RiotCreateDispatch__*
-                 override in the Environment; no journey that is not Completed (the instance's SQLite
-                 store, read-only); no established connection on the onboard port, unless
-                 allowConnectedVehicles (then a warning). Unreadable journeys or connections refuse.
+                 override in the Environment; no established connection on the onboard port, unless
+                 allowConnectedVehicles (then a warning); no journey that is not Completed (the
+                 instance's SQLite store, read-only; no switch). Unreadable connections or journeys refuse.
                  'check' stops here: CHECK_PASSED.
               5. Write the Environment with every other entry kept in its order, read it back; on a
                  mismatch the original is written back and the run fails.
               6. Restart a Running service and require it Running again. A Stopped one is left stopped.
 
-            Actions (scriptblocks): ReadEnvironment -> string[]; WriteEnvironment([string[]]);
+            Actions: built by New-V2ServerActions. RegistryPath (the key it writes, checked against
+            ServiceName and the MVP); scriptblocks ReadEnvironment -> string[]; WriteEnvironment([string[]]);
             MergeEntry(environment, name, value) -> string[]; ServiceStatus -> string or $null;
             PreInstallRefusal -> string or $null; JourneyState -> hashtable (Journeys, or Error);
             Connections -> string[] of remote addresses (throws when it cannot read); RestartService.
@@ -211,6 +260,12 @@ function Invoke-V2RecoveryWindowServer {
     $allowConnected = [bool] $Request['allowConnectedVehicles']
 
     if ($ServiceName.Trim().TrimEnd('\') -ieq $script:MvpServiceName) { throw 'MVP_SERVICE_REFUSED: this script never changes the MVP service. Nothing was changed.' }
+    # The key the actions write is checked too, not only the name passed here: a path pointing at the
+    # MVP's key would rewrite its Environment silently, and the MVP fingerprint does not compare it.
+    $registryLeaf = ([string] $Actions['RegistryPath']).TrimEnd('\').Split('\')[-1]
+    if ($registryLeaf -ieq $script:MvpServiceName -or $registryLeaf -cne $ServiceName) {
+        throw "REGISTRY_PATH_REFUSED: the actions write '$($Actions['RegistryPath'])', which is not the key of '$ServiceName'. Nothing was changed."
+    }
 
     $lines = [System.Collections.Generic.List[string]]::new()
     $environment = [string[]] @(& $Actions.ReadEnvironment)
@@ -236,17 +291,6 @@ function Invoke-V2RecoveryWindowServer {
     if ($overrides.Count -gt 0) {
         throw "DISPATCH_GATE_OVERRIDDEN: $(Get-V2EntryNames $overrides) in the service Environment override the file. Nothing was changed."
     }
-    $journeys = & $Actions.JourneyState
-    if ($journeys -isnot [System.Collections.IDictionary] -or $journeys.Contains('Error')) {
-        $why = ($journeys -is [System.Collections.IDictionary]) ? [string] $journeys['Error'] : 'no answer'
-        throw "JOURNEY_STATE_UNREADABLE: $why. Nothing was changed."
-    }
-    $open = @($journeys['Journeys'])
-    if ($open.Count -gt 0) {
-        $named = @($open | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
-        throw ("JOURNEYS_IN_PROGRESS: $($open.Count) journey(s) not Completed: $named. A restart stops their supervision; " +
-            'finish or settle them first. Nothing was changed.')
-    }
     try { $connections = @(& $Actions.Connections) } catch {
         throw "CONNECTIONS_UNREADABLE: the connections on port $OnboardPort could not be read ($($_.Exception.Message)). Nothing was changed."
     }
@@ -258,6 +302,17 @@ function Invoke-V2RecoveryWindowServer {
                 'recovery. Stop their clients, or pass -AllowConnectedVehicles once the field has accepted it. Nothing was changed.')
         }
         $lines.Add("WARNING: CONNECTED_VEHICLES ($from): the restart drops them into recovery.")
+    }
+    $journeys = & $Actions.JourneyState
+    if ($journeys -isnot [System.Collections.IDictionary] -or $journeys.Contains('Error')) {
+        $why = ($journeys -is [System.Collections.IDictionary]) ? [string] $journeys['Error'] : 'no answer'
+        throw "JOURNEY_STATE_UNREADABLE: $why. Nothing was changed."
+    }
+    $open = @($journeys['Journeys'])
+    if ($open.Count -gt 0) {
+        $named = @($open | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
+        throw ("JOURNEYS_IN_PROGRESS: $($open.Count) journey(s) not Completed: $named. A restart stops their supervision; " +
+            'finish or settle them first. Nothing was changed.')
     }
     if ($mode -ceq 'check') { $lines.Add('CHECK_PASSED'); return $lines.ToArray() }
 
@@ -289,5 +344,101 @@ function Invoke-V2RecoveryWindowServer {
     return $lines.ToArray()
 }
 
+function New-V2ServerActions {
+    <#
+        .SYNOPSIS
+            The actions the server half runs with. server-v2-recovery-window.ps1 passes only the four
+            values it read from installed-instance.json; everything else is a default here, which is
+            what production uses. The self-test calls this same function with a temporary registry
+            root, a temporary install and data root, a loopback port and a recorded restart.
+
+        .DESCRIPTION
+            The control-server functions it calls (Get-ParallelPreInstallRefusal,
+            Get-ParallelServiceProcessStartTimeUtc, Resolve-ParallelInstanceDatabasePath,
+            Get-ParallelJourneyDispatchState, Set-ParallelServiceEnvironmentEntry, Get-MvpFingerprint,
+            Assert-MvpUntouched) must be imported by the caller: ParallelInstance.psm1 and ParallelHost.psm1,
+            staged beside this module.
+
+            Connections: every TCP connection, then filtered here -- a filtered Get-NetTCPConnection
+            reports "none" as an error, and swallowing errors would read "cannot tell" as "nobody".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $ServiceName,
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][string] $DataRoot,
+        [Parameter(Mandatory = $true)][int] $OnboardPort,
+        [Microsoft.Win32.RegistryKey] $RegistryRoot = [Microsoft.Win32.Registry]::LocalMachine,
+        [string] $ServicesPath = $script:ServicesPath,
+        [scriptblock] $RestartService
+    )
+    if ($ServiceName.Trim().TrimEnd('\') -ieq $script:MvpServiceName) { throw 'MVP_SERVICE_REFUSED: no actions are built for the MVP service. Nothing was changed.' }
+    $registryPath = "$ServicesPath\$ServiceName"
+    $configurationPath = "$InstallRoot\appsettings.Production.json"
+    $readConfiguration = { (Test-Path -LiteralPath $configurationPath -PathType Leaf) ? [IO.File]::ReadAllText($configurationPath) : $null }.GetNewClosure()
+    $restart = $RestartService ?? { Restart-Service -Name $ServiceName -Force }.GetNewClosure()
+    return @{
+        Description = "registry $($RegistryRoot.Name)\$registryPath; configuration $configurationPath; onboard port $OnboardPort"
+        RegistryPath = $registryPath
+        ReadEnvironment = { Read-V2RegistryMultiString -Root $RegistryRoot -Path $registryPath }.GetNewClosure()
+        WriteEnvironment = { param([string[]] $Value) Write-V2RegistryMultiString -Root $RegistryRoot -Path $registryPath -Value $Value }.GetNewClosure()
+        MergeEntry = { param([string[]] $Environment, [string] $Name, [string] $Value) Set-ParallelServiceEnvironmentEntry -Environment $Environment -Name $Name -Value $Value }
+        ServiceStatus = { $s = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue; $s ? [string] $s.Status : $null }.GetNewClosure()
+        PreInstallRefusal = {
+            $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            $text = & $readConfiguration
+            Get-ParallelPreInstallRefusal -ServiceExists ($null -ne $service) -ServiceStatus ($service ? [string] $service.Status : $null) `
+                -ServiceName $ServiceName -ConfigurationPath $configurationPath -ConfigurationText $text `
+                -ConfigurationWriteTimeUtc ($null -ne $text ? [IO.File]::GetLastWriteTimeUtc($configurationPath) : $null) `
+                -ProcessStartTimeUtc (Get-ParallelServiceProcessStartTimeUtc -ServiceName $ServiceName)
+        }.GetNewClosure()
+        Connections = {
+            @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.LocalPort -eq $OnboardPort -and [string] $_.State -eq 'Established' } |
+                    ForEach-Object { [string] $_.RemoteAddress })
+        }.GetNewClosure()
+        JourneyState = {
+            try {
+                $configuration = ConvertFrom-Json -InputObject (& $readConfiguration) -AsHashtable -Depth 12
+                $databasePath = Resolve-ParallelInstanceDatabasePath -Configuration $configuration -DataRoot $DataRoot -ConfigurationPath $configurationPath
+            } catch {
+                return @{ Error = "the database path cannot be resolved from $configurationPath ($($_.Exception.Message))" }
+            }
+            Get-ParallelJourneyDispatchState -DatabasePath $databasePath -AssemblyDirectory $InstallRoot
+        }.GetNewClosure()
+        RestartService = $restart
+        IsElevated = { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+        MvpFingerprint = { Get-MvpFingerprint }
+        AssertMvpUntouched = { param($Before, $After) Assert-MvpUntouched -Before $Before -After $After }
+    }
+}
+
+function Invoke-V2RecoveryWindowServerRun {
+    <#
+        .SYNOPSIS
+            What server-v2-recovery-window.ps1 runs: Invoke-V2RecoveryWindowServer, and for 'set' and
+            'remove' first an elevation check, and the MVP service fingerprinted before and compared after.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Request,
+        [Parameter(Mandatory = $true)][string] $ServiceName,
+        [Parameter(Mandatory = $true)][int] $OnboardPort,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Actions
+    )
+    if ([string] $Request['mode'] -cnotin @('set', 'remove')) {
+        return Invoke-V2RecoveryWindowServer -Request $Request -ServiceName $ServiceName -OnboardPort $OnboardPort -Actions $Actions
+    }
+    if (-not (& $Actions.IsElevated)) { throw 'NOT_ELEVATED: this must run elevated. Nothing was changed.' }
+    $before = & $Actions.MvpFingerprint
+    $lines = $null
+    try {
+        $lines = Invoke-V2RecoveryWindowServer -Request $Request -ServiceName $ServiceName -OnboardPort $OnboardPort -Actions $Actions
+    } finally {
+        & $Actions.AssertMvpUntouched $before (& $Actions.MvpFingerprint)
+    }
+    return @($lines) + 'MVP service fingerprint unchanged.'
+}
+
 Export-ModuleMember -Function Get-V2RecoveryWindowNames, Read-V2RecoveryWindowRequest, Get-V2ProofComparison,
-    Invoke-V2RecoveryWindowVehicle, Read-V2RegistryMultiString, Write-V2RegistryMultiString, Invoke-V2RecoveryWindowServer
+    Invoke-V2RecoveryWindowVehicle, New-V2VehicleActions, Read-V2RegistryMultiString, Write-V2RegistryMultiString,
+    Invoke-V2RecoveryWindowServer, New-V2ServerActions, Invoke-V2RecoveryWindowServerRun
