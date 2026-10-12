@@ -37,8 +37,8 @@ pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -RunId
 ```
 
 ```bash
-# 三、部署车载端（控制端）。搬完就停，不启动。
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1
+# 三、部署车载端（控制端）。搬完就停，不启动。两个端口都要给（workspace#32）。
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -OnboardPort 58005 -HealthPort 58007
 ```
 
 出事了：
@@ -227,12 +227,12 @@ pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -RunId
 
 ```bash
 # 6. 车载端也先干跑，它会把渲染好的配置整份打出来
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -OnboardPort 58005 -HealthPort 58007 -WhatIf
 ```
 
 ```bash
 # 7. 部署车载端
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -OnboardPort 58005 -HealthPort 58007
 ```
 
 ```bash
