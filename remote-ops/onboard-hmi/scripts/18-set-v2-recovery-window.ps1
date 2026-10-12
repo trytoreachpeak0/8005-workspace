@@ -1,115 +1,101 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-    Opens or closes the recovery window on agv02 / agv03 against the v2 parallel
-    instance ('8005 AGV ControlServer V2' on factory01). The v2 counterpart of
-    14-set-recovery-window.ps1, which stays the MVP line's (agv01 + the MVP
-    service). Runs on the control host.
+    Opens, closes or reports the recovery window on agv02 / agv03 against the v2 parallel instance
+    on factory01. The v2 counterpart of 14-set-recovery-window.ps1, which stays the MVP line's
+    (agv01 + the MVP service). Runs on the control host.
 
 .DESCRIPTION
     What "the recovery window" is, read from the code (8005-workspace#25):
 
-    * Vehicle: wireToGate.recoveryResumeEnabled (the maintenance switch) and the
-      machine variable CONTROL_SERVER_RECOVERY_PROOF. Every recovery-administrator
-      entry on the onboard screen -- 「确认清桩」, 「充电后返回服务」, the recovery
-      vectors -- needs both (CanUseRecoveryOperator(requireProof: true)), plus an
-      operator id. In Production the client refuses to start when the switch is
-      on and the variable is missing (SQCD.Agv.Infrastructure/Configuration.cs).
-    * Server: the v2 instance checks the proof a vehicle sends in
-      ExceptionRecoverySessionRequested against the variable named by
-      Recovery:AuthenticationProofEnvironmentVariable, which no v2 deployment
-      sets, so it is the fallback CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF.
-      FixedTimeEquals over UTF-8 bytes: the two ends must hold the same value.
-      CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL is a different secret (the Host
-      endpoints' bearer) and is not touched here.
-    * 「确认清桩」 does not send the proof; the server judges the operator id
-      against the R-11/R-13 roster, and accepts the request only with
-      fieldOperatorRoles.onboardClearanceEntryDeclared = true. Those two belong
-      to the v2 instance definition, not to this script.
+    * Vehicle: wireToGate.recoveryResumeEnabled (the maintenance switch) and the machine variable
+      CONTROL_SERVER_RECOVERY_PROOF. Every recovery-administrator entry on the onboard screen --
+      「确认清桩」, 「充电后返回服务」, the recovery vectors -- needs both, plus an operator id. In
+      Production the client refuses to start when the switch is on and the variable is missing.
+    * Server: the v2 instance checks the proof a vehicle sends in ExceptionRecoverySessionRequested
+      against CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF (the fallback of
+      Recovery:AuthenticationProofEnvironmentVariable, which no v2 deployment sets), byte for byte.
+      CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL is a different secret and is not touched.
+    * 「确认清桩」 does not send the proof; the server needs onboardClearanceEntryDeclared and the
+      operator id in the R-11/R-13 roster. Those belong to the v2 instance definition.
 
-    One proof serves both vehicles (the server has one variable). It lives in
-    the control host's DPAPI store with the list of vehicles whose window is
-    open. -Revert closes one vehicle; the server entry and the store go only
-    when the last open vehicle closes.
+    One proof serves both vehicles (the server has one variable). It lives in the control host's DPAPI
+    store with the list of vehicles whose window is open. It travels on ssh's standard input inside a
+    one-line JSON request; no staged file, command line or output carries it.
 
-    The proof never touches a disk outside the DPAPI store: it reaches each
-    machine on ssh's standard input, not inside the staged script, and nothing
-    prints it. Output names variables only.
+    Which server and which instance are not parameters: the server is factory01, and everything about
+    the instance -- service name, install root, onboard port -- comes from the definition the installer
+    recorded there (installed-instance.json), read by the server half with control-server's own
+    modules, staged from -ControlServerRepository as 20-set-control-server-parallel-dispatch-gate.ps1
+    stages them. Only opsRoot is read here, from the repository's instance definition, to know where.
 
-    Restarting the V2 service is needed only when its entry changes. Before
-    that the server is checked, and the run refuses with nothing changed when:
-      * the service is not Running or Stopped, or is the MVP service;
-      * RIoT dispatch may be open: RiotCreateDispatch.enabled is true in the
-        installed appsettings.Production.json, the file is unreadable, it was
-        written after the running process started (so the file is not what the
-        process does), or a RiotCreateDispatch__* entry sits in the service
-        Environment;
-      * a vehicle holds an established connection to the onboard port. A
-        restart drops it into recovery and stops the supervision of whatever
-        journey it carries. The server exposes no journey list, and a journey
-        can only progress with its vehicle connected, so a connection is the
-        signal. -AllowConnectedVehicles turns this one refusal into a warning,
-        for a field run whose people have accepted that the other vehicle
-        reconnects into recovery.
+    Order (each remote half is in V2RecoveryWindow.psm1):
+      Open:  server check (read-only) -> vehicle (variable, read back, then switch) -> store records the
+             vehicle -> server entry (checks again, write, read back, restart).
+      Close: when it is the last open vehicle, server check (read-only) first -> vehicle (switch off,
+             then variable) -> store drops the vehicle -> server entry removed -> store deleted.
+             Another vehicle still open: the vehicle only; the server entry stays.
+    The server refuses before any change when: the dispatch gate is open or cannot be judged (the
+    installer's pre-install refusal), a RiotCreateDispatch__* override is set, a journey is not
+    Completed or the journeys cannot be read, a vehicle holds a connection to the onboard port (unless
+    -AllowConnectedVehicles: a warning) or the connections cannot be read. Restarting is skipped when
+    the entry already holds the proof.
 
-    Shut is the factory setting, and no deployment script opens it. The other
-    way round is the trap: 06-deploy-onboard-hmi.ps1 renders the switch back to
-    false while the machine variable stays, and a first install (or uninstall
-    and reinstall) of the V2 service rebuilds its Environment without the
-    server entry. Re-run this script after either, inside a window.
+    What can still be left behind: the server check and the server write are minutes apart, with the
+    vehicle in between. A journey or a connection that appears in that gap makes the write refuse
+    after the vehicle half is done (open: the vehicle open, the server without the entry; close: the
+    vehicle closed, the server still holding it). The store records what was done, -Status shows both
+    ends against it, and the same command again (or -Revert) finishes or undoes it.
 
-    It starts nothing. The vehicle's client must be stopped and is left stopped.
+    Shut is the factory setting, and no deployment script opens it. Re-run after re-deploying the
+    onboard client (06 renders the switch back to false) or after a first install of the V2 service
+    (its Environment is rebuilt).
+
+    It starts nothing. The vehicle's client must be stopped and is left stopped. Start it with
+    10-start-onboard-stack.ps1, not by a double click: the variable is written from the ssh session,
+    and an Explorer that was already running does not see a machine variable written that way.
 
 .PARAMETER SshAlias
-    agv02 or agv03. Required; there is no default, and agv01 is refused by the
-    parameter validation.
+    agv02 or agv03. Required; there is no default, and agv01 is refused by the parameter validation.
+
+.PARAMETER ControlServerRepository
+    A clean 8005-agv-control-server checkout or worktree. Its scripts/parallel/ParallelInstance.psm1 and
+    ParallelHost.psm1 are staged on factory01 in <opsRoot>\recovery-window\<its HEAD commit>, beside the
+    server half from this directory; its instance-factory01-v2.json gives opsRoot.
 
 .PARAMETER Revert
     Close the window on this vehicle.
 
+.PARAMETER Status
+    Read only: the switch and the variable on this vehicle, the entry on the server, each compared
+    with the store. Changes nothing.
+
 .PARAMETER AllowConnectedVehicles
-    Restart the V2 service even while a vehicle is connected to it, with a
-    warning. Without it such a run refuses before changing anything.
+    Restart the V2 service even while a vehicle is connected to it, with a warning.
 
 .EXAMPLE
-    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -WhatIf
+    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <checkout> -WhatIf
 
 .EXAMPLE
-    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -Revert
+    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <checkout> -Status
 #>
-[CmdletBinding(SupportsShouldProcess = $true)]
+[CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Change')]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('agv02', 'agv03')]
     [string] $SshAlias,
 
+    [Parameter(Mandatory = $true)]
+    [string] $ControlServerRepository,
+
+    [Parameter(ParameterSetName = 'Change')]
     [switch] $Revert,
 
+    [Parameter(ParameterSetName = 'Status')]
+    [switch] $Status,
+
+    [Parameter(ParameterSetName = 'Change')]
     [switch] $AllowConnectedVehicles,
-
-    [string] $ServerSshAlias = 'factory01',
-
-    [ValidateScript({
-            if ($_.Trim() -ieq '8005 AGV ControlServer') { throw "'$_' is the MVP service; this script only changes the v2 parallel instance." }
-            $true
-        })]
-    [string] $ServiceName = '8005 AGV ControlServer V2',
-
-    [ValidateScript({
-            if ($_.TrimEnd('\') -ieq 'C:\Program Files\8005 AGV\ControlServer') { throw "'$_' is the MVP install root." }
-            $true
-        })]
-    [string] $ServerInstallRoot = 'C:\Program Files\8005 AGV\ControlServer.V2',
-
-    [ValidateRange(1, 65535)]
-    [int] $OnboardPort = 58105,
-
-    [string] $ServerOpsRoot = 'D:\zhengyushao\control-server-v2-ops',
-
-    [string] $SitePath,
-
-    # The same scratch directory 06-deploy-onboard-hmi.ps1 stages into.
-    [string] $StagingRoot = 'C:\temp\agv\onboard-staging',
 
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\w2g-v2-recovery-window.xml')
 )
@@ -117,6 +103,9 @@ param(
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
+$SshAlias = $SshAlias.ToLowerInvariant()
+$serverAlias = 'factory01'
+$vehicleStaging = 'C:\temp\agv\onboard-staging\v2-recovery-window'
 $toPosix = { param($p) $p.Replace('\', '/') }
 
 function Write-Step {
@@ -124,183 +113,44 @@ function Write-Step {
     Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message) -ForegroundColor Cyan
 }
 
-$vehicleVariable = 'CONTROL_SERVER_RECOVERY_PROOF'
-$serverVariable = 'CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF'
+# ------------------------------------------------------ local facts, no network ---
 
-if (-not $SitePath) {
-    $SitePath = Join-Path (Split-Path -Parent $PSScriptRoot) "config\site-$SshAlias.json"
+$repoRoot = (Resolve-Path -LiteralPath $ControlServerRepository).Path
+$parallelScripts = Join-Path $repoRoot 'scripts\parallel'
+foreach ($name in 'ParallelInstance.psm1', 'ParallelHost.psm1', 'instance-factory01-v2.json') {
+    if (-not (Test-Path -LiteralPath (Join-Path $parallelScripts $name) -PathType Leaf)) { throw "No scripts/parallel/$name in $repoRoot. Nothing was changed." }
 }
-if (-not (Test-Path -LiteralPath $SitePath -PathType Leaf)) { throw "No site file at $SitePath. Nothing was changed." }
-$installRoot = (Get-Content -Raw -LiteralPath $SitePath | ConvertFrom-Json).install.root
-if ([string]::IsNullOrWhiteSpace($installRoot)) { throw "$SitePath has no install.root. Nothing was changed." }
+$dirty = & git -C $repoRoot status --porcelain 2>&1
+if ($LASTEXITCODE -ne 0) { throw "git status failed in $repoRoot (exit $LASTEXITCODE). Nothing was changed." }
+if ($dirty) { throw "$repoRoot has uncommitted changes; the modules staged on the server would not be its HEAD. Nothing was changed." }
+$commit = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw "Cannot read the HEAD commit of $repoRoot. Nothing was changed." }
+Import-Module (Join-Path $parallelScripts 'ParallelInstance.psm1') -Force
+$definition = Read-ParallelInstanceDefinition -Path (Join-Path $parallelScripts 'instance-factory01-v2.json')
+$opsRoot = [string] $definition['opsRoot']
+$opsProblem = Test-ParallelInstanceOwnedPath -Path $opsRoot
+if ($opsProblem) { throw "opsRoot $opsProblem. Nothing was changed." }
+$serverStaging = "$opsRoot\recovery-window\$commit"
 
-# Runs a staged script on a machine. The script carries no secret; the proof, when
-# given, goes on standard input and the script reads it with [Console]::In.
-function Invoke-RemoteScript {
-    param(
-        [Parameter(Mandatory)][string] $Alias,
-        [Parameter(Mandatory)][string] $Body,
-        [Parameter(Mandatory)][string] $Name,
-        [Parameter(Mandatory)][string] $RemoteDirectory,
-        [string] $StandardInput
-    )
-    $local = Join-Path ([System.IO.Path]::GetTempPath()) "$Name-$(Get-Random).ps1"
-    Set-Content -LiteralPath $local -Value $Body -Encoding utf8NoBOM -WhatIf:$false
-    try {
-        $remote = "$RemoteDirectory\$Name.ps1"
-        & ssh $Alias "pwsh -NoLogo -NoProfile -Command `"New-Item -ItemType Directory -Force -Path '$RemoteDirectory' | Out-Null`""
-        if ($LASTEXITCODE -ne 0) { throw "ssh $Alias failed preparing $RemoteDirectory (exit $LASTEXITCODE)" }
-        & scp -q $local "${Alias}:$(& $toPosix $remote)"
-        if ($LASTEXITCODE -ne 0) { throw "scp to $Alias failed (exit $LASTEXITCODE)" }
-        $command = "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File '$remote'"
-        $output = if ($PSBoundParameters.ContainsKey('StandardInput')) {
-            $StandardInput | & ssh $Alias $command 2>&1
-        } else {
-            & ssh $Alias $command 2>&1
-        }
-        $exit = $LASTEXITCODE
-        $output | ForEach-Object { Write-Host "  $_" }
-        & ssh $Alias "pwsh -NoLogo -NoProfile -Command `"Remove-Item -LiteralPath '$remote' -Force -ErrorAction SilentlyContinue`"" | Out-Null
-        if ($exit -ne 0) { throw "$Name failed on $Alias (exit $exit). See the lines above." }
-        return @($output | ForEach-Object { "$_" })
-    } finally {
-        Remove-Item -LiteralPath $local -Force -ErrorAction SilentlyContinue -WhatIf:$false
-    }
+$sitePath = Join-Path (Split-Path -Parent $PSScriptRoot) "config\site-$SshAlias.json"
+$site = Get-Content -Raw -LiteralPath $sitePath -Encoding utf8 | ConvertFrom-Json
+$installRoot = [string] $site.install.root
+$onboardInstanceId = [string] $site.wireToGate.onboardInstanceId
+if ([string]::IsNullOrWhiteSpace($installRoot) -or $onboardInstanceId -notmatch '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') {
+    throw "$sitePath lacks install.root or a wireToGate.onboardInstanceId UUID. Nothing was changed."
 }
-
-# --------------------------------------------------------------- remote bodies ---
-
-# Shared opening of every remote body: read the proof from standard input when the
-# mode needs one. 64 lowercase hex characters, as generated below; anything else is
-# refused before a change, so a broken pipe can never write an empty proof.
-$readProof = @'
-$proof = [Console]::In.ReadLine()
-if ($null -eq $proof -or $proof -notmatch '^[0-9a-f]{64}$') { throw 'PROOF_NOT_RECEIVED: no well-formed proof on standard input. Nothing was changed.' }
-'@
-
-function New-VehicleBody {
-    param([bool] $Open)
-    $enabled = $Open.ToString().ToLowerInvariant()
-    return @"
-`$ErrorActionPreference = 'Stop'
-Set-StrictMode -Version 3.0
-$(if ($Open) { $readProof } else { '' })
-`$settingsPath = '$installRoot\appsettings.json'
-if (-not (Test-Path -LiteralPath `$settingsPath)) {
-    throw "No onboard installation at $installRoot -- deploy it first with 06-deploy-onboard-hmi.ps1. Nothing was changed."
-}
-# The client reads the file and the variable at start; changing either under a
-# running client takes effect at a restart nobody asked for.
-if (@(Get-Process -Name 'SQCD.Agv.Wpf' -ErrorAction SilentlyContinue).Count -gt 0) {
-    throw 'SQCD.Agv.Wpf is running on the vehicle. Close it before changing the recovery window. Nothing was changed.'
-}
-
-`$settings = Get-Content -Raw -LiteralPath `$settingsPath | ConvertFrom-Json
-`$settings.wireToGate.recoveryResumeEnabled = [bool]::Parse('$enabled')
-`$settings | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath `$settingsPath -Encoding utf8NoBOM
-`$readBack = (Get-Content -Raw -LiteralPath `$settingsPath | ConvertFrom-Json).wireToGate.recoveryResumeEnabled
-"recoveryResumeEnabled: `$readBack"
-if ([string] `$readBack -ne '$(if ($Open) { 'True' } else { 'False' })') { throw "recoveryResumeEnabled read back as `$readBack." }
-
-if (`$$Open) {
-    [Environment]::SetEnvironmentVariable('$vehicleVariable', `$proof, 'Machine')
-    "$vehicleVariable set (machine scope, value not shown)"
-} else {
-    # [NullString]::Value, not `$null: `$null reaches a .NET string parameter as ""
-    # and writes an empty REG_SZ instead of deleting (agv01, 2026-09-10).
-    [Environment]::SetEnvironmentVariable('$vehicleVariable', [NullString]::Value, 'Machine')
-    "$vehicleVariable removed"
-}
-"@
-}
-
-# Mode: 'check' reads only; 'set' and 'remove' change the entry and restart the
-# service, after the same checks. Every refusal throws before a change.
-function New-ServerBody {
-    param([ValidateSet('check', 'set', 'remove')][string] $Mode, [bool] $AllowConnected)
-    $needsProof = $Mode -ne 'remove'
-    return @"
-`$ErrorActionPreference = 'Stop'
-Set-StrictMode -Version 3.0
-$(if ($needsProof) { $readProof } else { '' })
-`$serviceName = '$ServiceName'
-if (`$serviceName.Trim() -ieq '8005 AGV ControlServer') { throw 'Refusing the MVP service. Nothing was changed.' }
-`$key = "SYSTEM\CurrentControlSet\Services\`$serviceName"
-`$registryKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(`$key, `$false)
-if (`$null -eq `$registryKey) { throw "SERVICE_MISSING: no service '`$serviceName'. Nothing was changed." }
-try { [string[]] `$environment = @(`$registryKey.GetValue('Environment', [string[]] @())) } finally { `$registryKey.Close() }
-`$environment = @(`$environment | Where-Object { `$_ })
-`$current = @(`$environment | Where-Object { `$_.StartsWith('$serverVariable=', [StringComparison]::OrdinalIgnoreCase) })
-`$entry = if (`$current.Count -eq 0) { 'absent' } elseif ($(if ($needsProof) { "`$current.Count -eq 1 -and `$current[0].Substring($($serverVariable.Length + 1)) -ceq `$proof" } else { '$false' })) { 'same' } else { 'different' }
-"ENTRY=`$entry"
-
-`$wanted = '$Mode'
-if (`$wanted -eq 'check') { `$wanted = 'set' }
-if ((`$wanted -eq 'set' -and `$entry -eq 'same') -or (`$wanted -eq 'remove' -and `$entry -eq 'absent')) {
-    'NO_CHANGE: the service already holds what this window needs; no restart.'
-    return
-}
-
-# ---- before a restart: the service, the dispatch gate, the connected vehicles ----
-`$service = Get-CimInstance -ClassName Win32_Service -Filter "Name='`$serviceName'"
-if (`$service.State -notin @('Running', 'Stopped')) { throw "SERVICE_NOT_SETTLED: '`$serviceName' is `$(`$service.State). Nothing was changed." }
-`$configurationPath = '$ServerInstallRoot\appsettings.Production.json'
-if (-not (Test-Path -LiteralPath `$configurationPath -PathType Leaf)) { throw "INSTALLED_CONFIGURATION_MISSING: `$configurationPath. Nothing was changed." }
-try { `$configuration = [IO.File]::ReadAllText(`$configurationPath) | ConvertFrom-Json -AsHashtable -Depth 12 } catch { `$configuration = `$null }
-if (`$configuration -isnot [System.Collections.IDictionary]) { throw "INSTALLED_CONFIGURATION_UNREADABLE: `$configurationPath. Nothing was changed." }
-`$dispatch = `$configuration['RiotCreateDispatch']
-if (`$dispatch -isnot [System.Collections.IDictionary] -or `$dispatch['enabled'] -isnot [bool]) { throw 'DISPATCH_GATE_UNKNOWN: RiotCreateDispatch.enabled is not a boolean in the installed configuration. Nothing was changed.' }
-if (`$dispatch['enabled']) { throw 'DISPATCH_GATE_OPEN: RiotCreateDispatch.enabled is true. Close the gate (20-set-control-server-parallel-dispatch-gate.ps1) before a window restarts the service. Nothing was changed.' }
-if (@(`$environment | Where-Object { `$_ -like 'RiotCreateDispatch__*' }).Count -gt 0) { throw 'DISPATCH_GATE_OVERRIDDEN: a RiotCreateDispatch__* entry in the service Environment overrides the file. Nothing was changed.' }
-if (`$service.State -eq 'Running') {
-    `$started = (Get-Process -Id `$service.ProcessId -ErrorAction SilentlyContinue)?.StartTime
-    if (`$null -eq `$started) { throw 'SERVICE_START_TIME_UNKNOWN. Nothing was changed.' }
-    if ([IO.File]::GetLastWriteTimeUtc(`$configurationPath) -gt `$started.ToUniversalTime()) {
-        throw 'CONFIGURATION_CHANGED_SINCE_START: the file was written after the process started, so it does not say what the process does. Nothing was changed.'
-    }
-}
-`$connected = @(Get-NetTCPConnection -LocalPort $OnboardPort -State Established -ErrorAction SilentlyContinue)
-"CONNECTED_VEHICLES=`$(`$connected.Count)"
-if (`$connected.Count -gt 0) {
-    `$from = (@(`$connected | ForEach-Object { `$_.RemoteAddress } | Sort-Object -Unique) -join ', ')
-    if (`$$AllowConnected) {
-        "WARNING: CONNECTED_VEHICLES (`$from): the restart drops them into recovery and stops the supervision of their journeys."
-    } else {
-        throw "CONNECTED_VEHICLES: `$(`$connected.Count) connection(s) on port $OnboardPort from `$from. A restart drops them into recovery. Stop their clients, or pass -AllowConnectedVehicles once the field has accepted it. Nothing was changed."
-    }
-}
-if ('$Mode' -eq 'check') { 'CHECK_PASSED'; return }
-
-# ---- the change ----
-`$writable = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(`$key, `$true)
-try {
-    # Every other entry stays, in its order: the MES secret, the onboard and
-    # fault-recovery credentials live in this same value.
-    `$kept = @(`$environment | Where-Object { -not `$_.StartsWith('$serverVariable=', [StringComparison]::OrdinalIgnoreCase) })
-    [string[]] `$next = if ('$Mode' -eq 'set') { @(`$kept) + "$serverVariable=`$proof" } else { @(`$kept) }
-    `$writable.SetValue('Environment', `$next, [Microsoft.Win32.RegistryValueKind]::MultiString)
-    "service environment now carries: `$(@(`$next | ForEach-Object { (`$_ -split '=', 2)[0] }) -join ', ')"
-} finally {
-    `$writable.Close()
-}
-if (`$service.State -eq 'Running') {
-    Restart-Service -Name `$serviceName -Force
-    "service `$serviceName is `$((Get-Service -Name `$serviceName).Status)"
-} else {
-    "service `$serviceName is Stopped and left stopped; it reads the entry when it starts"
-}
-"@
-}
-
-# ----------------------------------------------------------------------- store ---
 
 function Read-Store {
     if (-not (Test-Path -LiteralPath $SecretPath -PathType Leaf)) { return $null }
-    $stored = Import-Clixml -LiteralPath $SecretPath
-    return @{
-        Proof = [System.Net.NetworkCredential]::new('', $stored['RecoveryProof']).Password
-        OpenVehicles = [string[]] @($stored['OpenVehicles'] | Where-Object { $_ })
+    try {
+        $stored = Import-Clixml -LiteralPath $SecretPath
+        $proof = [System.Net.NetworkCredential]::new('', $stored['RecoveryProof']).Password
+    } catch {
+        throw ("STORE_UNREADABLE: $SecretPath cannot be decrypted by this account on this machine ($($_.Exception.Message)). " +
+            'Nothing was changed. See USAGE.md, "v2 线的恢复窗口", for closing the window by hand.')
     }
+    if ($proof -cnotmatch '^[0-9a-f]{64}$') { throw "STORE_UNREADABLE: $SecretPath holds no well-formed proof. Nothing was changed." }
+    return @{ Proof = $proof; OpenVehicles = [string[]] @($stored['OpenVehicles'] | Where-Object { $_ }) }
 }
 
 function Write-Store {
@@ -308,89 +158,149 @@ function Write-Store {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SecretPath) -WhatIf:$false | Out-Null
     @{
         RecoveryProof = (ConvertTo-SecureString $Proof -AsPlainText -Force)
-        OpenVehicles = [string[]] @($OpenVehicles | Sort-Object -Unique)
+        OpenVehicles = [string[]] @($OpenVehicles | Where-Object { $_ } | Sort-Object -Unique)
     } | Export-Clixml -LiteralPath $SecretPath -WhatIf:$false
 }
 
 $store = Read-Store
 $others = @($store ? @($store.OpenVehicles | Where-Object { $_ -ne $SshAlias }) : @())
+$last = $others.Count -eq 0
 
-# ------------------------------------------------------------------------ plan ---
+# -------------------------------------------------------------------- remote ---
 
-$serverMode = if (-not $Revert) { 'set' } elseif ($others.Count -eq 0) { 'remove' } else { 'keep' }
-$action = $Revert ? 'Close' : 'Open'
-Write-Step "$action the v2 recovery window on $SshAlias (vehicle install root $installRoot)"
+function Invoke-Remote {
+    param([Parameter(Mandatory)][string] $Alias, [Parameter(Mandatory)][string] $Script, [Parameter(Mandatory)][hashtable] $Request)
+    $line = $Request | ConvertTo-Json -Compress
+    $output = $line | & ssh $Alias "pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '$Script'" 2>&1
+    $exit = $LASTEXITCODE
+    $output | ForEach-Object { Write-Host "  $_" }
+    if ($exit -ne 0) { throw "$(Split-Path -Leaf $Script) refused or failed on $Alias (exit $exit). See the lines above." }
+    return @($output | ForEach-Object { "$_" })
+}
+
+function Copy-Staged {
+    param([string] $Alias, [string] $Directory, [string[]] $Files)
+    & ssh $Alias "pwsh -NoLogo -NoProfile -NonInteractive -Command `"New-Item -ItemType Directory -Force -Path '$Directory' | Out-Null`""
+    if ($LASTEXITCODE -ne 0) { throw "ssh $Alias failed preparing $Directory (exit $LASTEXITCODE). Nothing was changed." }
+    foreach ($file in $Files) {
+        & scp -q $file "${Alias}:$(& $toPosix "$Directory\$(Split-Path -Leaf $file)")"
+        if ($LASTEXITCODE -ne 0) { throw "scp of $(Split-Path -Leaf $file) to $Alias failed (exit $LASTEXITCODE). Nothing was changed." }
+    }
+}
+
+$module = Join-Path $PSScriptRoot 'V2RecoveryWindow.psm1'
+$serverScript = "$serverStaging\server-v2-recovery-window.ps1"
+$vehicleScript = "$vehicleStaging\agv-v2-recovery-window.ps1"
+$vehicleRequest = { param([string] $State, [string] $Proof)
+    $r = @{ state = $State; installRoot = $installRoot; onboardInstanceId = $onboardInstanceId }
+    if ($Proof) { $r['proof'] = $Proof }
+    $r
+}
+$serverRequest = { param([string] $Mode, [string] $Target, [string] $Proof)
+    $r = @{ mode = $Mode; allowConnectedVehicles = $AllowConnectedVehicles.IsPresent }
+    if ($Target) { $r['target'] = $Target }
+    if ($Proof) { $r['proof'] = $Proof }
+    $r
+}
+
+# ---------------------------------------------------------------------- plan ---
+
+$action = $Status ? 'Report' : ($Revert ? 'Close' : 'Open')
 $recorded = $store ? (@($store.OpenVehicles) -join ', ') : $null
-Write-Step ("Open vehicles recorded in the store: {0}" -f ($null -eq $store ? '(no store)' : ($recorded ? $recorded : '(none)')))
-Write-Step ("Vehicle: wireToGate.recoveryResumeEnabled -> {0}; {1} {2}" -f (-not $Revert).ToString().ToLowerInvariant(), $vehicleVariable, ($Revert ? 'removed' : 'set'))
-Write-Step ("Server {0}, service '{1}': {2}" -f $ServerSshAlias, $ServiceName, $(switch ($serverMode) {
-            'set' { "$serverVariable set to the stored proof if it differs (restart after the checks)" }
-            'remove' { "$serverVariable removed if present (restart after the checks)" }
-            'keep' { "$serverVariable kept: still open on $($others -join ', ')" }
-        }))
-Write-Step ("Proof: {0}" -f $(if ($Revert) { 'not needed' } elseif ($store) { "reused from $SecretPath" } else { "to be generated and stored at $SecretPath" }))
+Write-Step "$action the v2 recovery window on $SshAlias (site $(Split-Path -Leaf $sitePath), install root $installRoot)"
+Write-Step "Server: $serverAlias, the instance recorded in $opsRoot\installed-instance.json; control-server modules from $commit"
+Write-Step ("Store {0}: {1}" -f $SecretPath, ($null -eq $store ? '(none)' : "open on $($recorded ? $recorded : '(no vehicle)')"))
+if (-not $Status) {
+    Write-Step ("Vehicle: CONTROL_SERVER_RECOVERY_PROOF {0}; recoveryResumeEnabled {1}" -f
+        ($Revert ? 'removed after the switch is off' : 'set and read back before the switch'), (-not $Revert).ToString().ToLowerInvariant())
+    Write-Step ("Server: {0}" -f $(if (-not $Revert) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF set after the vehicle (no restart when it already holds the proof)' }
+            elseif ($last) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF removed after the vehicle' }
+            else { "untouched: still open on $($others -join ', ')" }))
+    Write-Step ("Proof: {0}" -f $(if ($Revert) { 'not needed' } elseif ($store) { 'reused from the store' } else { 'to be generated and stored' }))
+}
 
-if (-not $PSCmdlet.ShouldProcess("$SshAlias and $ServiceName on $ServerSshAlias", "$action the v2 recovery window")) {
+if (-not $PSCmdlet.ShouldProcess("$SshAlias and the V2 service on $serverAlias", "$action the v2 recovery window")) {
     Write-Step 'WhatIf: stopping before any machine is reached or the store is written.'
     return
 }
 
-# ----------------------------------------------------------------------- proof ---
+# ------------------------------------------------------------------- staging ---
+
+# Staged files carry no secret: the request, proof included, goes on standard input. The server is
+# staged only when this run needs it, the vehicle only once the server check has passed.
+$stageServer = {
+    Copy-Staged -Alias $serverAlias -Directory $serverStaging -Files @(
+        (Join-Path $parallelScripts 'ParallelInstance.psm1'), (Join-Path $parallelScripts 'ParallelHost.psm1'),
+        $module, (Join-Path $PSScriptRoot 'server-v2-recovery-window.ps1'))
+}
+$stageVehicle = { Copy-Staged -Alias $SshAlias -Directory $vehicleStaging -Files @($module, (Join-Path $PSScriptRoot 'agv-v2-recovery-window.ps1')) }
+
+# -------------------------------------------------------------------- status ---
+
+if ($Status) {
+    $proof = $store ? $store.Proof : $null
+    & $stageVehicle
+    & $stageServer
+    Write-Step "Vehicle $SshAlias"
+    Invoke-Remote -Alias $SshAlias -Script $vehicleScript -Request (& $vehicleRequest 'Status' $proof) | Out-Null
+    Write-Step "Server $serverAlias"
+    Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'status' $null $proof) | Out-Null
+    Write-Step ("Compare with the store: {0}. 'same' means equal to the stored proof; 'different' on either end, or an end that disagrees with the store, is a residue -- run the open or -Revert command again." -f
+        ($null -eq $store ? 'no store, so both ends should read absent and the switch False' : "open on $($recorded ? $recorded : '(no vehicle)')"))
+    return
+}
+
+# --------------------------------------------------------------------- proof ---
 
 $proof = $null
 if (-not $Revert) {
     if ($store) {
         $proof = $store.Proof
     } else {
-        # 32 bytes, hex: it travels through a pipe, a registry MultiString and a JSON payload.
-        $bytes = [byte[]]::new(32)
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-        $proof = [Convert]::ToHexString($bytes).ToLowerInvariant()
+        # 32 bytes, hex: it travels through JSON, a registry MultiString and a protocol payload.
+        $proof = [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant()
         Write-Store -Proof $proof -OpenVehicles @()
         $store = Read-Store
         Write-Step "Generated a new proof and stored it at $SecretPath"
     }
 }
 
-# ----------------------------------------------------------------------- apply ---
+# --------------------------------------------------------------------- apply ---
 
-# Open: the server is checked first (read-only), so a refusal there leaves the
-# vehicle untouched; then the vehicle; then the server entry. Close: the vehicle
-# first, so its client cannot start on a proof the server no longer holds.
 if (-not $Revert) {
-    Write-Step "Server check on $ServerSshAlias"
-    Invoke-RemoteScript -Alias $ServerSshAlias -Body (New-ServerBody -Mode 'check' -AllowConnected $AllowConnectedVehicles.IsPresent) `
-        -Name 'v2-recovery-window-server-check' -RemoteDirectory "$ServerOpsRoot\recovery-window" -StandardInput $proof | Out-Null
-}
-
-Write-Step "Vehicle half on $SshAlias"
-$vehicleArguments = @{ Alias = $SshAlias; Body = (New-VehicleBody -Open (-not $Revert)); Name = 'v2-recovery-window-vehicle'; RemoteDirectory = $StagingRoot }
-if (-not $Revert) { $vehicleArguments['StandardInput'] = $proof }
-Invoke-RemoteScript @vehicleArguments | Out-Null
-
-if ($serverMode -ne 'keep') {
-    Write-Step "Server half on $ServerSshAlias"
-    $serverArguments = @{ Alias = $ServerSshAlias; Body = (New-ServerBody -Mode $serverMode -AllowConnected $AllowConnectedVehicles.IsPresent); Name = 'v2-recovery-window-server'; RemoteDirectory = "$ServerOpsRoot\recovery-window" }
-    if ($serverMode -eq 'set') { $serverArguments['StandardInput'] = $proof }
-    Invoke-RemoteScript @serverArguments | Out-Null
-}
-
-# ----------------------------------------------------------------------- after ---
-
-if ($Revert) {
-    if ($serverMode -eq 'remove') {
-        Remove-Item -LiteralPath $SecretPath -Force -ErrorAction SilentlyContinue -WhatIf:$false
-        Write-Step 'Recovery window closed on the last open vehicle. Server entry removed, stored proof deleted.'
-    } else {
-        $remaining = Read-Store
-        Write-Store -Proof $remaining.Proof -OpenVehicles $others
-        Write-Step "Recovery window closed on $SshAlias. Still open on $($others -join ', '); the server entry stays."
-    }
-} else {
+    & $stageServer
+    Write-Step "Server check on $serverAlias (read-only)"
+    Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'check' 'set' $proof) | Out-Null
+    & $stageVehicle
+    Write-Step "Vehicle half on $SshAlias"
+    Invoke-Remote -Alias $SshAlias -Script $vehicleScript -Request (& $vehicleRequest 'Open' $proof) | Out-Null
     Write-Store -Proof $proof -OpenVehicles (@($store.OpenVehicles) + $SshAlias)
+    Write-Step "Server half on $serverAlias"
+    Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'set' $null $proof) | Out-Null
     Write-Step "Recovery window open on $SshAlias. The client is still stopped -- starting it is a field step."
     Write-Host ''
-    Write-Host '  Close it when the window ends:' -ForegroundColor DarkGray
-    Write-Host "    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias $SshAlias -Revert" -ForegroundColor DarkGray
-    Write-Host '  Re-run it after re-deploying the onboard client, or after a first install of the V2 service.' -ForegroundColor DarkGray
+    Write-Host '  Start the client with 10-start-onboard-stack.ps1 (field authorization), not by a double click:' -ForegroundColor DarkGray
+    Write-Host '  a client started from an Explorer that predates the variable does not see it and refuses to start.' -ForegroundColor DarkGray
+    Write-Host '  Close the window when it ends:' -ForegroundColor DarkGray
+    Write-Host "    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias $SshAlias -ControlServerRepository <checkout> -Revert" -ForegroundColor DarkGray
+    Write-Host '  Re-run the open after re-deploying the onboard client, or after a first install of the V2 service.' -ForegroundColor DarkGray
+    return
 }
+
+if ($last) {
+    & $stageServer
+    Write-Step "Server check on $serverAlias (read-only)"
+    Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'check' 'remove' $null) | Out-Null
+}
+& $stageVehicle
+Write-Step "Vehicle half on $SshAlias"
+Invoke-Remote -Alias $SshAlias -Script $vehicleScript -Request (& $vehicleRequest 'Close' $null) | Out-Null
+if ($store) { Write-Store -Proof $store.Proof -OpenVehicles $others }
+if (-not $last) {
+    Write-Step "Recovery window closed on $SshAlias. Still open on $($others -join ', '); the server entry stays."
+    return
+}
+Write-Step "Server half on $serverAlias"
+Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'remove' $null $null) | Out-Null
+Remove-Item -LiteralPath $SecretPath -Force -ErrorAction SilentlyContinue -WhatIf:$false
+Write-Step 'Recovery window closed on the last open vehicle. Server entry removed, stored proof deleted.'
