@@ -511,6 +511,127 @@ agv01 的放行记录是 [8005-agv-program#44 的这条留言](https://github.co
 它逐个叶子比对改前改后，除这两个字段外有任何变化就还原备份并失败；备份留在 `C:\8005\appsettings-backup-automation-face-*.json`。
 **窗口内重新部署之后两个都要重跑**——部署不报错，面与恢复入口只是无声消失。
 
+`14` 只管 MVP 线（默认 `agv01` 加 MVP 服务 `8005 AGV ControlServer`），**不要拿它开 agv02／agv03**。v2 线用下面的 `18`。
+
+### v2 线的恢复窗口：`18-set-v2-recovery-window.ps1`
+
+给 agv02／agv03 和 factory01 上的 v2 并行实例（服务 `8005 AGV ControlServer V2`）开、关恢复窗口（8005-workspace#25）。
+窗口一开，车载屏上所有要「已验证管理员」的入口才会出现：「确认清桩」「充电后返回服务」、各个恢复续作入口。
+
+**两端各写什么**（2026-10-12 读代码核实，cs `fp/v2-impl` 2138f7b9、hmi `w2g/fp-v2-impl` 895951f）：
+
+| 位置 | 写什么 | 谁读 |
+| --- | --- | --- |
+| 车上 `C:\8005\OnboardHmi\appsettings.json` | `wireToGate.recoveryResumeEnabled` | 车载端的维护开关；开着而缺下一行，Production 下客户端起不来 |
+| 车上机器级环境变量 | `CONTROL_SERVER_RECOVERY_PROOF` | 车载端：入口要它非空；恢复续作把它的值作为 `authenticationProof` 发给服务端 |
+| v2 服务注册表 `Environment` | `CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF` | 服务端核对恢复续作送来的值，必须逐字节相同；没有就一律拒绝 |
+
+- 2026-10-12 只读查过 v2 服务 `Environment` 的变量名：**没有**第三行那一条。所以在本脚本第一次开窗之前，v2 上的恢复续作一律被拒。
+- 两台车**共用一个值**（服务端只有一个核对变量），存在控制端 DPAPI：`%LOCALAPPDATA%\AgvOpsSecrets\w2g-v2-recovery-window.xml`，
+  键 `RecoveryProof`，同一文件记着当前哪几台车开着窗。与 `14` 的存储分开。值从不打印、不进任何文件或命令行，
+  装在一行 JSON 请求里经 ssh 标准输入送到两端。
+- 与 `CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL`（DPAPI 键 `V2FaultRecoveryCredential`）**不是同一个东西**：那是服务端
+  Host 人工接口的 Bearer 凭据，本脚本不碰。
+
+**「确认清桩」另外还要两条，归 v2 部署定义管、不归本脚本**（见 `wire-to-gate-parallel-cd.md` 第 7.1 节）：
+
+1. 实例定义里 `fieldOperatorRoles.onboardClearanceEntryDeclared = true`，否则服务端不受理车载端的清桩请求；
+2. 车上的 `CONTROL_SERVER_OPERATOR_ID` 在名单 `field-operator-roles.json` 里持有 R-11 或 R-13，否则服务端答 `REJECTED`。
+
+清桩请求本身不带凭据——车载端只检查凭据「配了」，服务端只按工号查名单。所以只开了窗而这两条没满足，入口会出现、但按了被拒。
+
+**开窗前准备**（2026-10-12 调度确认）：
+
+1. **一份干净的 control-server 检出**，作为必填参数 `-ControlServerRepository` 传进去，与 `20` 号闸门脚本一样。
+   服务端那一半用的 `ParallelInstance.psm1`、`ParallelHost.psm1` 从它复制，有未提交的改动就拒绝，所以服务器上跑的
+   就是它 `HEAD` 那一版。
+2. **v2 实例上没有在途旅程**（实例库里所有旅程都是 `Completed`）。有一条没走完，开窗、关窗写服务端那一步都拒绝，
+   **而且没有开关可以绕过**：重启会停掉那条旅程的故障监看。有卡住的旅程，先把它处理完再开窗。
+3. 派车闸门关着（`20-set-control-server-parallel-dispatch-gate.ps1 -State Closed`），车载端客户端停着。
+
+**怎么开、怎么关、怎么查**（车载端客户端必须停着；开、关是现场操作，每次由用户授权；`-Status` 不改两端状态）：
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出> -WhatIf
+```
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出>
+```
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出> -Revert
+```
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出> -Revert -VehicleOnly
+```
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <control-server 检出> -Status
+```
+
+- `-SshAlias` 必填，只接受 `agv02`、`agv03`。服务器固定是 factory01，没有参数可改；服务名、安装根、车载端口都由服务端从
+  `D:\zhengyushao\control-server-v2-ops\installed-instance.json`（19 号安装时记下的定义）读，用的是 control-server 自己的
+  模块（`ParallelInstance.psm1`、`ParallelHost.psm1`），和 `20` 号闸门脚本同一做法：从 `-ControlServerRepository`（必须干净）
+  复制到 `<opsRoot>\recovery-window\<commit>`。MVP 的服务名、路径、端口在那里就被拒绝。
+- 车载端那一半先核对车的身份：车上 `appsettings.json` 的 `wireToGate.onboardInstanceId` 必须等于 `config/site-<别名>.json`
+  里的，否则拒绝（三台车是同一个镜像克隆出来的，别名之外没有别的可靠区分）。
+- `-WhatIf` 只打印计划，不连任何机器、不写存储。
+
+**顺序与拒绝**：
+
+- 开窗：服务端只读检查 → 车（先写变量并读回，**再**打开开关）→ 存储记下这台车 → 服务端写那一条、读回、重启 v2 服务。
+  服务端已有同一个值（第二台车开窗）就不写、不重启。
+- 关窗：是最后一台开着的车时，先服务端只读检查 → 车（先关开关，**再**删变量）→ 存储去掉这台车 → 服务端删那一条、重启 →
+  删存储。另一台还开着时只动这台车，factory01 不碰。
+- **关最后一台需要 v2 空闲**：服务端那一步要重启服务，所以和开窗一样，有车连着或有没走完的旅程就拒绝，而且拒绝发生在碰车
+  之前。v2 在生产上跑时，收工时多半不空闲——另一台车连着、库里有旅程。这时用 `-Revert -VehicleOnly`：只关这台车，服务端
+  那一条留着，存储里记成残留（凭据还在、没有车开着）。没有车持有的服务端凭据不起作用，而车上的窗一直开着就超出了授权的
+  窗口期，所以**收工时先保证车上关掉**。等 v2 空闲时，对任一台车再跑一次不带 `-VehicleOnly` 的 `-Revert`，删掉服务端那一条。
+  服务端检查拒绝时，脚本的报错会直接给出这条 `-VehicleOnly` 命令。
+- 服务端在写之前拒绝（不写、不重启）的情况：派车闸门开着或判断不了（配置缺失、读不出、在进程启动后被改过，与安装脚本
+  同一道检查）；服务 `Environment` 里有 `RiotCreateDispatch__*`；实例库里有没走完（非 `Completed`）的旅程，或库读不出；
+  有车连在车载端口上，或连接读不出。旅程那条没有开关；连接那条在现场确认可以接受另一台车断线重连进恢复时，可以加
+  `-AllowConnectedVehicles` 降为警告。重启会让连着的车断线进恢复，它们的故障监看也会停，所以默认拒绝。
+
+**检查之后、写入之前仍可能留下残留**。只读检查和真正写入之间隔着车载端那一步（几十秒到几分钟）。这期间如果有车连上、
+有旅程开始，写入那一步会拒绝，而车那一半已经做完：
+
+| 情形 | 留下的状态 | 存储记的 | 怎么收拾 |
+| --- | --- | --- | --- |
+| 开窗时服务端写入被拒 | 车已开窗，服务端没有那一条（清桩入口可用，恢复续作被拒） | 这台车开着 | 条件满足后再跑一次开窗命令补上；或 `-Revert` 两端都关 |
+| 关最后一台时服务端写入被拒，或用了 `-VehicleOnly` | 车已关窗，服务端那一条还在 | 没有车开着，凭据还留着 | v2 空闲时对任一台车再跑一次 `-Revert` |
+| 开窗时车载端写完变量、开开关前失败 | 车上有变量、开关还关着（车能正常启动，入口不出现） | 这台车没开 | 再跑一次开窗命令；或 `-Revert` 把变量删掉 |
+| 关窗时车载端关了开关、删变量前失败 | 开关已关、车上变量还在（车能正常启动，入口不出现） | 这台车开着 | 再跑一次 `-Revert` |
+
+车载端那两种都不会让车起不来：开关始终是最后打开、最先关掉的。
+
+拿不准时先跑 `-Status`。它不改两端的开关、变量和服务端那一条，也不改存储，只往两端的暂存目录复制脚本（与开、关时复制的是
+同一批文件）。它读车上的开关与变量、服务端那一条，各自与存储里的值比（`same`／`different`／`absent`），在控制端算出结论，
+打印一行 `RESIDUE: none`，或逐条列出哪一端与存储不符、该跑哪条命令收拾。
+
+**开窗之后用 `10-start-onboard-stack.ps1` 启动车载端，不要在车上双击。**变量是从 ssh 会话直接写进机器级变量的注册表键
+（`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`，删除用 `DeleteValue`，不会留下空值）的，桌面上已经在跑的
+Explorer 收不到更新，从它双击起的客户端看不到这个变量：开关是开的、变量却没有，Production 下直接拒绝启动。`10` 用交互会话里的
+计划任务启动，按推理会拿到新环境，**第一次现场开窗时要确认一次**；不行就注销再登录。
+
+**要重跑的两种情况**：窗口内**重新部署车载端**（`06` 把开关渲染回 `false`，车上变量还在，入口无声消失）；**首次安装或卸载重装
+v2 服务**（服务注册表 `Environment` 会重建，服务端那一条丢失，恢复续作被拒）。普通升级保留 `Environment` 里的其他条目
+（control-server `scripts/parallel/ParallelHost.psm1` 的 `Invoke-ParallelInstanceConfigurationStep`：只重写本实例自己的凭据与每车投影凭据，
+其余条目原样保留）。
+
+**存储读不出时**（换了账号或机器，DPAPI 解不开），脚本连关窗都会拒绝（`STORE_UNREADABLE`）。手工关窗：车上停掉客户端，把
+`appsettings.json` 的 `wireToGate.recoveryResumeEnabled` 改回 `false`，再删机器级变量 `CONTROL_SERVER_RECOVERY_PROOF`
+（先关开关、再删变量）；服务端从 v2 服务注册表 `Environment` 里删掉 `CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=` 那一行、
+保留其余各行，在闸门关着、没有在途旅程时重启 v2 服务；最后删掉那个 `.xml`。这是现场操作，同样要授权。
+
+离线自检：`pwsh -File remote-ops/onboard-hmi/scripts/Test-SetV2RecoveryWindow.ps1 -ControlServerRepository <control-server 检出>`。
+假 ssh/scp 跑 18 号的全流程；车载端与服务端两段逻辑连同生产上用的操作组装（`New-V2VehicleActions`、`New-V2ServerActions`）
+在临时安装目录、HKCU 下的临时注册表键、本机回环连接和真 SQLite 库上真跑（SQLite 程序集从本机 NuGet 缓存借）。替换掉的只有
+两处：服务重启换成记录，提权判断换成恒为真；这两处的默认实现由静态断言钉住原文（重启的目标只能是传入的 v2 服务名）。用例在
+子进程里跑，结束后临时目录由外层进程删掉。不连任何机器、不读真存储。
+
 ### 看屏上显示什么：`17-capture-hmi-screen.ps1`
 
 只读取一次车载端屏：全屏截图、每个车载端窗口单独的图、UI Automation 控件树与可见文字（JSON）。
