@@ -32,10 +32,33 @@
     pwsh -File remote-ops/onboard-hmi/scripts/Test-SetV2RecoveryWindow.ps1 -ControlServerRepository <checkout>
 #>
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string] $ControlServerRepository)
+param(
+    [Parameter(Mandatory = $true)][string] $ControlServerRepository,
+
+    # Internal: set by the outer run. The cases run in a child process, because the journey reader
+    # loads e_sqlite3.dll from the temporary install root and a loaded native DLL cannot be deleted
+    # while its process lives; the outer process removes the directory after the child has exited.
+    [string] $InnerWork
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
+
+if (-not $InnerWork) {
+    $outerWork = Join-Path ([IO.Path]::GetTempPath()) "test-v2-recovery-window-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    New-Item -ItemType Directory -Force -Path $outerWork | Out-Null
+    try {
+        & pwsh -NoLogo -NoProfile -NonInteractive -File $PSCommandPath -ControlServerRepository $ControlServerRepository -InnerWork $outerWork
+        $code = $LASTEXITCODE
+    } finally {
+        Remove-Item -LiteralPath $outerWork -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $outerWork) {
+        Write-Host "  FAIL  the temporary directory $outerWork could not be removed after the run" -ForegroundColor Red
+        exit 1
+    }
+    exit $code
+}
 
 $script:Passed = 0
 $script:Failed = 0
@@ -47,7 +70,7 @@ function Write-Result {
 
 $target = Join-Path $PSScriptRoot '18-set-v2-recovery-window.ps1'
 $csParallel = Join-Path (Resolve-Path -LiteralPath $ControlServerRepository).Path 'scripts\parallel'
-$work = Join-Path ([IO.Path]::GetTempPath()) "test-v2-recovery-window-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$work = $InnerWork
 $fakeBin = Join-Path $work 'bin'
 $staged = Join-Path $work 'staged'
 $secret = Join-Path $work 'store\w2g-v2-recovery-window.xml'
@@ -338,6 +361,26 @@ exit 0
         -Name "New-V2ServerActions defaults: the V2 service's own key in HKLM" -Detail $defaultServer.Description
     $r = Invoke-Captured { New-V2ServerActions -ServiceName '8005 AGV ControlServer' -InstallRoot 'C:\x' -DataRoot 'C:\y' -OnboardPort 1 }
     Write-Result -Ok ($r.Error -match 'MVP_SERVICE_REFUSED') -Name 'New-V2ServerActions refuses the MVP service name' -Detail $r.All
+
+    # The two defaults every case below replaces -- the restart (with a recorder) and the elevation check
+    # (with { $true }) -- are pinned by their text here, since no case runs them (review L1).
+    $moduleAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'V2RecoveryWindow.psm1'), [ref]$null, [ref]$null)
+    $factory = $moduleAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-V2ServerActions' }, $true)
+    $restartDefault = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$restart' }, $true))
+    Write-Result -Ok ($restartDefault.Count -eq 1 -and $restartDefault[0].Right.Extent.Text -ceq '$RestartService ?? { Restart-Service -Name $ServiceName -Force }.GetNewClosure()') `
+        -Name 'the default restart restarts the service named by -ServiceName, and nothing else' -Detail (@($restartDefault | ForEach-Object { $_.Extent.Text }) -join ' | ')
+    $serviceNameWrites = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ieq '$ServiceName' }, $true))
+    Write-Result -Ok ($serviceNameWrites.Count -eq 0) -Name '... and New-V2ServerActions never reassigns -ServiceName' -Detail (@($serviceNameWrites | ForEach-Object { $_.Extent.Text }) -join ' | ')
+    $restartCalls = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -match 'Restart-Service|Stop-Service|Start-Service' }, $true))
+    Write-Result -Ok ($restartCalls.Count -eq 1 -and $restartCalls[0].Extent.Text -ceq 'Restart-Service -Name $ServiceName -Force') -Name '... and it is the only service control call in New-V2ServerActions' -Detail (@($restartCalls | ForEach-Object { $_.Extent.Text }) -join ' | ')
+    $elevated = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true) | ForEach-Object { $_.KeyValuePairs } |
+            Where-Object { $_.Item1.Extent.Text -ceq 'IsElevated' })
+    Write-Result -Ok ($elevated.Count -eq 1 -and $elevated[0].Item2.Extent.Text -ceq '{ ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }') `
+        -Name 'the default elevation check asks Windows whether this process is an administrator' -Detail (@($elevated | ForEach-Object { $_.Item2.Extent.Text }) -join ' | ')
+    $nonAdmin = -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($nonAdmin) {
+        Write-Result -Ok (-not (& $defaultServer.IsElevated)) -Name '... and, run here unelevated, it says no' -Detail ''
+    }
 
     # The client check, for real: a process named SQCD.Agv.Wpf (a copy of ping.exe) is seen by the default actions.
     $dummyDirectory = Join-Path $work 'dummy-client'

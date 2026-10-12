@@ -610,8 +610,9 @@ v2 服务**（服务注册表 `Environment` 会重建，服务端那一条丢失
 
 离线自检：`pwsh -File remote-ops/onboard-hmi/scripts/Test-SetV2RecoveryWindow.ps1 -ControlServerRepository <control-server 检出>`。
 假 ssh/scp 跑 18 号的全流程；车载端与服务端两段逻辑连同生产上用的操作组装（`New-V2VehicleActions`、`New-V2ServerActions`）
-在临时安装目录、HKCU 下的临时注册表键、本机回环连接和真 SQLite 库上真跑（SQLite 程序集从本机 NuGet 缓存借）；只把服务重启换成
-记录。不连任何机器、不读真存储。
+在临时安装目录、HKCU 下的临时注册表键、本机回环连接和真 SQLite 库上真跑（SQLite 程序集从本机 NuGet 缓存借）。替换掉的只有
+两处：服务重启换成记录，提权判断换成恒为真；这两处的默认实现由静态断言钉住原文（重启的目标只能是传入的 v2 服务名）。用例在
+子进程里跑，结束后临时目录由外层进程删掉。不连任何机器、不读真存储。
 
 ### 看屏上显示什么：`17-capture-hmi-screen.ps1`
 
