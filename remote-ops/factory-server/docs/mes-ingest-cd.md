@@ -87,6 +87,13 @@ pwsh -File remote-ops/factory-server/scripts/13-deploy-mes-ingest-server.ps1 -Ro
 这条路能碰到同实例上的 `SQAGV` 生产库。这个取舍是为了让 CD 不必每次找人提权而做的，
 脚本末尾有收回的语句。
 
+**现状（2026-10-12 补记）：上面两项之后，`agvops` 已于 2026-09-15 提为 sysadmin**（用用户提供的
+`sa` 密码，为读 server-state DMV；`../README.md` 第 5 节），2026-10-11 夜实读
+`IS_SRVROLEMEMBER('sysadmin')` 为 1。**用户 2026-10-12 定不收回、如实记录。**所以现在那把私钥
+经 `agvops` 能直接读写同实例上的一切，包括 `SQAGV`，不必再绕 `ALTER ANY LOGIN`；本节的两项授权
+仍然是首次部署要跑的脚本，但已不是 `agvops` 的权限上限。脚本末尾的收回语句只收回那两项，
+收不回 sysadmin（要收回是 `ALTER SERVER ROLE sysadmin DROP MEMBER`，先问用户）。
+
 ### 3.2 部署凭证
 
 三个秘密存在控制端，DPAPI 加密，只有当前 Windows 用户能解：
