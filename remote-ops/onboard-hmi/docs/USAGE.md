@@ -471,6 +471,18 @@ pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias ag
 | MVP（agv01）：`-OnboardPort 58005 -HealthPort 58007`，MVP 模板 | 照常，与以前渲染结果相同 |
 
 放置到车上之后、写任何凭据之前，车上还会回读一次投影地址：端口必须等于 `-HealthPort`，非 MVP 部署还不能落在 58005／58007。
+车上的放置脚本任何一步抛错（包括这次回读和 IO 回读），`06` 都以非零退出，不再打印 `Staged. NOT started` 那段交接说明。
+
+**agv01 的写法因此变了。**以前给 agv01（MVP）部署可以什么端口都不写，现在不行：不带端口的旧命令会在第一步以
+`PORTS_REQUIRED` 拒绝（不连车）。agv01 固定写 `-OnboardPort 58005 -HealthPort 58007`：
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv01 -OnboardPort 58005 -HealthPort 58007 -WhatIf
+```
+
+同一件事也堵在状态脚本 `remote-ops/status/Get-WireToGateStatus.ps1` 上：它的 `-BaseUrl` 默认是 MVP 的 58007，
+带着存储里的车载端凭据去读投影。`-SiteAlias agv02`／`agv03` 不给 `-BaseUrl`，或给的是 58005／58007，都会在读站点文件、
+ssh 和任何请求之前拒绝（`STATUS_BASEURL_REQUIRED`／`STATUS_MVP_URL_FOR_V2_VEHICLE`）。
 
 干跑会把渲染好的配置整份打出来，并且已经做完全部校验：包哈希、占位符残留、TLS 期残留键
 （`useTls` / `serverCertificateSha256`——**判据是键在不在，不是值是什么**）、`vehicleSafety`

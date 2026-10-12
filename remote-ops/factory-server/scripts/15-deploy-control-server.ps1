@@ -299,7 +299,7 @@ try {
         $manifest = Get-Content -Raw -LiteralPath $manifestFile.FullName | ConvertFrom-Json
         Write-Step "ControlServer commit: $($manifest.components.controlServer.commit)"
         Write-Step "OnboardHmi commit:    $($manifest.components.onboardHmi.commit)"
-        Write-Step 'Deploy that same onboard commit with 06-deploy-onboard-hmi.ps1.'
+        Write-Step "Deploy that same onboard commit with 06-deploy-onboard-hmi.ps1 -SshAlias agv01 -OnboardPort $OnboardPort -HealthPort $HealthPort."
     }
 
     # -------------------------------------------------------------- config ---
@@ -394,7 +394,8 @@ foreach (`$d in @('$OpsRoot', '$StagingRoot')) {
     Write-Step "Deployed. Onboard NDJSON: tcp://${ListenAddress}:$OnboardPort"
     Write-Step "Vehicle safety: http://${HealthBindAddress}:$HealthPort/api/onboard/v1/vehicle-safety"
     Write-Step 'Next: deploy the matching onboard commit with'
-    Write-Step '  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1'
+    # workspace#32: 06 has no port defaults and refuses a call without both.
+    Write-Step "  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv01 -OnboardPort $OnboardPort -HealthPort $HealthPort"
 
 } finally {
     # The staged config held plaintext secrets; do not leave it in %TEMP%.

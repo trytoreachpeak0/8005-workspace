@@ -873,7 +873,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "scp of the placement script failed (exit $LASTEXITCODE)" }
 
     Write-Step 'Placing the payload on the vehicle'
-    $placeOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$remotePlace`"; Remove-Item -LiteralPath `"$remotePlace`" -Force")
+    # workspace#32 review S1: the vehicle's shell exits with its LAST command's status, so the Remove-Item used to turn
+    # a placement that threw (a read-back mismatch, ws#28's and ws#32's alike) into exit 0 and a "Staged" hand-off.
+    # Carry the placement's own exit code past the cleanup.
+    $placeOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$remotePlace`"; `$c = `$LASTEXITCODE; Remove-Item -LiteralPath `"$remotePlace`" -Force; exit `$c")
 
     # ------------------------------------------------------------- hand off ---
 

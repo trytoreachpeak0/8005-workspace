@@ -404,6 +404,22 @@ $command = ($args | Select-Object -Skip 1) -join ' '
 Add-Content -LiteralPath $env:WS28_SSH_LOG -Value "$alias | $command" -WhatIf:$false
 if ($alias -cne $env:WS28_FAKE_ALIAS) { "shim: unexpected alias $alias"; exit 255 }
 if ($command -match 'Get-Process SQCD\.Agv\.Wpf') { 'STOPPED'; exit 0 }
+# workspace#32 review S1: the non -WhatIf run. The staging directory is local; the placement script the deploy script
+# copied there is replaced by a fixture (never run for real: it sets machine-scope variables), and then the deploy
+# script's own command line -- the part under test -- runs in a fresh pwsh, the way the vehicle's sshd runs it.
+if ($command -match "^New-Item -ItemType Directory -Force -Path '[^']+' \| Out-Null; 'ready'$") { 'ready'; exit 0 }
+if ($command -match '^pwsh -NoProfile -File "([^"]+place-onboard\.ps1)"') {
+    $placePath = $Matches[1]
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $placePath) -WhatIf:$false | Out-Null
+    $fixture = ($env:WS32_PLACE_MODE -ceq 'fail') ?
+        "'placed: fixture'; throw 'Placed vehicleSafety.endpoint is on port 58007, expected 58107.'" :
+        "'placed: fixture'; 'vehicle-safety 200: {}'"
+    Set-Content -LiteralPath $placePath -Value $fixture -WhatIf:$false
+    & pwsh -NoProfile -Command $command 2>&1
+    $code = $LASTEXITCODE
+    if (Test-Path -LiteralPath $placePath) { 'shim: the placement script was not removed' }
+    exit $code
+}
 if ($command -match '-EncodedCommand (\S+)') {
     if ($env:WS28_IO_STATE -ceq 'garbage') { 'no state line at all'; exit 0 }
     $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
@@ -417,6 +433,13 @@ if ($command -match '-EncodedCommand (\S+)') {
 "shim: unhandled command: $command"
 exit 255
 '@ | Set-Content -LiteralPath (Join-Path $work 'shim/ssh.ps1')
+    # scp shim (workspace#32 review S1): log the copy and pretend it landed; nothing leaves this machine.
+    @'
+#Requires -Version 7
+Add-Content -LiteralPath $env:WS28_SSH_LOG -Value "scp | $($args -join ' ')" -WhatIf:$false
+if (($args -join ' ') -notmatch [regex]::Escape("$($env:WS28_FAKE_ALIAS):")) { 'shim: unexpected scp target'; exit 255 }
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $work 'shim/scp.ps1')
 
     $env:PATH = (Join-Path $work 'shim') + [IO.Path]::PathSeparator + $env:PATH
     $env:WS28_SSH_LOG = $sshLog
@@ -509,9 +532,30 @@ exit 255
     Write-Result -Ok ($d.Code -eq 0 -and $d.Config.wireToGate.port -eq 58005 -and (Get-Endpoint $d) -ceq 'http://172.19.205.222:58007/api/onboard/v1/vehicle-safety' -and
         $d.Output.Contains('(the MVP service)')) `
         -Name 'E2E MVP template on the MVP pair (agv01 as before): renders 58005 and the 58007 endpoint' -Detail "exit $($d.Code), endpoint $(Get-Endpoint $d)`n$($d.Output)"
+
+    # workspace#32 review S1: past the -WhatIf gate. A placement that throws on the vehicle (a read-back mismatch) must
+    # fail the deployment, not print the "Staged" hand-off. Covers ws#28's IO read-back too: same call.
+    function Invoke-Place([string] $Mode) {
+        $env:WS32_PLACE_MODE = $Mode
+        $env:WS28_IO_STATE = 'real'
+        if (Test-Path -LiteralPath $sshLog) { Remove-Item -LiteralPath $sshLog }
+        $output = & pwsh -NoProfile -File $source -PackagePath $zipV2 -SshAlias $fakeAlias -SitePath $sitePath -SecretPath $secretPath `
+            -OnboardPort 58105 -HealthPort 58107 -StagingRoot (Join-Path $work "staging-$Mode") *>&1 | Out-String
+        $code = $LASTEXITCODE
+        $output = ($output -replace '\x1b\[[0-9;]*m', '') -replace '\r?\n {2,}\| ?', ' '
+        $calls = @((Test-Path -LiteralPath $sshLog) ? (Get-Content -LiteralPath $sshLog) : @())
+        return [pscustomobject]@{ Code = $code; Output = $output; Calls = $calls }
+    }
+    $p = Invoke-Place 'fail'
+    Write-Result -Ok ($p.Code -ne 0 -and -not $p.Output.Contains('Staged') -and $p.Output.Contains('Placed vehicleSafety.endpoint is on port 58007') -and
+        @($p.Calls | Where-Object { $_ -match 'place-onboard\.ps1' }).Count -ge 2 -and -not $p.Output.Contains('was not removed')) `
+        -Name 'E2E a placement that throws on the vehicle: 06 exits non-zero, no "Staged", the placement script is still removed' -Detail "exit $($p.Code)`n$($p.Output)"
+    $p = Invoke-Place 'ok'
+    Write-Result -Ok ($p.Code -eq 0 -and $p.Output.Contains('Staged. NOT started') -and $p.Output.Contains('vehicle-safety 200') -and -not $p.Output.Contains('was not removed')) `
+        -Name 'E2E a placement that succeeds: 06 exits 0 and hands off with "Staged"' -Detail "exit $($p.Code)`n$($p.Output)"
 } finally {
     $env:PATH = $savedPath
-    Remove-Item Env:WS28_SSH_LOG, Env:WS28_FAKE_ALIAS, Env:WS28_IO_STATE, Env:WS28_VEHICLES -ErrorAction SilentlyContinue
+    Remove-Item Env:WS28_SSH_LOG, Env:WS28_FAKE_ALIAS, Env:WS28_IO_STATE, Env:WS28_VEHICLES, Env:WS32_PLACE_MODE -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

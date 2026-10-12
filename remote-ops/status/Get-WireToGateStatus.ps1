@@ -55,7 +55,16 @@
 
 .PARAMETER BaseUrl
     ControlServer's HTTP binding. The service binds a specific NIC address rather
-    than 0.0.0.0, so this is neither localhost nor a wildcard.
+    than 0.0.0.0, so this is neither localhost nor a wildcard. The default is the
+    MVP service's (58007), which serves agv01 only.
+
+    workspace#32. For agv02/agv03, the v2 line's cars, -BaseUrl is required and
+    may not be on the MVP's ports 58005/58007: the default would send the stored
+    onboard credential to the production MVP service, the same shape as the
+    2026-10-12 incident with 06-deploy-onboard-hmi.ps1. Refused before the site
+    file is read, before any ssh and before any HTTP request. The v2 parallel
+    instance is http://172.19.205.222:58107 (pass -ServiceName
+    '8005 AGV ControlServer V2' too, or the service gate reads the MVP's).
 
 .PARAMETER Watch
     Poll forever. Prints the full table on the first pass and again whenever any
@@ -96,6 +105,32 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Assert-StatusTarget {
+    <#
+        workspace#32 review S2. A v2-line vehicle (agv02/agv03) is never checked against the MVP service: -BaseUrl must
+        be given, and not on the MVP's 58005/58007. Pure: Test-GetWireToGateStatus.ps1 lifts it out by its AST.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string] $SiteAlias,
+        [Parameter(Mandatory = $true)][string] $BaseUrl,
+        [Parameter(Mandatory = $true)][bool] $BaseUrlGiven
+    )
+    if (@('agv02', 'agv03') -notcontains $SiteAlias.Trim().ToLowerInvariant()) { return }
+    if (-not $BaseUrlGiven) {
+        throw ("STATUS_BASEURL_REQUIRED: $SiteAlias is a v2-line vehicle, and -BaseUrl defaults to the MVP service " +
+            "($BaseUrl). The vehicle-safety check would send the stored onboard credential there. Pass the v2 instance: " +
+            "-BaseUrl http://172.19.205.222:58107 -ServiceName '8005 AGV ControlServer V2'. Nothing was sent.")
+    }
+    $port = ([uri] $BaseUrl).Port
+    if (@(58005, 58007) -contains $port) {
+        throw ("STATUS_MVP_URL_FOR_V2_VEHICLE: $SiteAlias is a v2-line vehicle, but -BaseUrl $BaseUrl is on the MVP " +
+            "service's port $port. The v2 parallel instance is http://172.19.205.222:58107. Nothing was sent.")
+    }
+}
+
+# workspace#32 review S2: before the site file, any ssh and any HTTP request.
+Assert-StatusTarget -SiteAlias $SiteAlias -BaseUrl $BaseUrl -BaseUrlGiven $PSBoundParameters.ContainsKey('BaseUrl')
 
 $siteFile = Join-Path $PSScriptRoot "../onboard-hmi/config/site-$SiteAlias.json"
 if (-not (Test-Path -LiteralPath $siteFile)) {
