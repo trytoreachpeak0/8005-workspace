@@ -459,6 +459,43 @@ pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
 必须是 http scheme 且 enabled、`onboardBuildCommit` 必须等于包里那个 commit。去掉 `-WhatIf`
 才真的动车。
 
+**IO 指向：部署不再悄悄把模拟器换成真模块**（[workspace#28](https://github.com/trytoreachpeak0/8005-workspace/issues/28)，
+2026-10-12）。测试车（agv02/agv03）平时用车上的仓位模拟器做 IO（`127.0.0.1:1502`，由 `09-switch-io-module.ps1 -Simulator`
+切过去）。以前 `06` 每次都按站点文件把 `ioModule` 渲染回真模块（`192.168.71.150:502`），之后要模拟器全靠人记得再跑一次 `09`；
+忘了就起栈，车就接上了真 IO——而切到真 IO 属于要先问用户的「动车」一类。现在 `06` 在 `-WhatIf` 闸门之前只读一次车上已装配置的
+`ioModule.host`/`port`，按下表决定：
+
+| 车上已装配置的 IO | 不带开关 | `-KeepCurrentIo` | `-UseSiteIo` |
+| --- | --- | --- | --- |
+| 模拟器（回环地址） | **拒绝**（`IO_SIMULATOR_TO_REAL_REFUSED`），提示二选一 | 保留原 host:port | 改用站点里的真模块，打 Warning |
+| 真模块（如 agv01） | 站点值，与以前逐字相同 | 保留原 host:port | 站点值 |
+| 没有（首次部署） | 站点值，与以前相同 | **拒绝**（`IO_KEEP_NO_INSTALLED_CONFIG`），不回落到站点值 | 站点值 |
+| 读不出或缺字段 | 当作可能是模拟器，拒绝 | **拒绝**（`IO_KEEP_UNREADABLE`） | 站点值，打 Warning |
+| 未知 IO（既不是回环，也不等于站点 host） | **拒绝**（`IO_UNKNOWN_TO_REAL_REFUSED`） | 保留原 host:port | 站点值，打 Warning |
+| 安装目录没有配置，但 `.previous` 里有 | **拒绝**（`IO_PREVIOUS_INSTALL_ONLY`），先到车上确认 | **拒绝**（同左） | 站点值，打 Warning |
+
+「读不出或缺字段」不带开关也拒绝，是调度 2026-10-12 认可的取舍：配置坏了的车本来就该有人看一眼再部署。
+「只有 `.previous`」是放置脚本在「把旧目录挪成 `.previous`」和「把新目录挪成安装目录」两步之间断掉留下的样子，
+它不是首次部署；脚本不猜车原来该用哪种 IO，要人到车上看清楚，恢复或删掉 `.previous` 再部署。
+
+- **`-UseSiteIo` 会让车接上真 IO。**部署前要用户对这一次授权，并且现场有人；摘要行里也写着这句话。
+- 两个开关互斥，同时给会在连车之前就拒绝。
+- **只保留 `host` 和 `port`。**这正是 `09` 改的那两项。`unitId`、DO/DI 起始地址、通道数、超时和八个仓位的映射
+  都跟新包的模板走：它们是这个包版本的接线定义，模拟器和真模块共用同一套；保留下来等于把旧包的映射冻在车上。
+- 判定规则分三类：host 是回环地址（`127.x`、`::1`、`localhost`）算模拟器；与站点文件的 `ioModule.host` 相同才算真模块；
+  其余一律算「未知 IO」，例如 `localhost.`、把端口写进 host 的 `127.0.0.1:1502`、本机主机名、另一个模块地址。
+  这样一种没人列过的写法只会落到「拒绝」那一侧，不会被当成真模块放行。
+- 不论带不带开关，部署摘要都会打一行 `IO target: ...`，写明这次的指向、来源和车上原来的指向；放置之后还会在车上
+  回读 `ioModule`，与预期不符就报错。
+
+测试车照常部署的写法：
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -KeepCurrentIo -WhatIf
+```
+
+离线自检（不连车）：`pwsh -File remote-ops/onboard-hmi/scripts/Test-DeployOnboardHmi.ps1`。
+
 **`06` 搬完就停，不启动**——启动是单独一步，见下。上一代留在 `C:\8005\OnboardHmi.previous`，
 要退回去人工换。
 
