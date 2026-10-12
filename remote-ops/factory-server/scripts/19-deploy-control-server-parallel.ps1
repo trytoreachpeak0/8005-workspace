@@ -516,6 +516,17 @@ if (-not $Uninstall) {
     Write-Step ("Clearance exit: VehicleFaultRecovery enabled={0}   FieldOperatorRoles roster={1} onboardEntryDeclared={2}" -f
         $definition['vehicleFaultRecovery']['enabled'], $definition['fieldOperatorRoles']['path'],
         $definition['fieldOperatorRoles']['onboardClearanceEntryDeclared'])
+    # control-server#638 (PR #640 review M1). REQ-0178's clearance move, shown before anything is touched (also under
+    # -WhatIf): on, a vehicle in the clearing loop drives itself to a waiting point. Left out of the definition is off,
+    # which is what the installer writes. The installer reads back what the Host bound; this line is what was asked for.
+    $clearanceMove = $definition['journeyRuntime'].Contains('clearanceToWaitingPointEnabled') ?
+        $definition['journeyRuntime']['clearanceToWaitingPointEnabled'] : $false
+    $clearanceLine = "Clearance to a waiting point (REQ-0178): journeyRuntime.clearanceToWaitingPointEnabled=$clearanceMove"
+    Write-Step $clearanceLine
+    if ($clearanceMove -eq $true) {
+        Write-Warning ("$clearanceLine -- vehicles in the clearing loop will drive themselves to a waiting point once their old " +
+            'order reads ended. That is a run that moves a vehicle: authorized each time, with somebody on site.')
+    }
 
     # control-server#552 review. The version this deployment sends, against the one the server last
     # recorded: an install may keep it (same package again, or a new one whose seed is unchanged)
