@@ -1,8 +1,8 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-    Offline self-test for the instance and vehicle checks of 12-reset-journey-state.ps1, Complete-ChargingRun.ps1
-    and 11-drive-journey.ps1 (workspace#38).
+    Offline self-test for the instance and vehicle checks of 12-reset-journey-state.ps1, Complete-ChargingRun.ps1,
+    11-drive-journey.ps1 and 14-set-recovery-window.ps1 (workspace#38).
 
 .DESCRIPTION
     Nothing here reaches factory01, the MVP, the v2 instance or a vehicle. Two layers:
@@ -46,6 +46,7 @@ $modulePath = Join-Path $root 'factory-server\scripts\control-server\ControlServ
 $resetPath = Join-Path $root 'onboard-hmi\scripts\12-reset-journey-state.ps1'
 $chargePath = Join-Path $root 'factory-server\scripts\control-server\Complete-ChargingRun.ps1'
 $drivePath = Join-Path $root 'onboard-hmi\scripts\11-drive-journey.ps1'
+$windowPath = Join-Path $root 'onboard-hmi\scripts\14-set-recovery-window.ps1'
 Import-Module $modulePath -Force
 
 $mvp = [ordered]@{
@@ -231,7 +232,7 @@ switch ($kind) {
     'charging-survey' { '@@W2G-CHARGING-RUN@@{"status":"SURVEY","runs":[{"ChargingRunId":"run-ws38","AgvId":"agv02","Stage":"Charging","BlockReasonCode":"CHARGER_NOT_ENGAGED","TriggeredAtBatteryPercent":20,"ReleasedAtBatteryPercent":null,"ChargerStationId":"C1","ChargerStationRiotId":"9","UpperId":"U1","CreatedAt":"x","UpdatedAt":"x","IntentStatus":"Completed","IntentOrderId":"o1"}],"serviceStatus":"Running"}'; exit 0 }
     'sublot-query' { 'S-WS38'; exit 0 }
     'mkdir' { exit 0 }
-    'settle-survey' { '{"status":"SURVEY","journeys":[],"refusals":[],"unattributedOutbox":[]}'; exit 0 }
+    'settle-survey' { $env:WS38_SURVEY ? $env:WS38_SURVEY : '{"status":"SURVEY","journeys":[],"refusals":[],"unattributedOutbox":[]}'; exit 0 }
     'journal' { '(absent)'; exit 0 }
     'cleanup' { exit 0 }
     default { 'shim: unexpected command'; exit 255 }
@@ -247,8 +248,9 @@ exit 0
     $env:WS38_LOG = $log
 
     function Invoke-Whole {
-        param([string] $Script, [string[]] $Arguments, $Readback, [string] $FailKind = '')
+        param([string] $Script, [string[]] $Arguments, $Readback, [string] $FailKind = '', [string] $Survey = '')
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        $env:WS38_SURVEY = $Survey
         $env:WS38_READBACK = ($Readback | ConvertTo-Json -Compress)
         $env:WS38_FAIL_KIND = $FailKind
         $out = (& pwsh -NoProfile -File $Script @Arguments *>&1 | Out-String)
@@ -280,6 +282,7 @@ exit 0
             @{ Name = 'v2 -ServerDatabase and -ServerInstallRoot (the review''s case)'; Args = (Get-Args $v2 @('ServerDatabase', 'ServerInstallRoot')) + $vehicle; Code = 'TARGET_PARTIAL' }
             @{ Name = 'v2 -ServiceName alone'; Args = (Get-Args $v2 @('ServiceName')) + $vehicle; Code = 'TARGET_PARTIAL' }
             @{ Name = 'v2 database and install root, MVP -ServiceName'; Args = (Get-Args $v2 @('ServerDatabase', 'ServerInstallRoot')) + (Get-Args $mvp @('ServiceName')) + $vehicle; Code = 'TARGET_MIXED_MVP' }
+            @{ Name = 'v2 service and install root, MVP -ServerDatabase'; Args = (Get-Args $v2 @('ServiceName', 'ServerInstallRoot')) + (Get-Args $mvp @('ServerDatabase')) + $vehicle; Code = 'TARGET_MIXED_MVP' }
             @{ Name = '-SshAlias agv02 with the defaults (the MVP)'; Args = @('-SshAlias', 'agv02'); Code = 'TARGET_VEHICLE_INSTANCE_MISMATCH' }
             @{ Name = 'all three v2, -SshAlias defaulted to agv01'; Args = (Get-Args $v2 $three); Code = 'TARGET_VEHICLE_INSTANCE_MISMATCH' })) {
         Write-Refused (Invoke-Whole $resetPath ($base12 + $c.Args) (New-Readback $v2)) $c.Code "12 -Force, $($c.Name)"
@@ -291,15 +294,41 @@ exit 0
     Write-ReadbackOnly (Invoke-Whole $resetPath ($base12 + $vehicle) (New-Readback $mvp @{ connectionString = "Data Source=$($v2.ServerDatabase)" })) 'TARGET_DATABASE_OTHER_INSTANCE' '12 -Force, defaults, but the MVP configuration names another database'
 
     $res = Invoke-Whole $resetPath ($server + $vehicle + @('-WhatIf')) (New-Readback $mvp)
-    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,mkdir,scp,settle-survey,journal,cleanup' -and @($res.Dbs | Sort-Object -Unique) -ceq @($mvp.ServerDatabase) -and $res.Output -match 'WhatIf: nothing was changed' -and $res.Output -match 'the production MVP service') `
+    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,mkdir,scp,settle-survey,journal,cleanup' -and ($res.Dbs -join '|') -ceq $mvp.ServerDatabase -and $res.Output -match 'WhatIf: nothing was changed' -and $res.Output -match 'the production MVP service') `
         -Name '12 -WhatIf, no instance parameter: read-back first, then the survey of the MVP database' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
     $res = Invoke-Whole $resetPath ($server + $vehicle + @('-WhatIf') + (Get-Args $v2 $three)) (New-Readback $v2)
-    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,mkdir,scp,settle-survey,journal,cleanup' -and @($res.Dbs | Sort-Object -Unique) -ceq @($v2.ServerDatabase) -and $res.Output -match 'not the MVP service') `
+    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,mkdir,scp,settle-survey,journal,cleanup' -and ($res.Dbs -join '|') -ceq $v2.ServerDatabase -and $res.Output -match 'not the MVP service') `
         -Name '12 -WhatIf, all three v2: read-back first, then the survey of the v2 database' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
     # agv02 with a v2 set gets past every check: the server's mkdir fails on purpose so nothing reaches agv02.
     $res = Invoke-Whole $resetPath ($server + @('-SshAlias', 'agv02', '-WhatIf') + (Get-Args $v2 $three)) (New-Readback $v2) -FailKind 'mkdir'
     Write-Result -Ok ($res.Exit -ne 0 -and $res.Kinds -eq 'readback,mkdir' -and $res.Output -notmatch 'TARGET_' -and $res.Output -match 'fails on purpose') `
         -Name '12, -SshAlias agv02 with all three v2: past the checks (stopped at the server''s mkdir on purpose)' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
+
+    # Review M1: the survey covers the whole instance, the journal is one vehicle's. Every in-flight journey must be
+    # the vehicle's own, by the key in its site file.
+    $keyOwn = 'BROKERX-ws38-own'; $keyOther = 'BROKERX-ws38-other'
+    $site = Join-Path $work 'site-ws38.json'
+    @{ vehicleSafety = @{ expectedVehicleKey = $keyOwn } } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $site
+    $journey = {
+        param([string] $Id, [string] $Key)
+        [ordered]@{ journeyId = $Id; stage = 'Blocked'; agvId = "car-of-$Key"; vehicleKey = $Key; updatedAt = 'x'; revisions = 'r'
+            demands = @(); lease = $null; outbox = @(); riotLegs = @(); cancelDemandIds = @(); suppressDemandIds = @(); settleDemandIds = @(); releaseLease = $false }
+    }
+    $survey = { param([object[]] $Journeys) @{ status = 'SURVEY'; journeys = @($Journeys); refusals = @(); unattributedOutbox = @() } | ConvertTo-Json -Depth 6 -Compress }
+    $m1 = $all12 + @('-SiteConfigPath', $site)
+    foreach ($c in @(
+            @{ Name = 'one journey of another vehicle'; Survey = (& $survey @((& $journey 'J-OTHER' $keyOther))) }
+            @{ Name = 'its own journey and one of another vehicle'; Survey = (& $survey @((& $journey 'J-OWN' $keyOwn), (& $journey 'J-OTHER' $keyOther))) })) {
+        $res = Invoke-Whole $resetPath $m1 (New-Readback $v2) -Survey $c.Survey
+        Write-Result -Ok ($res.Exit -ne 0 -and $res.Output -match 'J-OTHER belongs to vehicle BROKERX-ws38-other' -and $res.Output -match 'Refused before touching either end' -and $res.Kinds -eq 'readback,mkdir,scp,settle-survey,journal,cleanup') `
+            -Name "12 -Force, v2 set, $($c.Name): refused after the survey, nothing settled, onboard stack untouched" -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
+    }
+    $res = Invoke-Whole $resetPath ($all12 + @('-SiteConfigPath', (Join-Path $work 'no-such-site.json'))) (New-Readback $v2) -Survey (& $survey @((& $journey 'J-OWN' $keyOwn)))
+    Write-Result -Ok ($res.Exit -ne 0 -and $res.Output -match 'no vehicleSafety.expectedVehicleKey' -and $res.Output -match 'Refused before touching either end' -and $res.Kinds -eq 'readback,mkdir,scp,settle-survey,journal,cleanup') `
+        -Name '12 -Force, v2 set, a journey in flight and no site file: refused, nothing settled' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
+    $res = Invoke-Whole $resetPath ($server + $vehicle + @('-WhatIf', '-SiteConfigPath', $site) + (Get-Args $v2 $three)) (New-Readback $v2) -Survey (& $survey @((& $journey 'J-OWN' $keyOwn)))
+    Write-Result -Ok ($res.Exit -eq 0 -and $res.Output -match 'Journey J-OWN' -and $res.Output -match 'would write' -and $res.Output -notmatch 'REFUSED' -and $res.Output -notmatch 'a real run would refuse') `
+        -Name '12 -WhatIf, v2 set, only its own journey in flight: not refused' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
 
     # ------------------------------------------------------------------------------------ Complete-ChargingRun ---
     $baseCharge = $server + @('-Force', '-ChargingRunId', 'run-ws38')
@@ -316,10 +345,10 @@ exit 0
     Write-ReadbackOnly (Invoke-Whole $chargePath ($baseCharge + (Get-Args $v2 @('ServiceName', 'ServerInstallRoot')) + @('-ServerDatabase', $copyDatabase)) (New-Readback $v2)) 'TARGET_DATABASE_NOT_OWN' 'Complete-ChargingRun -Force, v2 set with a database copy'
 
     $res = Invoke-Whole $chargePath ($server + @('-ChargingRunId', 'run-ws38', '-WhatIf')) (New-Readback $mvp)
-    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,charging-survey' -and @($res.Dbs) -ceq @($mvp.ServerDatabase) -and $res.Output -match 'What if' -and $res.Output -match [regex]::Escape("ws38-server.invalid ($($mvp.ServerDatabase))")) `
+    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,charging-survey' -and ($res.Dbs -join '|') -ceq $mvp.ServerDatabase -and $res.Output -match 'What if' -and $res.Output -match [regex]::Escape("ws38-server.invalid ($($mvp.ServerDatabase))")) `
         -Name 'Complete-ChargingRun -WhatIf, no instance parameter: read-back, survey and ShouldProcess on the MVP database' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
     $res = Invoke-Whole $chargePath ($server + @('-ChargingRunId', 'run-ws38', '-WhatIf') + (Get-Args $v2 $three)) (New-Readback $v2)
-    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,charging-survey' -and @($res.Dbs) -ceq @($v2.ServerDatabase) -and $res.Output -match [regex]::Escape("ws38-server.invalid ($($v2.ServerDatabase))")) `
+    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'readback,charging-survey' -and ($res.Dbs -join '|') -ceq $v2.ServerDatabase -and $res.Output -match [regex]::Escape("ws38-server.invalid ($($v2.ServerDatabase))")) `
         -Name 'Complete-ChargingRun -WhatIf, all three v2: read-back, survey and ShouldProcess on the v2 database' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
 
     # ---------------------------------------------------------------------------------------------------- 11 ---
@@ -333,16 +362,33 @@ exit 0
         Write-Refused (Invoke-Whole $drivePath ($server + $c.Args) $null) $c.Code "11, $($c.Name)"
     }
     $res = Invoke-Whole $drivePath ($server + $vehicle + @('-WhatIf')) $null
-    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'sublot-query' -and @($res.Dbs) -ceq @($mvp.ServerDatabase) -and $res.Output -match 'S-WS38' -and $res.Output -match 'What if') `
+    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'sublot-query' -and ($res.Dbs -join '|') -ceq $mvp.ServerDatabase -and $res.Output -match 'S-WS38' -and $res.Output -match 'What if') `
         -Name '11 -WhatIf, no server path: reads the MVP database, as before' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
     # Under -WhatIf nothing reaches the vehicle before ShouldProcess, so agv02 itself can be named.
     $res = Invoke-Whole $drivePath ($server + @('-SshAlias', 'agv02', '-WhatIf') + (Get-Args $v2 $two)) $null
-    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'sublot-query' -and @($res.Dbs) -ceq @($v2.ServerDatabase) -and $res.Aliases -ceq @('ws38-server.invalid') -and $res.Output -match 'What if.*agv02') `
+    Write-Result -Ok ($res.Exit -eq 0 -and $res.Kinds -eq 'sublot-query' -and ($res.Dbs -join '|') -ceq $v2.ServerDatabase -and ($res.Aliases -join '|') -ceq 'ws38-server.invalid' -and $res.Output -match 'What if.*agv02') `
         -Name '11 -WhatIf, -SshAlias agv02 with both v2 paths: reads the v2 database, nothing reaches agv02' -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
+
+    # ---------------------------------------------------------------------------------------------------- 14 ---
+    # Review S1: the MVP's recovery window only; the v2 cars have 18-set-v2-recovery-window.ps1.
+    $base14 = @('-ServerSshAlias', 'ws38-server.invalid', '-SecretPath', (Join-Path $work 'recovery-window.xml'))
+    foreach ($c in @(
+            @{ Name = '-SshAlias agv02'; Args = @('-SshAlias', 'agv02'); Code = 'TARGET_VEHICLE_INSTANCE_MISMATCH' }
+            @{ Name = '-SshAlias agv03 -Revert'; Args = @('-SshAlias', 'agv03', '-Revert'); Code = 'TARGET_VEHICLE_INSTANCE_MISMATCH' }
+            @{ Name = 'the V2 -ServiceName'; Args = @('-SshAlias', 'ws38-vehicle.invalid', '-ServiceName', $v2.ServiceName); Code = 'TARGET_NOT_MVP' })) {
+        $res = Invoke-Whole $windowPath ($base14 + $c.Args) $null
+        Write-Result -Ok ($res.Exit -ne 0 -and $res.Output -match $c.Code -and $res.Output -match '18-set-v2-recovery-window' -and $res.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $work 'recovery-window.xml'))) `
+            -Name "14, $($c.Name): $($c.Code), points at 18, no ssh or scp, no proof generated" -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
+    }
+    foreach ($alias in @('agv01', 'ws38-vehicle.invalid')) {
+        $res = Invoke-Whole $windowPath ($base14 + @('-SshAlias', $alias, '-WhatIf')) $null
+        Write-Result -Ok ($res.Exit -eq 0 -and $res.Output -match 'WhatIf: stopping before either machine is touched' -and $res.Output -notmatch 'TARGET_' -and $res.Calls.Count -eq 0) `
+            -Name "14 -WhatIf, -SshAlias $alias with the MVP service: past the check, stops at ShouldProcess" -Detail "exit $($res.Exit), calls [$($res.Calls -join '; ')], $($res.Output.Trim())"
+    }
 }
 finally {
     $env:PATH = $savedPath
-    Remove-Item Env:WS38_LOG, Env:WS38_READBACK, Env:WS38_FAIL_KIND -ErrorAction SilentlyContinue
+    Remove-Item Env:WS38_LOG, Env:WS38_READBACK, Env:WS38_FAIL_KIND, Env:WS38_SURVEY -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -40,6 +40,14 @@
 
     Before workspace#38, a v2 -ServerDatabase alone stopped the MVP service and started it again.
 
+    The read-back is read-only. Run against the MVP it reads the MVP's service registration and appsettings on
+    factory01, as part of the MVP run that needs the user's word anyway; run against a v2 instance it reads that
+    service and that configuration, never the MVP's.
+
+    THE STOP IS PER INSTANCE, NOT PER VEHICLE. A v2 instance serves more than one car, and every one of them loses
+    its server for the length of the write: no dispatch, no supervision. Make sure the other vehicles of that
+    instance are idle first; the service is started again afterwards if it was running.
+
 .PARAMETER Force
     Suppresses the confirmation prompt by lowering $ConfirmPreference. Needed to run this from a
     non-interactive shell: ConfirmImpact is High, and ShouldProcess throws when there is no host UI.

@@ -95,6 +95,22 @@
     Before workspace#38, -ServerDatabase and -ServerInstallRoot of a v2 instance
     alone stopped the MVP service and then settled whichever database was free.
 
+    The read-back is read-only. Run against the MVP it reads the MVP's service
+    registration and appsettings on factory01, as part of the MVP run that
+    needs the user's word anyway; run against a v2 instance it reads that
+    service and that configuration, never the MVP's.
+
+.PARAMETER SiteConfigPath
+    The vehicle's site file; its vehicleSafety.expectedVehicleKey is the key of
+    the one vehicle this run may settle for. The survey covers every in-flight
+    journey of the INSTANCE, but only -SshAlias's journal is cleared, and a v2
+    instance serves more than one car. So every in-flight journey must carry
+    this key: one of another vehicle -- or no readable key while anything is in
+    flight -- is a refusal, reported with the survey's own, before either end is
+    touched (workspace#38 review M1). Settling it would cancel and permanently
+    suppress that car's demands, release its lease and stop watching it while
+    its RIoT order still runs, and leave its journal behind.
+
 .PARAMETER ReasonCode
     Recorded on each suppression and on the journey. One of the codes
     WireToGateStore.SuppressingReasonCodes accepts, matched exactly. There is no
@@ -149,6 +165,7 @@ param(
     [string] $ServiceName = '8005 AGV ControlServer',
     [string] $VehicleJournal = 'C:\Users\HT\AppData\Local\SQCD\8005AGV\onboard-journal.db',
     [string] $VehicleBackupRoot = 'C:\8005\journal-backup',
+    [string] $SiteConfigPath = (Join-Path $PSScriptRoot "..\config\site-$SshAlias.json"),
     # WireToGateStore.SuppressingReasonCodes; server-settle-journey.ps1 checks it again.
     [ValidateSet('CANCELLED_BY_OPERATOR', 'CANCELLED_BY_LOAD_COMPENSATION', 'CANCELLED_BY_STOP_COMPLETE',
         'CANCELLED_BY_STATION_TIMEOUT', 'TERMINATED_BY_FAULT_CARGO_HANDOFF', IgnoreCase = $false)]
@@ -283,6 +300,23 @@ if (Test-Path -LiteralPath '$VehicleJournal') {
     Write-Step "Vehicle journal: $journalInfo"
 
     $refusals = @($survey.refusals)
+    if ($journeys.Count) {
+        # workspace#38 review M1: the survey is per instance, the journal is per vehicle.
+        $expectedKey = $null
+        if (Test-Path -LiteralPath $SiteConfigPath -PathType Leaf) {
+            $expectedKey = (Get-Content -Raw -LiteralPath $SiteConfigPath | ConvertFrom-Json).vehicleSafety.expectedVehicleKey
+        }
+        if (-not $expectedKey) {
+            $refusals += "no vehicleSafety.expectedVehicleKey for $SshAlias in $SiteConfigPath, so the journeys in flight cannot be shown to be its own"
+        }
+        else {
+            foreach ($journey in $journeys) {
+                if ([string]$journey.vehicleKey -cne $expectedKey) {
+                    $refusals += "journey $($journey.journeyId) belongs to vehicle $($journey.vehicleKey) ($($journey.agvId)), not to $SshAlias ($expectedKey); only $SshAlias's journal would be cleared"
+                }
+            }
+        }
+    }
     foreach ($refusal in $refusals) { Write-Host "  REFUSED: $refusal" -ForegroundColor Red }
 
     if ($WhatIfPreference) {
@@ -303,12 +337,12 @@ if (Test-Path -LiteralPath '$VehicleJournal') {
     # Both strings are built first: ShouldProcess throws a bare null-reference when
     # either argument is null, which says nothing about which one it was.
     $cancelled = @($journeys | ForEach-Object { @($_.cancelDemandIds) }).Count
-    $target = $journeys.Count `
+    $processTarget = $journeys.Count `
         ? ('{0} ({1} journey(s) settled; {2} demand(s) cancelled and PERMANENTLY suppressed as {3}) and {4} (the onboard journal)' -f
             $ServerAlias, $journeys.Count, $cancelled, $ReasonCode, $SshAlias) `
         : ('{0} (the onboard journal; nothing is in flight on {1})' -f $SshAlias, $ServerAlias)
     $action = 'Settle journey state on both ends'
-    if (-not $PSCmdlet.ShouldProcess($target, $action)) {
+    if (-not $PSCmdlet.ShouldProcess($processTarget, $action)) {
         return
     }
 

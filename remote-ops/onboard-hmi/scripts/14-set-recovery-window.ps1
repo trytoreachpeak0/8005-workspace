@@ -56,6 +56,12 @@
     This changes what a vehicle can be asked to do. It starts nothing: the
     client is left stopped, exactly as 06-deploy-onboard-hmi.ps1 leaves it.
 
+.PARAMETER SshAlias
+    agv01 only, with the MVP -ServiceName (workspace#38 review S1). The window of
+    a car on a v2 instance -- agv02, agv03 -- is 18-set-v2-recovery-window.ps1;
+    here it would put the proof into the MVP service's environment and restart
+    the MVP. Both are refused before anything is touched.
+
 .PARAMETER Revert
     Close the window: recoveryResumeEnabled back to false, both environment
     variables removed, service restarted, stored proof deleted.
@@ -87,6 +93,15 @@ param(
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
+
+# workspace#38 review S1: this script serves the MVP and agv01; the v2 cars have their own.
+Import-Module (Join-Path $PSScriptRoot '..\..\factory-server\scripts\control-server\ControlServerTarget.psm1') -Force
+if (-not (Test-MvpTargetValue -Kind ServiceName -Value $ServiceName)) {
+    throw ("TARGET_NOT_MVP: -ServiceName '$ServiceName' is not the MVP service. This script opens the MVP's recovery " +
+        "window; a v2 instance's is 18-set-v2-recovery-window.ps1. Nothing was read or changed.")
+}
+try { $null = Assert-ControlServerVehicleTarget -SshAlias $SshAlias -IsMvp $true }
+catch { throw "$($_.Exception.Message) The recovery window of agv02/agv03 is 18-set-v2-recovery-window.ps1." }
 
 # .Replace rather than -replace: the right-hand side of -replace is a regular
 # expression, where a lone backslash is an error rather than a backslash.

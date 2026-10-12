@@ -79,6 +79,18 @@
     anything reaches either machine. Before workspace#38, -SshAlias agv02 alone
     read the MVP's pending sublot and open slot and drove agv02 with them.
 
+    The read-back is read-only. Run against the MVP it reads the MVP's service
+    registration and appsettings on factory01, as part of the MVP run that
+    needs the user's word anyway; run against a v2 instance it reads that
+    service and that configuration, never the MVP's.
+
+    NOT FILTERED BY VEHICLE. The sublot is the newest unanswered
+    SublotEntryRequested and the slot the newest WAITING_OPERATOR of the whole
+    instance. A v2 instance serves more than one car: run this only while no
+    other vehicle of that instance is at a station, or it may submit another
+    car's sublot (refused by the client) or wait on a slot that never opens on
+    this one (until the timeout).
+
 .PARAMETER Sublot
     Submit this instead of what the server asked for. Only useful for negative
     tests.
