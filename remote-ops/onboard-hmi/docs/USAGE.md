@@ -532,6 +532,22 @@ pwsh -File remote-ops/onboard-hmi/scripts/17-capture-hmi-screen.ps1 -SelfTest
 两条要记住：锁屏时全屏图只有锁屏画面，车载端界面看 `-window-<n>.png` 与 UIA 文字（结果码 `DESKTOP_LOCKED`）；截图入库前看一眼，
 脚本只涂黑了密码框，屏上若有别的敏感内容要自己处理。
 
+### 读屏幕状态快照：`18-read-hmi-screen-state.ps1`
+
+含 onboard-hmi#315 的车载端在配置 `screenState.enabled` 打开时，会在日志目录旁写一份「屏上此刻显示什么、能按什么」的
+快照 `hmi-state.json`，外加只记变化的时间线 `hmi-state-yyyyMMdd.ndjson`。这个脚本经 SSH 只读这两份文件，判断快照
+是否新鲜，打印摘要；`-CrossCheck` 再取一次 UIA，把快照与屏上实际对照。**同样只接受 `agv02`／`agv03`**，没有默认车。
+只读：发到车上的只有一段读文件、列进程的脚本，不登记任务、不起停进程、不写车上任何文件（`-CrossCheck` 调用的 `17`
+除外，它照它自己的约定登记一次性任务）。
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/18-read-hmi-screen-state.ps1 -SshAlias agv02 -TimelineLines 20
+pwsh -File remote-ops/onboard-hmi/scripts/18-read-hmi-screen-state.ps1 -SshAlias agv02 -CrossCheck -EvidenceDirectory evidence/field/<目录>
+pwsh -File remote-ops/onboard-hmi/scripts/18-read-hmi-screen-state.ps1 -SelfTest
+```
+
+结果码、`STALE` 与 `EXITED` 怎么区分、对照比什么不比什么，见 [hmi-screen-state.md](hmi-screen-state.md)。
+
 ---
 
 ## 9. 完全撤销

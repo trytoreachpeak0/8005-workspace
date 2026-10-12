@@ -188,6 +188,9 @@ function Read-UiaNode {
             controlType  = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
             name         = $c.Name
             automationId = $c.AutomationId
+            # The raw code the HMI puts next to some texts (battery, countdown tier ...); 18-read-hmi-screen-state
+            # compares it with the screen-state snapshot (onboard-hmi#316).
+            itemStatus   = $c.ItemStatus
             className    = $c.ClassName
             isEnabled    = $c.IsEnabled
             isOffscreen  = $c.IsOffscreen
