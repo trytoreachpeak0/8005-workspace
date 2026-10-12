@@ -1,0 +1,2 @@
+{"run":"crosscheck-01","recorded":"MISMATCH","capture":"DESKTOP_LOCKED","incomplete":null,"revision":"1->1","moved":false,"rows":47,"differences":[],"rejudged":"MATCH","banner":"连接中 (CONTROLLER_SNAPSHOT)","visibleButtons":"手动提交[False] 清空界面记录[True]"}
+{"run":"crosscheck-12","recorded":"MISMATCH","capture":"DESKTOP_LOCKED","incomplete":null,"revision":"1->1","moved":false,"rows":47,"differences":[],"rejudged":"MATCH","banner":"连接中 (CONTROLLER_SNAPSHOT)","visibleButtons":"手动提交[False] 清空界面记录[True]"}

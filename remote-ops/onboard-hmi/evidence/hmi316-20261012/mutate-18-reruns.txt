@@ -1,0 +1,33 @@
+Reruns after the full run in mutate-18.txt (2026-10-12, after the control host slot was handed back, single
+self-tests of mutated copies; output lines as printed by mutate-18.ps1 -Only, or by the self-test directly).
+
+Changes between the full run and these reruns:
+  * comparison: the banner is the first Text after the 手动提交 button's own subtree (the real-WPF false MISMATCH);
+    the fixture's buttons now carry a Text child of the same name, as a real WPF button does;
+  * self-test: a whole JSON document with one byte that is not UTF-8 must be UNREADABLE (91 checks, was 90);
+  * mutation 'dialog titles not compared' rewritten: the first version did not parse, so it never ran;
+  * mutation 'the reader holds the handle' lengthened: 400000 iterations held the handle about 20 ms and the
+    writer coped (109 retries, 0 give-ups) - not a gap; 2000000 (about 100 ms) was killed once by hand and
+    survived once; 4000000 (about 200 ms) is the committed one;
+  * new mutation: the banner taken from the button's own Text;
+  * mutation 'banner taken from any Text with that wording' rewritten for the new banner code.
+
+KILLED      lenient UTF-8  <- verdict: a whole JSON document with one byte that is not UTF-8 is UNREADABLE, not a replacement character
+KILLED      dialog titles not compared  <- compare: a dialog the snapshot does not know ; compare: a dialog title that differs
+KILLED      banner taken from the button's own Text (the 2026-10-12 real-WPF false MISMATCH)  <- agreeing snapshot and UIA: 24 compared fields, no difference ; compare: a button the snapshot shows but UIA does not   (3 of 3 runs)
+KILLED      the reader holds the handle past the writer's retry window  <- reading while the writer replaces the file: every read is whole, and the writer never gives up twice in a row   (3 of 3 runs)
+KILLED      banner taken from any Text with that wording  <- compare: a banner text elsewhere on screen does not stand in for the banner
+
+All 36 mutations' From text present in the final 18-read-hmi-screen-state.ps1 (checked by parsing mutate-18.ps1).
+The other 31 were killed in the full run; the code they mutate is unchanged since.
+
+Review S3 (after the independent review of 435b56a): the concurrent test also asserts give-ups <= max(1, 2% of reads).
+Injected [System.Threading.Thread]::Sleep(N) after CopyTo in the read script of a copy (the read-only scan also fails
+on that copy, as it should; the line that matters is the concurrent test's):
+
+  hold 0 ms (unmodified):  PASS  (94 reads, 3002 replaces, 23 retries, 0 give-ups, longest run 0)
+  hold 30 ms:  FAIL ... -- 2 give-ups in 38 reads, more than the 1 allowed (max(1, 2% of reads)): the reader holds the handle too long
+  hold 40 ms:  FAIL ... -- 2 give-ups in 43 reads, more than the 1 allowed (max(1, 2% of reads)): the reader holds the handle too long
+
+Margin is thin: the review measured 5 give-ups in 36 reads at 30 ms and 4 in 24 at 40 ms; here it was 2, one over the
+limit. A run with a single give-up at 30-40 ms would pass. Holds of 45 ms and more also break "never twice in a row".

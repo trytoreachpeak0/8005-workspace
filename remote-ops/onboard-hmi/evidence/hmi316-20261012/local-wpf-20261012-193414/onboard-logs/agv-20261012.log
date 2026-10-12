@@ -1,0 +1,18 @@
+2026-10-12T19:34:21.4931073+08:00	Information	RestartRecovery	SingleInstanceGuard	抢到了整机单例名字。名字=Global\SQCD.Agv.Wpf.Onboard。
+2026-10-12T19:34:21.6515617+08:00	Information	RestartRecovery	App	车载端启动：agvId=AGV-8005-01，environment=Development，version=0.2.0-safety-mock-travel+27ecf245e2742883657f3bd5f293ea97be387de0。
+2026-10-12T19:34:21.6530734+08:00	Information	Configuration	App	生效配置：agvId=AGV-8005-01，onboardInstanceId=OBU-8005-01，environment=Development，wireToGate.enabled=False，wireToGate.server=127.0.0.1:58005，wireToGate.recoveryResumeEnabled=False，wireToGate.journalPath=F:\8005-scratch\hmi316\run\onboard-journal.db，vehicleSafety.enabled=False，vehicleSafety.endpoint=http://control.example.invalid:80，ioModule=127.0.0.1:1502，logging.directory=F:\8005-scratch\hmi316\run\logs，screenState.enabled=True。
+2026-10-12T19:34:22.5019023+08:00	Information	IoCommunication	ModbusTcpIoModuleClient	已连接IO模块 127.0.0.1:1502，UnitId=255。
+2026-10-12T19:34:22.5219933+08:00	Information	IoCommunication	OnboardController	IO模块在线。
+2026-10-12T19:34:22.5240372+08:00	Information	SafetyDecision	OnboardController	启动IO安全快照验证通过。
+2026-10-12T19:34:24.5488864+08:00	Warning	ExecutionPhase	TcpJsonRuleGateway	规则模块连接中断，将自动重连。 | SocketException: No connection could be made because the target machine actively refused it.
+2026-10-12T19:36:55.7303076+08:00	Warning	IoCommunication	OnboardController	IO模块离线。
+2026-10-12T19:36:55.7354812+08:00	Warning	IoCommunication	ModbusTcpIoModuleClient	IO通信中断，将自动重连。 | TimeoutException: Modbus TCP请求超时。
+2026-10-12T19:36:59.2508217+08:00	Information	IoCommunication	ModbusTcpIoModuleClient	已连接IO模块 127.0.0.1:1502，UnitId=255。
+2026-10-12T19:36:59.7499645+08:00	Information	IoCommunication	OnboardController	IO模块在线。
+2026-10-12T19:36:59.7503947+08:00	Information	IoCommunication	ModbusTcpIoModuleClient	IO通信已恢复。
+2026-10-12T19:37:21.0593003+08:00	Warning	IoCommunication	OnboardController	IO模块离线。
+2026-10-12T19:37:21.1372708+08:00	Warning	IoCommunication	ModbusTcpIoModuleClient	IO通信中断，将自动重连。 | TimeoutException: Modbus TCP请求超时。
+2026-10-12T19:37:22.2286508+08:00	Information	IoCommunication	ModbusTcpIoModuleClient	已连接IO模块 127.0.0.1:1502，UnitId=255。
+2026-10-12T19:37:22.2322526+08:00	Information	IoCommunication	OnboardController	IO模块在线。
+2026-10-12T19:37:22.2334576+08:00	Information	IoCommunication	ModbusTcpIoModuleClient	IO通信已恢复。
+2026-10-12T19:37:47.7114796+08:00	Warning	IoCommunication	OnboardController	IO模块离线。

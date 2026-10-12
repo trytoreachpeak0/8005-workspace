@@ -1,0 +1,23 @@
+{
+  "tool": "18-read-hmi-screen-state",
+  "mode": "read",
+  "target": "local:F:\\8005-scratch\\hmi316\\run\\logs",
+  "name": "local-20261012T193748",
+  "startedAt": "2026-10-12T19:37:48.3687906+08:00",
+  "staleAfterSeconds": 15,
+  "outcome": "EXITED",
+  "detail": "no SQCD.Agv.Wpf with process id 36612 is running. The writer leaves no end marker on exit (onboard-hmi#315 L2), so the file still says ACTIVE; last written 2026-10-12T19:37:42.7497386+08:00.",
+  "error": null,
+  "read": {
+    "outcome": "EXITED",
+    "detail": "no SQCD.Agv.Wpf with process id 36612 is running. The writer leaves no end marker on exit (onboard-hmi#315 L2), so the file still says ACTIVE; last written 2026-10-12T19:37:42.7497386+08:00.",
+    "vehicleNow": "2026-10-12T19:37:48.7965341+08:00",
+    "ageSeconds": 6.0,
+    "processStartId": "43bd4632cfef4c479e37d3433f74b1fe",
+    "contentRevision": 5,
+    "processId": 36612,
+    "writerAlive": false,
+    "hmiProcesses": []
+  },
+  "finishedAt": "2026-10-12T19:37:49.3559574+08:00"
+}
