@@ -454,8 +454,38 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
 **部署命令，先干跑。**
 
 ```bash
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort 58105 -HealthPort 58107 -WhatIf
 ```
+
+**端口：`-OnboardPort` 与 `-HealthPort` 两个都必须给，没有默认值**（[workspace#32](https://github.com/trytoreachpeak0/8005-workspace/issues/32)，
+2026-10-12）。`-OnboardPort` 是车连服务端的 NDJSON 端口，`-HealthPort` 是服务端的 HTTP 端口：车辆安全投影的地址按它渲染，
+部署后的探针也带着这台车的凭据去请求它。以前这两个参数默认是 MVP 的 58005／58007。10-12 夜里给 v2 实例部署 agv02/agv03 时
+只传了 `-OnboardPort 58105`，`-HealthPort` 落回 58007，探针就把两台车的 v2 投影凭据发给了生产 MVP（只读，回 401，MVP 未受影响，
+凭据要轮换）。现在规则是：
+
+| 情形 | 结果 |
+| --- | --- |
+| 只给一个，或都不给 | **拒绝**（`PORTS_REQUIRED`），在连车、下载、发任何请求之前 |
+| MVP 的端口（58005 或 58007）与非 MVP 端口混用，或两个 MVP 端口给反 | **拒绝**（`PORTS_MIXED_MVP`），同样在任何请求之前 |
+| agv02/agv03 配 MVP 那一对 | **拒绝**（`MVP_PORTS_FOR_V2_VEHICLE`），这两台车只跟 v2 实例说话 |
+| 包里的车载端模板是 v2 的（投影用独立凭据变量，或地址带 `?vehicleKey=`），端口却是 MVP 那一对 | **拒绝**（`MVP_PORTS_FOR_V2_TEMPLATE`），在渲染完、碰车之前 |
+| 渲染出的投影地址端口不等于 `-HealthPort` | **拒绝**（`ENDPOINT_PORT_MISMATCH`） |
+| v2 实例：`-OnboardPort 58105 -HealthPort 58107` | 照常 |
+| MVP（agv01）：`-OnboardPort 58005 -HealthPort 58007`，MVP 模板 | 照常，与以前渲染结果相同 |
+
+放置到车上之后、写任何凭据之前，车上还会回读一次投影地址：端口必须等于 `-HealthPort`，非 MVP 部署还不能落在 58005／58007。
+车上的放置脚本任何一步抛错（包括这次回读和 IO 回读），`06` 都以非零退出，不再打印 `Staged. NOT started` 那段交接说明。
+
+**agv01 的写法因此变了。**以前给 agv01（MVP）部署可以什么端口都不写，现在不行：不带端口的旧命令会在第一步以
+`PORTS_REQUIRED` 拒绝（不连车）。agv01 固定写 `-OnboardPort 58005 -HealthPort 58007`：
+
+```bash
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv01 -OnboardPort 58005 -HealthPort 58007 -WhatIf
+```
+
+同一件事也堵在状态脚本 `remote-ops/status/Get-WireToGateStatus.ps1` 上：它的 `-BaseUrl` 默认是 MVP 的 58007，
+带着存储里的车载端凭据去读投影。`-SiteAlias agv02`／`agv03` 不给 `-BaseUrl`，或给的是 58005／58007，都会在读站点文件、
+ssh 和任何请求之前拒绝（`STATUS_BASEURL_REQUIRED`／`STATUS_MVP_URL_FOR_V2_VEHICLE`）。
 
 干跑会把渲染好的配置整份打出来，并且已经做完全部校验：包哈希、占位符残留、TLS 期残留键
 （`useTls` / `serverCertificateSha256`——**判据是键在不在，不是值是什么**）、`vehicleSafety`
@@ -494,7 +524,7 @@ pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
 测试车照常部署的写法：
 
 ```bash
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -KeepCurrentIo -WhatIf
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort 58105 -HealthPort 58107 -KeepCurrentIo -WhatIf
 ```
 
 离线自检（不连车）：`pwsh -File remote-ops/onboard-hmi/scripts/Test-DeployOnboardHmi.ps1`。

@@ -6,6 +6,15 @@
 pwsh remote-ops/status/Get-WireToGateStatus.ps1
 ```
 
+默认看的是 agv01 和 MVP 服务（`-BaseUrl` 默认 `http://172.19.205.222:58007`）。看 v2 的车必须显式指向 v2 实例，
+否则会在发出任何请求之前拒绝（[workspace#32](https://github.com/trytoreachpeak0/8005-workspace/issues/32)）：
+
+```powershell
+pwsh remote-ops/status/Get-WireToGateStatus.ps1 -SiteAlias agv02 -BaseUrl http://172.19.205.222:58107 -ServiceName '8005 AGV ControlServer V2'
+```
+
+离线自检：`pwsh -File remote-ops/status/Test-GetWireToGateStatus.ps1`。
+
 ```
 2026-09-03 11:41:57  老厂前线新多仓位1  (agv01)
   [ok]   server-service-running     Running, pid 16240

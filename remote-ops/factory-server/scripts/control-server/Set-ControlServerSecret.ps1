@@ -267,7 +267,7 @@ if ($NewVehicleSafetyCredential) {
     if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
     $store | Export-Clixml -LiteralPath $SecretPath -Force
     Write-Host "Stored in $SecretPath (DPAPI-encrypted; readable only by $env:USERNAME on $env:COMPUTERNAME). Values were not shown." -ForegroundColor Green
-    Write-Host 'Next: deploy the v2 server (19-deploy-control-server-parallel.ps1), then each vehicle (06-deploy-onboard-hmi.ps1).' -ForegroundColor DarkGray
+    Write-Host 'Next: deploy the v2 server (19-deploy-control-server-parallel.ps1), then each vehicle (06-deploy-onboard-hmi.ps1 -SshAlias <agv02|agv03> -OnboardPort 58105 -HealthPort 58107).' -ForegroundColor DarkGray
     return
 }
 

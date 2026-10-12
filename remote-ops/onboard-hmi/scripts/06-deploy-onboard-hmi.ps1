@@ -49,12 +49,26 @@
     Which vehicle. One alias per car; the site file is named after it.
 
 .PARAMETER OnboardPort
-    The ControlServer's NDJSON port, written into wireToGate.port. The default
-    58005 is the MVP service's port and equals the template's own value, so an
-    agv01 deployment renders exactly what it always did. A vehicle served by the
-    v2 parallel instance needs that instance's port (58105 on factory01) --
-    until 2026-10-08 this parameter was declared and never used, so every
-    deployment pointed the client at 58005 whatever was passed.
+    Required, together with -HealthPort. The ControlServer's NDJSON port,
+    written into wireToGate.port: 58105 for the v2 parallel instance on
+    factory01, 58005 for the MVP service (agv01). Until 2026-10-08 this
+    parameter was declared and never used, so every deployment pointed the
+    client at 58005 whatever was passed.
+
+.PARAMETER HealthPort
+    Required, together with -OnboardPort. The ControlServer's HTTP port, which
+    the vehicle-safety endpoint is rendered against and which the post-deploy
+    probe calls with this vehicle's credential: 58107 for the v2 parallel
+    instance, 58007 for the MVP service.
+
+    workspace#32. Neither port has a default any more. On 2026-10-12 a v2
+    deployment passed -OnboardPort 58105 alone, -HealthPort fell back to the
+    MVP's 58007, and the probe sent both v2 cars' projection credentials to
+    the production MVP service. So: both ports must be given; the MVP pair is
+    exactly 58005/58007 and is never mixed with a non-MVP port; and a v2
+    deployment (agv02/agv03, or a template with its own projection credential
+    or a ?vehicleKey= endpoint) is refused on the MVP pair. Each refusal
+    happens before anything is sent anywhere.
 
 .PARAMETER Force
     Stop the onboard client and deploy over it. Refuses by default: a running
@@ -104,13 +118,14 @@
     run, so the IO decision shows up in a dry run too.
 
 .EXAMPLE
-    ./06-deploy-onboard-hmi.ps1 -WhatIf
+    ./06-deploy-onboard-hmi.ps1 -OnboardPort 58005 -HealthPort 58007 -WhatIf
+    agv01 against the MVP service.
 
 .EXAMPLE
-    ./06-deploy-onboard-hmi.ps1 -RunId 12345678
+    ./06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort 58105 -HealthPort 58107 -RunId 12345678
 
 .EXAMPLE
-    ./06-deploy-onboard-hmi.ps1 -SshAlias agv02 -KeepCurrentIo -WhatIf
+    ./06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort 58105 -HealthPort 58107 -KeepCurrentIo -WhatIf
     A test vehicle on the slot simulator: deploy and keep it on the simulator.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Download')]
@@ -131,11 +146,12 @@ param(
 
     [string] $ControlServerHost = '172.19.205.222',
 
+    # workspace#32: no defaults. Both are required; see .PARAMETER HealthPort.
     [ValidateRange(1, 65535)]
-    [int] $OnboardPort = 58005,
+    [int] $OnboardPort,
 
     [ValidateRange(1, 65535)]
-    [int] $HealthPort = 58007,
+    [int] $HealthPort,
 
     [string] $StagingRoot = 'C:\temp\agv\onboard-staging',
 
@@ -332,7 +348,77 @@ function Resolve-OnboardIoTarget {
     return [pscustomobject]@{ Host = $SiteHost; Port = $TemplatePort; Line = $line; Warning = $warning }
 }
 
+function Assert-ControlServerPorts {
+    <#
+        workspace#32. Run before anything is read from the vehicle or sent anywhere. Both ports must be given; the MVP
+        pair is exactly 58005/58007 and a port of it never travels with a non-MVP one; a v2-only vehicle never gets the
+        MVP pair. Returns $true for the MVP pair, $false otherwise. Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Given,
+        [int] $OnboardPort,
+        [int] $HealthPort,
+        [Parameter(Mandatory = $true)][string] $SshAlias
+    )
+    # The MVP service's two ports on factory01, and the cars that only ever talk to the v2 instance (agv01 is the MVP's).
+    $mvpOnboard = 58005; $mvpHealth = 58007; $v2OnlyAliases = @('agv02', 'agv03')
+    $missing = @(@('OnboardPort', 'HealthPort') | Where-Object { $Given -notcontains $_ })
+    if ($missing.Count -gt 0) {
+        throw ("PORTS_REQUIRED: pass both -OnboardPort and -HealthPort (missing: -$($missing -join ', -')). Neither has a " +
+            "default: on 2026-10-12 a v2 deployment gave -OnboardPort 58105 alone, -HealthPort fell back to the MVP's " +
+            "$mvpHealth, and the post-deploy probe sent the v2 projection credentials to the production MVP " +
+            "service. v2 parallel instance: -OnboardPort 58105 -HealthPort 58107. MVP (agv01): -OnboardPort " +
+            "$mvpOnboard -HealthPort $mvpHealth.")
+    }
+    $mvp = @($mvpOnboard, $mvpHealth)
+    $isMvpPair = $OnboardPort -eq $mvpOnboard -and $HealthPort -eq $mvpHealth
+    if (-not $isMvpPair -and ($mvp -contains $OnboardPort -or $mvp -contains $HealthPort)) {
+        throw ("PORTS_MIXED_MVP: -OnboardPort $OnboardPort -HealthPort $HealthPort mixes a port of the MVP service " +
+            "($mvpOnboard/$mvpHealth) with another. A vehicle talks to one server: the MVP " +
+            "pair exactly, or neither MVP port. Mixing them is how a v2 vehicle's credentials reach the MVP.")
+    }
+    if ($isMvpPair -and $v2OnlyAliases -contains $SshAlias.Trim().ToLowerInvariant()) {
+        throw ("MVP_PORTS_FOR_V2_VEHICLE: $SshAlias is a v2-line vehicle and never talks to the MVP service, but the " +
+            "ports given are the MVP's ($mvpOnboard/$mvpHealth). The v2 parallel instance is " +
+            '-OnboardPort 58105 -HealthPort 58107.')
+    }
+    return $isMvpPair
+}
+
+function Assert-RenderedServerTarget {
+    <#
+        workspace#32. Run on the rendered configuration, before anything reaches the vehicle. The vehicle-safety
+        endpoint -- which the probe and the client both call with this vehicle's credential -- must be on -HealthPort,
+        and a v2 template (its own projection credential variable, or an endpoint naming ?vehicleKey=) never goes to
+        the MVP pair. Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string] $Endpoint,
+        [Parameter(Mandatory = $true)][string] $SafetyVariable,
+        [Parameter(Mandatory = $true)][string] $SessionVariable,
+        [Parameter(Mandatory = $true)][int] $HealthPort,
+        [Parameter(Mandatory = $true)][bool] $IsMvpPair
+    )
+    $mvpOnboard = 58005; $mvpHealth = 58007
+    $port = ([uri] $Endpoint).Port
+    if ($port -ne $HealthPort) {
+        throw "ENDPOINT_PORT_MISMATCH: vehicleSafety.endpoint renders on port $port, not -HealthPort $HealthPort. Refusing to send this vehicle's credential to a port nobody asked for."
+    }
+    $named = [System.Web.HttpUtility]::ParseQueryString(([uri] $Endpoint).Query)['vehicleKey']
+    $v2Template = $SafetyVariable -cne $SessionVariable -or $null -ne $named
+    if ($IsMvpPair -and $v2Template) {
+        throw ("MVP_PORTS_FOR_V2_TEMPLATE: this package's onboard template is the v2 line's (projection credential " +
+            "'$SafetyVariable', endpoint vehicleKey '$named'), but the ports given are the MVP service's " +
+            "($mvpOnboard/$mvpHealth). A v2 vehicle's credentials never go to the MVP. " +
+            'The v2 parallel instance is -OnboardPort 58105 -HealthPort 58107.')
+    }
+}
+
 Write-Step "OnboardHmi deployment to $SshAlias"
+
+# workspace#32. Before anything is read from the vehicle, downloaded, or sent: which server, on both ports.
+$isMvpPair = Assert-ControlServerPorts -Given @($PSBoundParameters.Keys) -OnboardPort $OnboardPort -HealthPort $HealthPort -SshAlias $SshAlias
+Write-Step ("ControlServer ports: NDJSON {0}, HTTP {1} ({2})" -f $OnboardPort, $HealthPort, ($isMvpPair ? 'the MVP service' : 'not the MVP service'))
 
 # Before anything is downloaded or read: the two IO switches contradict each other.
 if ($KeepCurrentIo -and $UseSiteIo) {
@@ -657,6 +743,10 @@ try {
         -SharedSafetyCredential:$SharedSafetyCredential
     $safetyCredential = [System.Net.NetworkCredential]::new('', $secrets[$safetyChoice.StoreKey]).Password
     Assert-VehicleSafetyEndpointNamesVehicle -Endpoint ([string] $config.vehicleSafety.endpoint) -VehicleKey ([string] $config.vehicleSafety.expectedVehicleKey)
+    # workspace#32: the endpoint the credential goes to is on -HealthPort, and a v2 template never goes to the MVP pair.
+    Assert-RenderedServerTarget -Endpoint ([string] $config.vehicleSafety.endpoint) -SafetyVariable ([string] $config.vehicleSafety.credentialEnvironmentVariable) `
+        -SessionVariable ([string] $config.wireToGate.credentialEnvironmentVariable) -HealthPort $HealthPort -IsMvpPair $isMvpPair
+    Write-Step "vehicle-safety endpoint: $($config.vehicleSafety.endpoint)"
     Write-Step "Vehicle-safety credential: $($safetyChoice.Variable) from $($safetyChoice.StoreKey) ($($safetyChoice.Reason)); value not shown"
 
     $renderedPath = Join-Path $localStage 'appsettings.json'
@@ -729,6 +819,12 @@ Move-Item -LiteralPath `$incoming -Destination `$root
 `$endpoint = '{0}:{1}' -f `$placed.wireToGate.host, `$placed.wireToGate.port
 if (`$endpoint -ne '${ControlServerHost}:$OnboardPort') { throw "Placed wireToGate endpoint is `$endpoint, expected ${ControlServerHost}:$OnboardPort." }
 "wireToGate endpoint read back: `$endpoint"
+# workspace#32: the projection endpoint is where this vehicle's credential goes, from the probe below and from the
+# client. Read back before any credential is set: on -HealthPort, and never an MVP port unless this is the MVP pair.
+`$safetyPort = ([uri] `$placed.vehicleSafety.endpoint).Port
+if (`$safetyPort -ne $HealthPort) { throw "Placed vehicleSafety.endpoint is on port `$safetyPort, expected $HealthPort." }
+if ('$isMvpPair' -cne 'True' -and @(58005, 58007) -contains `$safetyPort) { throw "Placed vehicleSafety.endpoint is on the MVP's port `$safetyPort." }
+"vehicleSafety endpoint read back: `$(`$placed.vehicleSafety.endpoint)"
 # workspace#28: the IO target is the other fact that decides what the vehicle does when the client starts.
 `$ioPlaced = '{0}:{1}' -f `$placed.ioModule.host, `$placed.ioModule.port
 if (`$ioPlaced -ne '$($ioTarget.Host):$($ioTarget.Port)') { throw "Placed ioModule is `$ioPlaced, expected $($ioTarget.Host):$($ioTarget.Port)." }
@@ -777,7 +873,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "scp of the placement script failed (exit $LASTEXITCODE)" }
 
     Write-Step 'Placing the payload on the vehicle'
-    $placeOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$remotePlace`"; Remove-Item -LiteralPath `"$remotePlace`" -Force")
+    # workspace#32 review S1: the vehicle's shell exits with its LAST command's status, so the Remove-Item used to turn
+    # a placement that threw (a read-back mismatch, ws#28's and ws#32's alike) into exit 0 and a "Staged" hand-off.
+    # Carry the placement's own exit code past the cleanup.
+    $placeOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$remotePlace`"; `$c = `$LASTEXITCODE; Remove-Item -LiteralPath `"$remotePlace`" -Force; exit `$c")
 
     # ------------------------------------------------------------- hand off ---
 

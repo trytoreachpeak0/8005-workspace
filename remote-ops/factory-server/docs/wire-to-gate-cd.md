@@ -37,9 +37,15 @@ pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -RunId
 ```
 
 ```bash
-# 三、部署车载端（控制端）。搬完就停，不启动。
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1
+# 三、部署车载端（控制端）。搬完就停，不启动。两个端口都要给（workspace#32）。
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -OnboardPort 58005 -HealthPort 58007
 ```
+
+**agv01 部署的写法变了（[workspace#32](https://github.com/trytoreachpeak0/8005-workspace/issues/32)，2026-10-12）：**
+`06` 的 `-OnboardPort`、`-HealthPort` 不再有默认值。以前不带端口的旧命令（`06-deploy-onboard-hmi.ps1`、
+`06-deploy-onboard-hmi.ps1 -WhatIf`）现在会在第一步以 `PORTS_REQUIRED` 拒绝，不连车、不下载、不发任何请求。
+agv01 连的是 MVP，固定写 `-OnboardPort 58005 -HealthPort 58007`；这两个端口只能成对出现，和别的端口混用也会被拒。
+原因与完整规则见 `remote-ops/onboard-hmi/docs/USAGE.md` 的「端口」一段。
 
 出事了：
 
@@ -227,12 +233,12 @@ pwsh -File remote-ops/factory-server/scripts/15-deploy-control-server.ps1 -RunId
 
 ```bash
 # 6. 车载端也先干跑，它会把渲染好的配置整份打出来
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -WhatIf
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -OnboardPort 58005 -HealthPort 58007 -WhatIf
 ```
 
 ```bash
 # 7. 部署车载端
-pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1
+pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -OnboardPort 58005 -HealthPort 58007
 ```
 
 ```bash
