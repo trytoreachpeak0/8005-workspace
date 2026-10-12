@@ -16,14 +16,50 @@
 
     -Root holds bin\hmi and bin\sim (published builds) and receives run\ and out\<timestamp>.
 #>
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-    [Parameter(Mandatory)][string] $Root,
-    [Parameter(Mandatory)][string] $Scripts,
-    [int] $Iterations = 12,
-    [int] $IntervalSeconds = 5
+    [Parameter(Mandatory, ParameterSetName = 'Run')][string] $Root,
+    [Parameter(Mandatory, ParameterSetName = 'Run')][string] $Scripts,
+    [Parameter(ParameterSetName = 'Run')][int] $Iterations = 12,
+    [Parameter(ParameterSetName = 'Run')][int] $IntervalSeconds = 5,
+    # Pure string checks of Test-UnderRoot; starts nothing.
+    [Parameter(Mandatory, ParameterSetName = 'SelfTest')][switch] $SelfTest
 )
 $ErrorActionPreference = 'Stop'
-# Backslashes: process paths are compared against it, and Windows reports them with backslashes.
+
+<#
+    Whether a process's executable lies under -Root, so the cleanup stops only what this run started.
+    Both sides normalised first: on 2026-10-12 a -Root given with forward slashes never matched Windows'
+    backslash process paths, and the run left the onboard client and the simulator running. The trailing
+    separator keeps F:\x\hmi3160 from passing for F:\x\hmi316.
+#>
+function Test-UnderRoot([string] $Path, [string] $Root) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+    $base = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($Root)) + [System.IO.Path]::DirectorySeparatorChar
+    return [System.IO.Path]::GetFullPath($Path).StartsWith($base, [StringComparison]::OrdinalIgnoreCase)
+}
+
+if ($SelfTest) {
+    $cases = @(
+        @{ Path = 'F:\8005-scratch\hmi316\bin\hmi\SQCD.Agv.Wpf.exe'; Root = 'F:/8005-scratch/hmi316'; Expect = $true; Why = 'forward-slash root, backslash path (the 2026-10-12 miss)' }
+        @{ Path = 'F:\8005-scratch\hmi316\bin\sim\SQCD_8005AGV_Simulator.exe'; Root = 'F:\8005-scratch\hmi316\'; Expect = $true; Why = 'root with a trailing separator' }
+        @{ Path = 'f:\8005-SCRATCH\hmi316\bin\hmi\SQCD.Agv.Wpf.exe'; Root = 'F:\8005-scratch\hmi316'; Expect = $true; Why = 'case differs' }
+        @{ Path = 'F:\8005-scratch\hmi3160\bin\hmi\SQCD.Agv.Wpf.exe'; Root = 'F:/8005-scratch/hmi316'; Expect = $false; Why = 'a sibling sharing the prefix' }
+        @{ Path = 'C:\8005\OnboardHmi\SQCD.Agv.Wpf.exe'; Root = 'F:/8005-scratch/hmi316'; Expect = $false; Why = 'an installed client elsewhere' }
+        @{ Path = 'F:\8005-scratch\hmi316'; Root = 'F:/8005-scratch/hmi316'; Expect = $false; Why = 'the root itself is not a file under it' }
+        @{ Path = $null; Root = 'F:/8005-scratch/hmi316'; Expect = $false; Why = 'a process whose path cannot be read' }
+    )
+    $failed = 0
+    foreach ($c in $cases) {
+        $got = Test-UnderRoot $c.Path $c.Root
+        if ($got -ne $c.Expect) { $failed++; "FAIL $($c.Why): got $got" } else { "PASS $($c.Why)" }
+    }
+    # The old filter, kept as the case the new one must differ from.
+    if ('F:\8005-scratch\hmi316\bin\hmi\SQCD.Agv.Wpf.exe' -like 'F:/8005-scratch/hmi316*') { $failed++; 'FAIL the old -like filter now matches; this test no longer pins the miss' } else { 'PASS the old -like filter misses it, as on 2026-10-12' }
+    "SELFTEST $($failed ? 'FAIL' : 'PASS') ($failed failed)"
+    exit ($failed ? 1 : 0)
+}
+
 $Root = [System.IO.Path]::GetFullPath($Root)
 $reader = Join-Path $Scripts '18-read-hmi-screen-state.ps1'
 $out = Join-Path $Root "out\$(Get-Date -Format 'yyyyMMdd-HHmmss')"
@@ -62,7 +98,7 @@ function Invoke-Reader([string] $Label, [string[]] $More) {
     $parsed = $record ? (Get-Content -LiteralPath $record.FullName -Raw | ConvertFrom-Json) : $null
     $entry = [ordered]@{
         label = $Label; exit = $exit; outcome = ${parsed}?.outcome; detail = ${parsed}?.detail
-        rows = @(${parsed}?.rows).Count; differences = @(${parsed}?.rows | Where-Object { -not $_.match } | ForEach-Object { "$($_.category) $($_.key) $($_.field): $($_.snapshot) / $($_.uia)" })
+        rows = @(${parsed}?.rows | Where-Object { $_ }).Count; differences = @(${parsed}?.rows | Where-Object { $_ -and -not $_.match } | ForEach-Object { "$($_.category) $($_.key) $($_.field): $($_.snapshot) / $($_.uia)" })
         captureSeconds = ${parsed}?.capture?.seconds; revision = ${parsed}?.read?.contentRevision
     }
     Add-Content -LiteralPath (Join-Path $out 'runs.jsonl') -Value ($entry | ConvertTo-Json -Compress -Depth 5)
@@ -104,7 +140,7 @@ try {
     }
 
     # Close the onboard client the way an operator would, then the file must read EXITED.
-    foreach ($p in @(Get-Process -Name SQCD.Agv.Wpf -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Root\*" })) {
+    foreach ($p in @(Get-Process -Name SQCD.Agv.Wpf -ErrorAction SilentlyContinue | Where-Object { Test-UnderRoot $_.Path $Root })) {
         $p.CloseMainWindow() | Out-Null
         if (-not $p.WaitForExit(15000)) { Note "hmi $($p.Id) did not close in 15 s, killed"; $p.Kill() }
     }
@@ -113,7 +149,7 @@ try {
 } finally {
     Note "final stack: sim=$((Get-Stack).Sim -join ',') hmi=$((Get-Stack).Hmi -join ',')"
     foreach ($name in 'SQCD.Agv.Wpf', 'SQCD_8005AGV_Simulator') {
-        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Root\*" })) {
+        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { Test-UnderRoot $_.Path $Root })) {
             try { $p.CloseMainWindow() | Out-Null; if (-not $p.WaitForExit(10000)) { $p.Kill() } } catch { if (-not $p.HasExited) { throw } }
         }
     }

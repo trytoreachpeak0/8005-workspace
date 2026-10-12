@@ -1,0 +1,14 @@
+{"label":"read-1","exit":0,"outcome":"ACTIVE","detail":"written 3.9 s ago by process 36612","rows":1,"differences":["  :  / "],"captureSeconds":null,"revision":1}
+{"label":"crosscheck-01","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":7.4,"revision":1}
+{"label":"crosscheck-02","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":3.9,"revision":1}
+{"label":"crosscheck-03","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":3.5,"revision":1}
+{"label":"crosscheck-04","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":2.8,"revision":1}
+{"label":"crosscheck-05","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":6.3,"revision":1}
+{"label":"crosscheck-06","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":9.6,"revision":1}
+{"label":"crosscheck-07","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":4.1,"revision":1}
+{"label":"crosscheck-08","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":3.7,"revision":1}
+{"label":"crosscheck-09","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":3.5,"revision":1}
+{"label":"crosscheck-10","exit":11,"outcome":"MOVING","detail":"contentRevision moved from 2 to 3 around the UIA reading","rows":47,"differences":[],"captureSeconds":9.1,"revision":2}
+{"label":"crosscheck-11","exit":11,"outcome":"MOVING","detail":"contentRevision moved from 4 to 5 around the UIA reading","rows":47,"differences":[],"captureSeconds":4.1,"revision":4}
+{"label":"crosscheck-12","exit":0,"outcome":"MATCH","detail":"47 compared field(s), no difference","rows":47,"differences":[],"captureSeconds":3.8,"revision":5}
+{"label":"read-after-exit","exit":4,"outcome":"EXITED","detail":"no SQCD.Agv.Wpf with process id 36612 is running. The writer leaves no end marker on exit (onboard-hmi#315 L2), so the file still says ACTIVE; last written 2026-10-12T19:37:42.7497386+08:00.","rows":1,"differences":["  :  / "],"captureSeconds":null,"revision":5}

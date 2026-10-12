@@ -1,0 +1,20 @@
+19:34:14.109 onboard settings: screenState.enabled=true, logging.directory=<Root>\run\logs, journalPath=<Root>\run\onboard-journal.db, wireToGate.enabled=False
+19:34:20.043 simulator up pid=18680
+19:34:34.622 hmi up pid=36612
+19:34:39.268 read-1 exit=0 ACTIVE rows=1 diffs=1 rev=1 capture=s written 3.9 s ago by process 36612
+19:34:54.616 crosscheck-01 exit=0 MATCH rows=47 diffs=0 rev=1 capture=7.4s 47 compared field(s), no difference
+19:35:08.137 crosscheck-02 exit=0 MATCH rows=47 diffs=0 rev=1 capture=3.9s 47 compared field(s), no difference
+19:35:20.558 crosscheck-03 exit=0 MATCH rows=47 diffs=0 rev=1 capture=3.5s 47 compared field(s), no difference
+19:35:32.559 crosscheck-04 exit=0 MATCH rows=47 diffs=0 rev=1 capture=2.8s 47 compared field(s), no difference
+19:35:49.437 crosscheck-05 exit=0 MATCH rows=47 diffs=0 rev=1 capture=6.3s 47 compared field(s), no difference
+19:36:08.890 crosscheck-06 exit=0 MATCH rows=47 diffs=0 rev=1 capture=9.6s 47 compared field(s), no difference
+19:36:22.997 crosscheck-07 exit=0 MATCH rows=47 diffs=0 rev=1 capture=4.1s 47 compared field(s), no difference
+19:36:35.423 crosscheck-08 exit=0 MATCH rows=47 diffs=0 rev=1 capture=3.7s 47 compared field(s), no difference
+19:36:48.306 crosscheck-09 exit=0 MATCH rows=47 diffs=0 rev=1 capture=3.5s 47 compared field(s), no difference
+19:37:10.328 crosscheck-10 exit=11 MOVING rows=47 diffs=0 rev=2 capture=9.1s contentRevision moved from 2 to 3 around the UIA reading
+19:37:29.501 crosscheck-11 exit=11 MOVING rows=47 diffs=0 rev=4 capture=4.1s contentRevision moved from 4 to 5 around the UIA reading
+19:37:42.625 crosscheck-12 exit=0 MATCH rows=47 diffs=0 rev=5 capture=3.8s 47 compared field(s), no difference
+19:37:47.770 hmi closed
+19:37:49.496 read-after-exit exit=4 EXITED rows=1 diffs=1 rev=5 capture=s no SQCD.Agv.Wpf with process id 36612 is running. The writer leaves no end marker on exit (onboard-hmi#315 L2), so the file still says ACTIVE; last written 2026-10-12T19:37:42.7497386+08:00.
+19:37:49.530 final stack: sim=18680 hmi=
+19:37:50.722 output: F:\8005-scratch\hmi316\out\20261012-193414

@@ -1,0 +1,29 @@
+{
+  "tool": "18-read-hmi-screen-state",
+  "mode": "read",
+  "target": "local:F:\\8005-scratch\\hmi316\\run\\logs",
+  "name": "local-20261012T193435",
+  "startedAt": "2026-10-12T19:34:35.6907746+08:00",
+  "staleAfterSeconds": 15,
+  "outcome": "ACTIVE",
+  "detail": "written 3.9 s ago by process 36612",
+  "error": null,
+  "read": {
+    "outcome": "ACTIVE",
+    "detail": "written 3.9 s ago by process 36612",
+    "vehicleNow": "2026-10-12T19:34:37.0494395+08:00",
+    "ageSeconds": 3.9,
+    "processStartId": "43bd4632cfef4c479e37d3433f74b1fe",
+    "contentRevision": 1,
+    "processId": 36612,
+    "writerAlive": true,
+    "hmiProcesses": [
+      {
+        "id": 36612,
+        "sessionId": 1,
+        "startTime": "2026-10-12T19:34:20.1816155+08:00"
+      }
+    ]
+  },
+  "finishedAt": "2026-10-12T19:34:38.6992775+08:00"
+}

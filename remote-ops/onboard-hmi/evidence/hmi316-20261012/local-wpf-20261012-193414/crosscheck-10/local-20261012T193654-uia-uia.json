@@ -1,0 +1,2144 @@
+{
+  "tool": "agv-capture-hmi-screen",
+  "host": "<redacted>",
+  "user": "<redacted>",
+  "sessionId": 1,
+  "vehicleClock": "2026-10-12T19:37:02.4524804+08:00",
+  "tickCount64": 78068265,
+  "processName": "SQCD.Agv.Wpf",
+  "errors": [],
+  "dpiAware": true,
+  "foregroundAtStart": {
+    "handle": "0x205B2",
+    "process": "claude"
+  },
+  "focusDisturbed": false,
+  "desktop": {
+    "inputDesktop": "Default",
+    "openError": 0,
+    "logonUiInSession": false,
+    "foregroundProcess": "claude",
+    "lockSignals": [],
+    "locked": false
+  },
+  "hmi": {
+    "running": true,
+    "processes": [
+      {
+        "id": 36612,
+        "startTime": "2026-10-12T19:34:20.1816155+08:00",
+        "responding": true
+      }
+    ]
+  },
+  "virtualScreen": [
+    0,
+    0,
+    2240,
+    1400
+  ],
+  "hmiWindows": [
+    {
+      "handle": "0x16D0944",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "WISPTIS",
+      "className": "TabletPenServiceHelperClass",
+      "visible": false,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "zOrder": 191
+    },
+    {
+      "handle": "0x2FD0B92",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "",
+      "className": "HwndWrapper[SQCD.Agv.Wpf;;d5e7a3c5-fabc-4593-9406-56e432985a9d]",
+      "visible": false,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        198,
+        56
+      ],
+      "zOrder": 192,
+      "uia": {
+        "controlType": "Window",
+        "name": "",
+        "automationId": "",
+        "itemStatus": "",
+        "className": "HwndWrapper[SQCD.Agv.Wpf;;d5e7a3c5-fabc-4593-9406-56e432985a9d]",
+        "isEnabled": true,
+        "isOffscreen": false,
+        "hasFocus": false,
+        "isPassword": false,
+        "rect": [
+          0,
+          0,
+          198,
+          56
+        ]
+      }
+    },
+    {
+      "handle": "0x1150342",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "8005 多仓位AGV车载端",
+      "className": "HwndWrapper[SQCD.Agv.Wpf;;120f5d72-7cf6-4dfe-8898-34530df35e83]",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        -11,
+        -11,
+        2262,
+        1350
+      ],
+      "zOrder": 193,
+      "uia": {
+        "controlType": "Window",
+        "name": "8005 多仓位AGV车载端",
+        "automationId": "",
+        "itemStatus": "",
+        "className": "Window",
+        "isEnabled": true,
+        "isOffscreen": false,
+        "hasFocus": true,
+        "isPassword": false,
+        "rect": [
+          -11,
+          -11,
+          2262,
+          1350
+        ],
+        "children": [
+          {
+            "controlType": "Text",
+            "name": "车辆",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              30,
+              64,
+              400,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "AGV-8005-01",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              30,
+              91,
+              400,
+              32
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "",
+            "automationId": "BatteryStatus",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": null
+          },
+          {
+            "controlType": "Text",
+            "name": "",
+            "automationId": "ChargingStatus",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              42,
+              126,
+              388,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "任务系统",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              430,
+              64,
+              309,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "离线",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              430,
+              91,
+              309,
+              30
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "仓门控制",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              739,
+              64,
+              309,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "在线",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              739,
+              91,
+              309,
+              30
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "上层会话",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              1048,
+              64,
+              309,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "未启用",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              1048,
+              91,
+              309,
+              30
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "到站",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              1357,
+              64,
+              36,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "",
+            "automationId": "StopDirection",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": null
+          },
+          {
+            "controlType": "Text",
+            "name": "",
+            "automationId": "TaskType",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              1417,
+              64,
+              430,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "未到站",
+            "automationId": "IdleReturnStatus",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              1357,
+              91,
+              490,
+              30
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "发车安全",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              1847,
+              64,
+              363,
+              24
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "允许发车",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              1847,
+              91,
+              363,
+              30
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "物料条码",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              30,
+              204,
+              96,
+              32
+            ]
+          },
+          {
+            "controlType": "Edit",
+            "name": "",
+            "automationId": "ScanTextBox",
+            "itemStatus": "",
+            "className": "TextBox",
+            "isEnabled": false,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              141,
+              192,
+              1922,
+              57
+            ],
+            "value": ""
+          },
+          {
+            "controlType": "Button",
+            "name": "手动提交",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "Button",
+            "isEnabled": false,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              2078,
+              192,
+              132,
+              57
+            ],
+            "children": [
+              {
+                "controlType": "Text",
+                "name": "手动提交",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "TextBlock",
+                "isEnabled": false,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  2102,
+                  206,
+                  84,
+                  28
+                ]
+              }
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "连接中",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              32,
+              293,
+              68,
+              30
+            ]
+          },
+          {
+            "controlType": "Pane",
+            "name": "正在等待仓门控制设备和任务系统连接…",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "ScrollViewer",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              118,
+              293,
+              2072,
+              30
+            ],
+            "children": [
+              {
+                "controlType": "Text",
+                "name": "正在等待仓门控制设备和任务系统连接…",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "TextBlock",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  118,
+                  294,
+                  2072,
+                  28
+                ]
+              }
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "告警：任务系统离线，收不到到站与校验结果。",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              32,
+              335,
+              2176,
+              28
+            ]
+          },
+          {
+            "controlType": "Pane",
+            "name": "",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "ScrollViewer",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              27,
+              413,
+              414,
+              714
+            ],
+            "children": [
+              {
+                "controlType": "Text",
+                "name": "本站清单",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "TextBlock",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  27,
+                  413,
+                  414,
+                  26
+                ]
+              },
+              {
+                "controlType": "List",
+                "name": "",
+                "automationId": "WorklistItems",
+                "itemStatus": "",
+                "className": "ListBox",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  27,
+                  442,
+                  414,
+                  3
+                ]
+              },
+              {
+                "controlType": "Text",
+                "name": "行程计划",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "TextBlock",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  27,
+                  457,
+                  414,
+                  26
+                ]
+              },
+              {
+                "controlType": "List",
+                "name": "",
+                "automationId": "JourneyPlanLegs",
+                "itemStatus": "",
+                "className": "ItemsControl",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": null
+              }
+            ]
+          },
+          {
+            "controlType": "Pane",
+            "name": "",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "ScrollViewer",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              465,
+              401,
+              1760,
+              738
+            ],
+            "children": [
+              {
+                "controlType": "List",
+                "name": "",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "ItemsControl",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  465,
+                  401,
+                  1760,
+                  416
+                ],
+                "children": [
+                  {
+                    "controlType": "DataItem",
+                    "name": "SQCD.Agv.Wpf.ViewModels.SlotGroupViewModel",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "ItemsControlItem",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      465,
+                      401,
+                      1760,
+                      208
+                    ],
+                    "children": [
+                      {
+                        "controlType": "Text",
+                        "name": "前侧仓门（1～4 号）",
+                        "automationId": "",
+                        "itemStatus": "",
+                        "className": "TextBlock",
+                        "isEnabled": true,
+                        "isOffscreen": false,
+                        "hasFocus": false,
+                        "isPassword": false,
+                        "rect": [
+                          483,
+                          410,
+                          198,
+                          28
+                        ]
+                      },
+                      {
+                        "controlType": "List",
+                        "name": "",
+                        "automationId": "",
+                        "itemStatus": "",
+                        "className": "ItemsControl",
+                        "isEnabled": true,
+                        "isOffscreen": false,
+                        "hasFocus": false,
+                        "isPassword": false,
+                        "rect": [
+                          465,
+                          441,
+                          1760,
+                          165
+                        ],
+                        "children": [
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              465,
+                              441,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "1号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  462,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  500,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  530,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  561,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              905,
+                              441,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "2号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  462,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  500,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  530,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  561,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              1345,
+                              441,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "3号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  462,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  500,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  530,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  561,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              1785,
+                              441,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "4号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  462,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  500,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  530,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  561,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "controlType": "DataItem",
+                    "name": "SQCD.Agv.Wpf.ViewModels.SlotGroupViewModel",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "ItemsControlItem",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      465,
+                      609,
+                      1760,
+                      208
+                    ],
+                    "children": [
+                      {
+                        "controlType": "Text",
+                        "name": "后侧仓门（5～8 号）",
+                        "automationId": "",
+                        "itemStatus": "",
+                        "className": "TextBlock",
+                        "isEnabled": true,
+                        "isOffscreen": false,
+                        "hasFocus": false,
+                        "isPassword": false,
+                        "rect": [
+                          483,
+                          618,
+                          198,
+                          28
+                        ]
+                      },
+                      {
+                        "controlType": "List",
+                        "name": "",
+                        "automationId": "",
+                        "itemStatus": "",
+                        "className": "ItemsControl",
+                        "isEnabled": true,
+                        "isOffscreen": false,
+                        "hasFocus": false,
+                        "isPassword": false,
+                        "rect": [
+                          465,
+                          649,
+                          1760,
+                          165
+                        ],
+                        "children": [
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              465,
+                              649,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "5号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  670,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  708,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  738,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  486,
+                                  769,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              905,
+                              649,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "6号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  670,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  708,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  738,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  926,
+                                  769,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              1345,
+                              649,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "7号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  670,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  708,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  738,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1366,
+                                  769,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "controlType": "DataItem",
+                            "name": "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+                            "automationId": "",
+                            "itemStatus": "",
+                            "className": "ItemsControlItem",
+                            "isEnabled": true,
+                            "isOffscreen": false,
+                            "hasFocus": false,
+                            "isPassword": false,
+                            "rect": [
+                              1785,
+                              649,
+                              440,
+                              165
+                            ],
+                            "children": [
+                              {
+                                "controlType": "Text",
+                                "name": "8号仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  670,
+                                  398,
+                                  32
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "仓门：已锁",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  708,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "货物：空仓",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  738,
+                                  398,
+                                  28
+                                ]
+                              },
+                              {
+                                "controlType": "Text",
+                                "name": "",
+                                "automationId": "",
+                                "itemStatus": "",
+                                "className": "TextBlock",
+                                "isEnabled": true,
+                                "isOffscreen": false,
+                                "hasFocus": false,
+                                "isPassword": false,
+                                "rect": [
+                                  1806,
+                                  769,
+                                  398,
+                                  24
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "controlType": "Text",
+            "name": "操作记录（最近300条）",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "TextBlock",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              30,
+              1160,
+              2045,
+              27
+            ]
+          },
+          {
+            "controlType": "Button",
+            "name": "清空界面记录",
+            "automationId": "",
+            "itemStatus": "",
+            "className": "Button",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              2075,
+              1160,
+              138,
+              33
+            ],
+            "children": [
+              {
+                "controlType": "Text",
+                "name": "清空界面记录",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "TextBlock",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  2090,
+                  1164,
+                  108,
+                  24
+                ]
+              }
+            ]
+          },
+          {
+            "controlType": "List",
+            "name": "",
+            "automationId": "LogListBox",
+            "itemStatus": "",
+            "className": "ListBox",
+            "isEnabled": true,
+            "isOffscreen": false,
+            "hasFocus": false,
+            "isPassword": false,
+            "rect": [
+              27,
+              1193,
+              2186,
+              108
+            ],
+            "children": [
+              {
+                "controlType": "ListItem",
+                "name": "LogLineViewModel { Timestamp = 10/12/2026 7:34:21 PM +08:00, Kind = System, Message = 车载端正在启动。, TimeText = 19:34:21, CategoryText = 系统 }",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "ListBoxItem",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  29,
+                  1195,
+                  2183,
+                  30
+                ],
+                "children": [
+                  {
+                    "controlType": "Text",
+                    "name": "19:34:21",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "TextBlock",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      34,
+                      1199,
+                      87,
+                      23
+                    ]
+                  },
+                  {
+                    "controlType": "Text",
+                    "name": "系统",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "TextBlock",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      121,
+                      1199,
+                      63,
+                      23
+                    ]
+                  },
+                  {
+                    "controlType": "Text",
+                    "name": "车载端正在启动。",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "TextBlock",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      184,
+                      1199,
+                      2023,
+                      23
+                    ]
+                  }
+                ]
+              },
+              {
+                "controlType": "ListItem",
+                "name": "LogLineViewModel { Timestamp = 10/12/2026 7:34:22 PM +08:00, Kind = System, Message = 正在连接仓门控制设备和任务系统。, TimeText = 19:34:22, CategoryText = 系统 }",
+                "automationId": "",
+                "itemStatus": "",
+                "className": "ListBoxItem",
+                "isEnabled": true,
+                "isOffscreen": false,
+                "hasFocus": false,
+                "isPassword": false,
+                "rect": [
+                  29,
+                  1225,
+                  2183,
+                  30
+                ],
+                "children": [
+                  {
+                    "controlType": "Text",
+                    "name": "19:34:22",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "TextBlock",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      34,
+                      1229,
+                      87,
+                      23
+                    ]
+                  },
+                  {
+                    "controlType": "Text",
+                    "name": "系统",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "TextBlock",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      121,
+                      1229,
+                      63,
+                      23
+                    ]
+                  },
+                  {
+                    "controlType": "Text",
+                    "name": "正在连接仓门控制设备和任务系统。",
+                    "automationId": "",
+                    "itemStatus": "",
+                    "className": "TextBlock",
+                    "isEnabled": true,
+                    "isOffscreen": false,
+                    "hasFocus": false,
+                    "isPassword": false,
+                    "rect": [
+                      184,
+                      1229,
+                      2023,
+                      23
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "handle": "0x3A0926",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "SystemResourceNotifyWindow",
+      "className": "HwndWrapper[SQCD.Agv.Wpf;;9101fa54-0449-4f5f-9ea1-2cb0b6d89ab1]",
+      "visible": false,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "zOrder": 194,
+      "uia": {
+        "controlType": "Pane",
+        "name": "SystemResourceNotifyWindow",
+        "automationId": "",
+        "itemStatus": "",
+        "className": "HwndWrapper[SQCD.Agv.Wpf;;9101fa54-0449-4f5f-9ea1-2cb0b6d89ab1]",
+        "isEnabled": false,
+        "isOffscreen": false,
+        "hasFocus": false,
+        "isPassword": false,
+        "rect": null
+      }
+    },
+    {
+      "handle": "0xC0B7E",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "MediaContextNotificationWindow",
+      "className": "HwndWrapper[SQCD.Agv.Wpf;;c72f247b-0ac2-48d0-bddd-841775227dc3]",
+      "visible": false,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "zOrder": 195,
+      "uia": {
+        "controlType": "Pane",
+        "name": "MediaContextNotificationWindow",
+        "automationId": "",
+        "itemStatus": "",
+        "className": "HwndWrapper[SQCD.Agv.Wpf;;c72f247b-0ac2-48d0-bddd-841775227dc3]",
+        "isEnabled": true,
+        "isOffscreen": false,
+        "hasFocus": false,
+        "isPassword": false,
+        "rect": null
+      }
+    },
+    {
+      "handle": "0x260AAA",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "",
+      "className": "HwndWrapper[SQCD.Agv.Wpf;;773a4fa7-bf7b-45f1-a388-5463c8fd5075]",
+      "visible": false,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        198,
+        56
+      ],
+      "zOrder": 196,
+      "uia": {
+        "controlType": "Window",
+        "name": "",
+        "automationId": "",
+        "itemStatus": "",
+        "className": "HwndWrapper[SQCD.Agv.Wpf;;773a4fa7-bf7b-45f1-a388-5463c8fd5075]",
+        "isEnabled": true,
+        "isOffscreen": false,
+        "hasFocus": false,
+        "isPassword": false,
+        "rect": [
+          0,
+          0,
+          198,
+          56
+        ]
+      }
+    },
+    {
+      "handle": "0xEA089A",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "CiceroUIWndFrame",
+      "className": "CiceroUIWndFrame",
+      "visible": false,
+      "minimized": false,
+      "owner": "0x5309D2",
+      "rect": [
+        200,
+        200,
+        200,
+        200
+      ],
+      "zOrder": 237,
+      "uia": {
+        "controlType": "Pane",
+        "name": "CiceroUIWndFrame",
+        "automationId": "",
+        "itemStatus": "",
+        "className": "CiceroUIWndFrame",
+        "isEnabled": false,
+        "isOffscreen": false,
+        "hasFocus": false,
+        "isPassword": false,
+        "rect": [
+          200,
+          200,
+          200,
+          200
+        ]
+      }
+    },
+    {
+      "handle": "0x46049E",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "Default IME",
+      "className": "IME",
+      "visible": false,
+      "minimized": false,
+      "owner": "0x16D0944",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "zOrder": 364
+    },
+    {
+      "handle": "0x46066E",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "MSCTFIME UI",
+      "className": "MSCTFIME UI",
+      "visible": false,
+      "minimized": false,
+      "owner": "0x6A0ADE",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "zOrder": 365
+    },
+    {
+      "handle": "0x6A0ADE",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "Default IME",
+      "className": "IME",
+      "visible": false,
+      "minimized": false,
+      "owner": "0x1150342",
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "zOrder": 366
+    },
+    {
+      "handle": "0x5309D2",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "CiceroUIWndFrame",
+      "className": "CiceroUIWndFrame",
+      "visible": false,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "zOrder": 367,
+      "uia": {
+        "controlType": "Pane",
+        "name": "CiceroUIWndFrame",
+        "automationId": "",
+        "itemStatus": "",
+        "className": "CiceroUIWndFrame",
+        "isEnabled": false,
+        "isOffscreen": false,
+        "hasFocus": false,
+        "isPassword": false,
+        "rect": null
+      }
+    }
+  ],
+  "uiaNodeCount": 96,
+  "uiaTruncated": false,
+  "visibleTexts": [
+    "8005 多仓位AGV车载端",
+    "车辆",
+    "AGV-8005-01",
+    "任务系统",
+    "离线",
+    "仓门控制",
+    "在线",
+    "上层会话",
+    "未启用",
+    "到站",
+    "未到站",
+    "发车安全",
+    "允许发车",
+    "物料条码",
+    "手动提交",
+    "连接中",
+    "正在等待仓门控制设备和任务系统连接…",
+    "告警：任务系统离线，收不到到站与校验结果。",
+    "本站清单",
+    "行程计划",
+    "SQCD.Agv.Wpf.ViewModels.SlotGroupViewModel",
+    "前侧仓门（1～4 号）",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "1号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "2号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "3号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "4号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "SQCD.Agv.Wpf.ViewModels.SlotGroupViewModel",
+    "后侧仓门（5～8 号）",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "5号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "6号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "7号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "SQCD.Agv.Wpf.ViewModels.LockerCardViewModel",
+    "8号仓",
+    "仓门：已锁",
+    "货物：空仓",
+    "操作记录（最近300条）",
+    "清空界面记录",
+    "LogLineViewModel { Timestamp = 10/12/2026 7:34:21 PM +08:00, Kind = System, Message = 车载端正在启动。, TimeText = 19:34:21, CategoryText = 系统 }",
+    "19:34:21",
+    "系统",
+    "车载端正在启动。",
+    "LogLineViewModel { Timestamp = 10/12/2026 7:34:22 PM +08:00, Kind = System, Message = 正在连接仓门控制设备和任务系统。, TimeText = 19:34:22, CategoryText = 系统 }",
+    "19:34:22",
+    "系统",
+    "正在连接仓门控制设备和任务系统。"
+  ],
+  "focusedElement": {
+    "controlType": "Edit",
+    "name": "Prompt",
+    "automationId": "",
+    "itemStatus": "",
+    "className": "tiptap ProseMirror ProseMirror-focused",
+    "isEnabled": true,
+    "isOffscreen": false,
+    "hasFocus": true,
+    "isPassword": false,
+    "rect": [
+      688,
+      1232,
+      885,
+      30
+    ],
+    "value": "\n"
+  },
+  "desktopWindows": [
+    {
+      "handle": "0x205B2",
+      "process": "claude",
+      "processId": 10288,
+      "title": "Claude",
+      "className": "Chrome_WidgetWin_1",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        -11,
+        -11,
+        2262,
+        1350
+      ],
+      "zOrder": 30
+    },
+    {
+      "handle": "0x420964",
+      "process": "Core Temp x64",
+      "processId": 25224,
+      "title": "Core Temp 1.20.1",
+      "className": "CORETEMP",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        1698,
+        358,
+        504,
+        653
+      ],
+      "zOrder": 41
+    },
+    {
+      "handle": "0xA067E",
+      "process": "图吧工具箱2026",
+      "processId": 24400,
+      "title": "图吧工具箱",
+      "className": "WTWindow",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        449,
+        307,
+        1536,
+        900
+      ],
+      "zOrder": 74
+    },
+    {
+      "handle": "0x20082E",
+      "process": "explorer",
+      "processId": 9180,
+      "title": "Local Disk (C:) - File Explorer",
+      "className": "CabinetWClass",
+      "visible": true,
+      "minimized": true,
+      "owner": null,
+      "rect": [
+        -32000,
+        -32000,
+        237,
+        39
+      ],
+      "zOrder": 92
+    },
+    {
+      "handle": "0x2026A",
+      "process": "TextInputHost",
+      "processId": 16368,
+      "title": "Windows Input Experience",
+      "className": "Windows.UI.Core.CoreWindow",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        2560,
+        1600
+      ],
+      "zOrder": 176
+    },
+    {
+      "handle": "0x1150342",
+      "process": "SQCD.Agv.Wpf",
+      "processId": 36612,
+      "title": "8005 多仓位AGV车载端",
+      "className": "HwndWrapper[SQCD.Agv.Wpf;;120f5d72-7cf6-4dfe-8898-34530df35e83]",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        -11,
+        -11,
+        2262,
+        1350
+      ],
+      "zOrder": 193
+    },
+    {
+      "handle": "0xD0BA0",
+      "process": "SQCD_8005AGV_Simulator",
+      "processId": 18680,
+      "title": "SQCD 8005 AGV 仓位 IO 仿真器",
+      "className": "HwndWrapper[SQCD_8005AGV_Simulator;;10a5c733-a41a-4ba2-9b9b-100f8a78bd44]",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        304,
+        304,
+        2160,
+        1350
+      ],
+      "zOrder": 199
+    },
+    {
+      "handle": "0x70BD2",
+      "process": "图吧工具箱2026",
+      "processId": 35708,
+      "title": "图吧工具箱",
+      "className": "WTWindow",
+      "visible": true,
+      "minimized": true,
+      "owner": null,
+      "rect": [
+        -32000,
+        -32000,
+        237,
+        39
+      ],
+      "zOrder": 232
+    },
+    {
+      "handle": "0x101D2",
+      "process": "explorer",
+      "processId": 9180,
+      "title": "Program Manager",
+      "className": "Progman",
+      "visible": true,
+      "minimized": false,
+      "owner": null,
+      "rect": [
+        0,
+        0,
+        2240,
+        1400
+      ],
+      "zOrder": 233
+    }
+  ],
+  "maskedPasswordBoxes": 0,
+  "screenUniform": false,
+  "images": [
+    {
+      "kind": "screen",
+      "file": "local-20261012T193654-uia-screen.png",
+      "width": 2240,
+      "height": 1400,
+      "uniform": false
+    },
+    {
+      "kind": "window",
+      "file": "local-20261012T193654-uia-window-1.png",
+      "handle": "0x1150342",
+      "title": "8005 多仓位AGV车载端",
+      "width": 2262,
+      "height": 1350,
+      "uniform": false
+    }
+  ],
+  "foregroundAtEnd": {
+    "handle": "0x205B2",
+    "process": "claude"
+  },
+  "finishedAt": "2026-10-12T19:37:07.4038637+08:00"
+}
