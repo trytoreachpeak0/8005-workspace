@@ -596,6 +596,13 @@ v2 实例。
   未就绪。MVP 车载端（agv01）的模板仍与会话共用变量，不受影响。
 - 顺序：先生成凭据，再 `19-deploy` 服务端，再逐台 `06-deploy` 车载端。只部署了一半时，车处于「出发安全未就绪」，不会误放行。
 - TCP 会话仍然是全车共用一个凭据、车靠握手自报身份，这一步没有改它。
+- **升级路径的安全投影自检（control-server#649）**：产品升级脚本 `Update-ControlServerLocal.ps1` 在换包后要读一次安全投影确认服务
+  正常。它原来只拿机器级共享凭据去读，两车实例不认共享凭据，于是 2026-10-12 REQ-0178 现场升级在这里报
+  `Safety projection returned HTTP 401.` 并自动回滚。修复后它读已装配置里的 `OnboardSafetyProjection:vehicleCredentials`：有按车凭据时，
+  从 v2 服务自己的 `Environment` 取每台车的值，逐车带 `?vehicleKey=` 各读一次；某台车的变量不在服务 `Environment` 里，就在停服务之前
+  以 `SAFETY_PROJECTION_VEHICLE_CREDENTIAL_MISSING` 拒绝。被拒时报 `SAFETY_PROJECTION_CREDENTIAL_REJECTED`（401，写明是哪台车、哪个变量，
+  或者是共享凭据）或 `SAFETY_PROJECTION_VEHICLE_MISMATCH`（403，两台车的变量写反了），不再只有一个 HTTP 401。单车实例与出厂安装照旧用共享凭据、
+  不带车号。凭据值不进任何输出。
 
 ---
 
@@ -753,6 +760,12 @@ pwsh -File remote-ops/factory-server/scripts/19-deploy-control-server-parallel.p
 安装模式失败时代际对调还没发生，这时再跑 `-Rollback`，装上的是 `.previous`，也就是更早一代，车载端版本可能对不上。
 **例外：当前在跑的包早于 control-server#605 时，重新部署它也会失败**——升级执行的是包里的 `Update-ControlServerLocal.ps1`，
 旧包里的那份在同一处 `.Count` 再失败一次。这时只能部署包含 #605 修复的包。
+
+**两车实例同理要包含 control-server#649 的包。**更早的包里，升级脚本拿共享凭据读安全投影（第 7.2 节），两车实例一律 401、自动回滚；
+全新安装那条路也有一处缺陷：沿用保留下来的数据目录、库里已有就绪会话时，服务第一次读 `/health/ready` 就是 `ready`、响应里没有
+`reason`，`Install-ControlServerLocal.ps1` 在严格模式下读这个字段报 `The property 'reason' cannot be found on this object.` 并回滚
+（10-11 用全新空库所以没撞上）。两处都在 #649 修好，所以**包含 #649 的包，两车实例直接走升级即可**，不必再「先 `-Uninstall`（保留数据）、
+再全新安装」；后者仍然可用，适合要换端口或绑定地址时（第 3 节：这些只在首次安装时生效）。
 
 回滚还会沿用服务里已有的恢复凭据（第 7.1 节）。
 
