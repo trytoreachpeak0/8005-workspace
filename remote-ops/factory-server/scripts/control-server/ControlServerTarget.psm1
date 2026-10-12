@@ -48,7 +48,18 @@ $script:InstanceDataTree = 'C:\ProgramData\8005\'
 function ConvertTo-ComparablePath {
     param([AllowNull()][string] $Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
-    return $Path.Trim().Trim('"').Replace('/', '\').TrimEnd('\').ToLowerInvariant()
+    return $Path.Trim().Trim('"', "'").Replace('/', '\').TrimEnd('\').ToLowerInvariant()
+}
+
+# A database path as SQLite would open it: quotes off, environment variables expanded (on this machine; the
+# server's ProgramData is the same C:\ProgramData), '..' resolved when the path is rooted. A relative path is left
+# relative: it cannot equal a rooted -ServerDatabase, so it is refused rather than guessed.
+function ConvertTo-ComparableDatabasePath {
+    param([AllowNull()][string] $Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $p = [Environment]::ExpandEnvironmentVariables($Path.Trim().Trim('"', "'")).Replace('/', '\')
+    if ([IO.Path]::IsPathRooted($p)) { $p = [IO.Path]::GetFullPath($p) }
+    return ConvertTo-ComparablePath $p
 }
 
 function Get-UrlPort {
@@ -185,8 +196,8 @@ function Assert-ControlServerTargetReadback {
         if ([string]::IsNullOrWhiteSpace($own)) {
             throw "TARGET_DATABASE_UNKNOWN: $where names no readable ConnectionStrings:ControlServer ('$($Readback.connectionString)'). $tail"
         }
-        if ((ConvertTo-ComparablePath $own) -cne (ConvertTo-ComparablePath $Database)) {
-            if ((ConvertTo-ComparablePath $Database).StartsWith((ConvertTo-ComparablePath $script:InstanceDataTree) + '\', [StringComparison]::Ordinal)) {
+        if ((ConvertTo-ComparableDatabasePath $own) -cne (ConvertTo-ComparableDatabasePath $Database)) {
+            if ((ConvertTo-ComparableDatabasePath $Database).StartsWith((ConvertTo-ComparablePath $script:InstanceDataTree) + '\', [StringComparison]::Ordinal)) {
                 throw ("TARGET_DATABASE_OTHER_INSTANCE: -ServerDatabase $Database is under $($script:InstanceDataTree) but is not this " +
                     "instance's database ($own). A rehearsal copy belongs outside that tree. $tail")
             }

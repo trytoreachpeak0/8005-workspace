@@ -210,6 +210,27 @@ Write-Result -Ok $facts.DatabaseIsCopy -Name '13: a database outside C:\ProgramD
 $facts = Invoke-Expected { Assert-ControlServerTargetReadback -Readback (New-Readback $mvp @{ connectionString = 'Data Source=c:/programdata/8005/controlserver/data/CONTROLSERVER.db;Mode=ReadWriteCreate' }) -ServiceName $mvp.ServiceName -ConfigPath $mvp.ConfigPath -BaseUrl $mvp.BaseUrl -InstallRoot $mvp.InstallRoot -Database $mvp.Database }
 Write-Result -Ok (-not $facts.DatabaseIsCopy) -Name '13: the own database in other case, slashes and extra keywords is the own' -Detail ($facts | ConvertTo-Json -Compress)
 
+foreach ($u in @(@{ Url = 'http://*:58007'; Port = 58007 }, @{ Url = 'http://+:58107/'; Port = 58107 }, @{ Url = 'https://[::]:58107'; Port = 58107 })) {
+    $got = Get-UrlPort $u.Url
+    Write-Result -Ok ($got -eq $u.Port) -Name "Get-UrlPort $($u.Url) -> $($u.Port)" -Detail "$got"
+}
+$code = Test-Readback $mvp (New-Readback $mvp @{ healthUrl = 'http://*:58007' })
+Write-Result -Ok ($code -eq 'OK') -Name 'MVP configuration binding health on http://*:58007 -> passes' -Detail $code
+$code = Test-Readback $v2 (New-Readback $v2 @{ healthUrl = 'http://+:58107' })
+Write-Result -Ok ($code -eq 'OK') -Name 'v2 configuration binding health on http://+:58107 -> passes' -Detail $code
+$code = Test-Readback $v2 (New-Readback $v2 @{ healthUrl = 'http://*:58007' })
+Write-Result -Ok ($code -eq 'TARGET_BASE_URL_MISMATCH') -Name 'v2 configuration binding health on http://*:58007 -> TARGET_BASE_URL_MISMATCH' -Detail $code
+foreach ($cs in @(
+        @{ Name = 'double-quoted'; Value = "Data Source=`"$($mvp.Database)`"" }
+        @{ Name = 'single-quoted'; Value = "Data Source='$($mvp.Database)'" }
+        @{ Name = '%ProgramData%'; Value = 'Data Source=%ProgramData%\8005\ControlServer\data\controlserver.db' }
+        @{ Name = 'with ..'; Value = 'Data Source=C:\ProgramData\8005\ControlServer\logs\..\data\controlserver.db' })) {
+    $facts = Invoke-Expected { Assert-ControlServerTargetReadback -Readback (New-Readback $mvp @{ connectionString = $cs.Value }) -ServiceName $mvp.ServiceName -ConfigPath $mvp.ConfigPath -BaseUrl $mvp.BaseUrl -InstallRoot $mvp.InstallRoot -Database $mvp.Database }
+    Write-Result -Ok ($facts.DatabaseIsCopy -eq $false) -Name "13: the own database in a $($cs.Name) connection string is the own" -Detail ($facts | ConvertTo-Json -Compress)
+    $code = Test-Readback $mvp (New-Readback $mvp @{ connectionString = $cs.Value }) @{ InstallRoot = $mvp.InstallRoot; Database = $v2.Database }
+    Write-Result -Ok ($code -eq 'TARGET_DATABASE_OTHER_INSTANCE') -Name "13: MVP instance ($($cs.Name) connection string) with the v2 database -> TARGET_DATABASE_OTHER_INSTANCE" -Detail $code
+}
+
 $src = Invoke-Expected { Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = 'C:\ProgramData\8005\ControlServer.V2\logs'; LogFilter = 'cs-*.ndjson' }) -IsMvp $false }
 Write-Result -Ok ($src.Directory -eq 'C:\ProgramData\8005\ControlServer.V2\logs' -and $src.Filter -eq 'cs-*.ndjson') -Name 'log tail: the directory and pattern the configuration names' -Detail ($src | ConvertTo-Json -Compress)
 $src = Invoke-Expected { Resolve-ControlServerLogSource -Facts ([pscustomobject]@{ LogDirectory = $null; LogFilter = $null }) -IsMvp $false }
@@ -237,7 +258,10 @@ try {
     New-Item -ItemType Directory -Force -Path $fixture | Out-Null
     @{ Health = @{ url = 'http://172.19.205.222:58107' }; ConnectionStrings = @{ ControlServer = "Data Source=$($v2.Database)" }; JourneyRuntime = @{ enabled = $false } } |
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixture 'appsettings.Production.json')
-    @{ Serilog = @{ WriteTo = @(@{ Name = 'Console' }, @{ Name = 'File'; Args = @{ path = 'C:\ProgramData\8005\ControlServer.V2\logs\controlserver-.ndjson' } }) } } |
+    # The base file carries the shape the real one has -- loopback health and a %ProgramData% connection string --
+    # so a read-back that preferred it over the Production file would answer differently (review S1, R3).
+    @{ Health = @{ url = 'http://127.0.0.1:58007' }; ConnectionStrings = @{ ControlServer = 'Data Source=%ProgramData%/8005/ControlServer/data/controlserver.db' }
+        Serilog = @{ WriteTo = @(@{ Name = 'Console' }, @{ Name = 'File'; Args = @{ path = 'C:\ProgramData\8005\ControlServer.V2\logs\controlserver-.ndjson' } }) } } |
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $fixture 'appsettings.json')
     $cfg = Join-Path $fixture 'appsettings.Production.json'
     $run = {
@@ -249,7 +273,7 @@ try {
     $rb = & $run "ws35 no such service 'quoted'" $cfg
     Write-Result -Ok (-not $rb.serviceFound -and $rb.configFound -and $rb.healthUrl -eq 'http://172.19.205.222:58107' -and
         $rb.connectionString -eq "Data Source=$($v2.Database)" -and $rb.logPath -like '*ControlServer.V2\logs\controlserver-.ndjson') `
-        -Name 'reads Health.url and the connection string from the Production file, the log path from the base file; absent service not found' -Detail ($rb | ConvertTo-Json -Compress)
+        -Name 'reads Health.url and the connection string from the Production file over the base file''s, the log path from the base file; absent service not found' -Detail ($rb | ConvertTo-Json -Compress)
     $rb = & $run 'Winmgmt' (Join-Path $work 'absent\appsettings.Production.json')
     Write-Result -Ok ($rb.serviceFound -and $rb.servicePathName -match '\.exe' -and -not $rb.configFound -and $null -eq $rb.healthUrl) `
         -Name 'an existing service (Winmgmt) is found with its PathName; a missing configuration is reported, not thrown' -Detail ($rb | ConvertTo-Json -Compress)
@@ -373,6 +397,28 @@ Write-Host 'Source' -ForegroundColor Cyan
 $closeText = Get-Content -Raw -LiteralPath $closePath
 Write-Result -Ok ($closeText -match '& \$gateScript -Off -Force -ServerAlias \$ServerAlias -ServiceName \$ServiceName -ConfigPath \$ServerConfigPath -BaseUrl \$BaseUrl') `
     -Name '13 hands Set-JourneyRuntime.ps1 all three of its instance parameters' -Detail 'call line changed'
+
+# Review S3: the gate call after the stop, lifted from 13 by its AST and run against a stand-in for Set-JourneyRuntime.ps1.
+$closeAst = [System.Management.Automation.Language.Parser]::ParseFile($closePath, [ref]$null, [ref]$null)
+$gateTry = $closeAst.Find({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] -and $n.Body.Extent.Text -match '& \$gateScript -Off' }, $true)
+Write-Result -Ok ($null -ne $gateTry) -Name '13 calls Set-JourneyRuntime.ps1 inside a try' -Detail 'no try around & $gateScript'
+if ($gateTry) {
+    $standIn = Join-Path ([IO.Path]::GetTempPath()) "ws35-gate-standin-$PID.ps1"
+    try {
+        foreach ($g in @(
+                @{ Name = 'a TARGET_* refusal'; Body = "throw 'TARGET_SERVICE_NOT_FOUND: there is no service named x on the server. Nothing was changed.'"; Expect = 'STILL OPEN' }
+                @{ Name = 'any other failure'; Body = "throw 'ssh factory01 failed: timeout'"; Expect = '^ssh factory01 failed: timeout$' }
+                @{ Name = 'success'; Body = "'closed'"; Expect = $null })) {
+            Set-Content -LiteralPath $standIn -Value $g.Body
+            $gateScript = $standIn; $ServerAlias = 'x'; $ServiceName = 'x'; $ServerConfigPath = 'x'; $BaseUrl = 'x'
+            $result = [pscustomobject]@{ journeyId = 'J1' }
+            $message = try { $null = & ([scriptblock]::Create($gateTry.Extent.Text)); $null } catch { $_.Exception.Message }
+            $ok = $g.Expect ? ($message -match $g.Expect -and ($g.Expect -ne 'STILL OPEN' -or ($message -match 'service was stopped' -and $message -match 'TARGET_SERVICE_NOT_FOUND'))) : ($null -eq $message)
+            Write-Result -Ok $ok -Name "13 after the stop, $($g.Name) from Set-JourneyRuntime.ps1: $($g.Expect ?? 'no throw')" -Detail "$message"
+        }
+    }
+    finally { if (Test-Path -LiteralPath $standIn) { [IO.File]::Delete($standIn) } }
+}
 
 Write-Host ''
 $colour = $script:Failed ? 'Red' : 'Green'

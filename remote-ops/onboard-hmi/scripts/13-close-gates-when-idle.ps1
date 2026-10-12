@@ -212,8 +212,8 @@ if (-not $before.runtime) {
     Write-Host '  The watch still runs; it will prove the close path rather than guard a real race.' -ForegroundColor Yellow
 }
 
-$target = $DemandId ? "$ServerAlias (the journey carrying $DemandId)" : "$ServerAlias (whichever journey is in flight)"
-if (-not $PSCmdlet.ShouldProcess($target, 'Wait for Completed, then stop the service and close both journey gates')) {
+$watchTarget = $DemandId ? "$ServerAlias (the journey carrying $DemandId)" : "$ServerAlias (whichever journey is in flight)"
+if (-not $PSCmdlet.ShouldProcess($watchTarget, 'Wait for Completed, then stop the service and close both journey gates')) {
     return
 }
 
@@ -275,7 +275,16 @@ Write-Step "Service stop requested $($result.reactionMs) ms after that record, s
 # Nothing is racing any more -- the engine is down -- so the config change goes
 # through the one script that owns that file.
 Write-Step 'Closing both gates via Set-JourneyRuntime.ps1 -Off'
-& $gateScript -Off -Force -ServerAlias $ServerAlias -ServiceName $ServiceName -ConfigPath $ServerConfigPath -BaseUrl $BaseUrl
+# The service is stopped by now. Set-JourneyRuntime.ps1 checks its target again (workspace#35) and says "Nothing was
+# changed" when it refuses -- true of the file, but read at this point it invites starting the service with the
+# gates open. Say what state the refusal leaves, as STOP_FAILED does.
+try {
+    & $gateScript -Off -Force -ServerAlias $ServerAlias -ServiceName $ServiceName -ConfigPath $ServerConfigPath -BaseUrl $BaseUrl
+}
+catch {
+    if ($_.Exception.Message -notmatch '^TARGET_[A-Z_]+:') { throw }
+    throw "Journey $($result.journeyId) completed and the service was stopped, but Set-JourneyRuntime.ps1 refused to close the gates: $($_.Exception.Message) THE SERVICE IS STOPPED AND THE GATES ARE STILL OPEN -- do not start it; close them with Set-JourneyRuntime.ps1 -Off first."
+}
 
 # Set-JourneyRuntime.ps1 returns early when the booleans already say Off, and its
 # early return does not start a service. Ours is stopped by then, so bringing it
