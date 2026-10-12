@@ -28,6 +28,18 @@
 .PARAMETER ChargingRunId
     The full id the survey prints. A prefix is refused on purpose: this writes production.
 
+.PARAMETER ServiceName
+    -ServerDatabase, -ServerInstallRoot and -ServiceName say which ControlServer instance is written, and their
+    defaults are the production MVP service. Give all three or none (workspace#38): a partial set is refused with
+    TARGET_PARTIAL, and a set where some name the MVP and others do not with TARGET_MIXED_MVP, before anything
+    reaches the server. Then the server is asked which directory the service runs from and what
+    <install root>\appsettings.Production.json names as its database; unless the service runs from
+    -ServerInstallRoot and that database is -ServerDatabase, nothing is surveyed, stopped or written (TARGET_* codes
+    in ControlServerTarget.psm1; a database that is not the instance's own is TARGET_DATABASE_NOT_OWN).
+    -ServerBackupRoot is not one of the three.
+
+    Before workspace#38, a v2 -ServerDatabase alone stopped the MVP service and started it again.
+
 .PARAMETER Force
     Suppresses the confirmation prompt by lowering $ConfirmPreference. Needed to run this from a
     non-interactive shell: ConfirmImpact is High, and ShouldProcess throws when there is no host UI.
@@ -37,6 +49,12 @@
 
 .EXAMPLE
     ./Complete-ChargingRun.ps1 -ChargingRunId <full id from the survey> -Force
+
+.EXAMPLE
+    # A v2 instance: all three instance parameters, or it is refused before the server is touched.
+    ./Complete-ChargingRun.ps1 -WhatIf -ServiceName '8005 AGV ControlServer V2' `
+        -ServerInstallRoot 'C:\Program Files\8005 AGV\ControlServer.V2' `
+        -ServerDatabase 'C:\ProgramData\8005\ControlServer.V2\data\controlserver.db'
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
@@ -52,6 +70,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# workspace#38: which instance, decided before anything reaches the server.
+Import-Module (Join-Path $PSScriptRoot 'ControlServerTarget.psm1') -Force
+$target = Assert-ControlServerTargetParameters -Bound @($PSBoundParameters.Keys) `
+    -Values ([ordered]@{ ServerDatabase = $ServerDatabase; ServerInstallRoot = $ServerInstallRoot; ServiceName = $ServiceName }) `
+    -Kinds ([ordered]@{ ServerDatabase = 'Database'; ServerInstallRoot = 'InstallRoot'; ServiceName = 'ServiceName' })
 
 $marker = '@@W2G-CHARGING-RUN@@'
 
@@ -243,6 +267,17 @@ function Write-Runs($Runs) {
         Write-Host ("      RIoT order {0}: intent {1}, orderId {2}" -f $run.UpperId, ($run.IntentStatus ?? '(no intent row)'), ($run.IntentOrderId ?? '-'))
     }
 }
+
+# Read-only: the service's directory and the database its configuration names, before the survey and long before
+# the stop.
+$serverConfigPath = Join-Path $ServerInstallRoot 'appsettings.Production.json'
+$readbackScript = Get-ControlServerTargetReadbackScript -ServiceName $ServiceName -ConfigPath $serverConfigPath
+$raw = & ssh -o BatchMode=yes -o "ConnectTimeout=$TimeoutSec" $ServerAlias "pwsh -NoProfile -EncodedCommand $([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($readbackScript)))" 2>&1
+$readbackLine = @(($raw | Out-String) -split "`r?`n" | Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+if ($LASTEXITCODE -ne 0 -or -not $readbackLine) { throw "ssh $ServerAlias failed reading back the target (exit $LASTEXITCODE): $(($raw | Out-String).Trim())" }
+$null = Assert-ControlServerTargetReadback -Readback ($readbackLine | ConvertFrom-Json) -ServiceName $ServiceName -ConfigPath $serverConfigPath `
+    -InstallRoot $ServerInstallRoot -Database $ServerDatabase -RequireOwnDatabase
+Write-Host "Instance: '$ServiceName', $ServerDatabase ($($target.IsMvp ? 'the production MVP service' : 'not the MVP service'))"
 
 $survey = Invoke-Server $false
 Write-Host ''

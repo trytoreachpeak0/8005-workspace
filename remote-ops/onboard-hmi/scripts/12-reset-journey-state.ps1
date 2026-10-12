@@ -75,6 +75,26 @@
     The vehicle's client is stopped for the duration -- the journal is open
     while it runs -- and restarted at the end.
 
+.PARAMETER ServiceName
+    -ServerDatabase, -ServerInstallRoot and -ServiceName say which ControlServer
+    instance is settled -- its service stopped, its database written -- and their
+    defaults are the production MVP service. Give all three or none
+    (workspace#38): a partial set is refused with TARGET_PARTIAL, and a set where
+    some name the MVP and others do not with TARGET_MIXED_MVP. -SshAlias must be a
+    vehicle of that instance: agv01 with the MVP, agv02/agv03 with any other
+    (TARGET_VEHICLE_INSTANCE_MISMATCH). All of that before anything reaches either
+    machine. Then the server is asked which directory the service runs from and
+    what <install root>\appsettings.Production.json names as its database; unless
+    the service runs from -ServerInstallRoot and that database is -ServerDatabase,
+    nothing is copied, stopped or written (TARGET_* codes in
+    factory-server/scripts/control-server/ControlServerTarget.psm1). A rehearsal
+    copy of the database is refused here (TARGET_DATABASE_NOT_OWN): the
+    settlement stops the service before it writes. -ServerBackupRoot is not one of
+    the three.
+
+    Before workspace#38, -ServerDatabase and -ServerInstallRoot of a v2 instance
+    alone stopped the MVP service and then settled whichever database was free.
+
 .PARAMETER ReasonCode
     Recorded on each suppression and on the journey. One of the codes
     WireToGateStore.SuppressingReasonCodes accepts, matched exactly. There is no
@@ -112,6 +132,12 @@
 
 .EXAMPLE
     ./12-reset-journey-state.ps1 -ReasonCode CANCELLED_BY_OPERATOR
+
+.EXAMPLE
+    # A v2 instance and its spare car: all three instance parameters, or it is refused before either machine is touched.
+    ./12-reset-journey-state.ps1 -WhatIf -SshAlias agv02 -ServiceName '8005 AGV ControlServer V2' `
+        -ServerInstallRoot 'C:\Program Files\8005 AGV\ControlServer.V2' `
+        -ServerDatabase 'C:\ProgramData\8005\ControlServer.V2\data\controlserver.db'
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
@@ -135,6 +161,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($Force) { $ConfirmPreference = 'None' }
+
+# workspace#38: which instance and which vehicle, decided before anything reaches either machine.
+Import-Module (Join-Path $PSScriptRoot '..\..\factory-server\scripts\control-server\ControlServerTarget.psm1') -Force
+$target = Assert-ControlServerTargetParameters -Bound @($PSBoundParameters.Keys) `
+    -Values ([ordered]@{ ServerDatabase = $ServerDatabase; ServerInstallRoot = $ServerInstallRoot; ServiceName = $ServiceName }) `
+    -Kinds ([ordered]@{ ServerDatabase = 'Database'; ServerInstallRoot = 'InstallRoot'; ServiceName = 'ServiceName' })
+$null = Assert-ControlServerVehicleTarget -SshAlias $SshAlias -IsMvp $target.IsMvp
 
 function Write-Step { param([string] $Message) Write-Host "  $Message" -ForegroundColor Cyan }
 
@@ -186,6 +219,15 @@ function Invoke-Settlement {
 # ---------------------------------------------------------------- survey ---
 
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Settling journey state on $ServerAlias + $SshAlias" -ForegroundColor Green
+
+# Read-only: the service's directory and the database its configuration names. Nothing is copied, stopped or
+# written on either end unless they are -ServerInstallRoot and -ServerDatabase.
+$serverConfigPath = Join-Path $ServerInstallRoot 'appsettings.Production.json'
+$readbackText = Invoke-Remote $ServerAlias (Get-ControlServerTargetReadbackScript -ServiceName $ServiceName -ConfigPath $serverConfigPath)
+$readback = @($readbackText -split "`r?`n" | Where-Object { $_.TrimStart().StartsWith('{') })[-1] | ConvertFrom-Json
+$null = Assert-ControlServerTargetReadback -Readback $readback -ServiceName $ServiceName -ConfigPath $serverConfigPath `
+    -InstallRoot $ServerInstallRoot -Database $ServerDatabase -RequireOwnDatabase
+Write-Step "Server instance: '$ServiceName', $ServerDatabase ($($target.IsMvp ? 'the production MVP service' : 'not the MVP service'))"
 
 $null = Invoke-Remote $ServerAlias "New-Item -ItemType Directory -Path '$ServerBackupRoot' -Force | Out-Null"
 & scp -o BatchMode=yes $settleLocal "${ServerAlias}:$settleRemote" 2>&1 | Out-Null
