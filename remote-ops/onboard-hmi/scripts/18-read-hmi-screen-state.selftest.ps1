@@ -104,12 +104,12 @@ function New-FixtureDocument([hashtable] $Over = @{}, [DateTimeOffset] $Now = [D
     return $doc
 }
 
-function New-FixtureRead([hashtable] $Over = @{}, $Processes, [DateTimeOffset] $Now = [DateTimeOffset]::Now, [switch] $NoFile, [byte[]] $Bytes, [string] $Error) {
+function New-FixtureRead([hashtable] $Over = @{}, $Processes, [DateTimeOffset] $Now = [DateTimeOffset]::Now, [switch] $NoFile, [byte[]] $Bytes, [string] $Error, [string] $DirectoryError) {
     $bytes = $Bytes ?? [System.Text.Encoding]::UTF8.GetBytes(((New-FixtureDocument $Over $Now) | ConvertTo-Json -Depth 20 -Compress))
     $read = [ordered]@{
         now = $Now.ToString('o'); directory = 'C:\x'; directoryExists = $true
         current = $NoFile ? $null : [ordered]@{ length = $bytes.Length; offset = 0; base64 = [Convert]::ToBase64String($bytes) }
-        currentError = $Error; timeline = $null; timelineError = $null
+        directoryError = $DirectoryError; currentError = $Error; timeline = $null; timelineError = $null
         processes = @($Processes ?? @([ordered]@{ id = 4242; sessionId = 1; startTime = $Now.AddHours(-1).AddSeconds(-10).ToString('o') }))
     }
     return ConvertTo-Object $read
@@ -224,7 +224,9 @@ foreach ($case in @(
                 New-FixtureRead -Now $now -Bytes $bytes }; Expect = 'UNREADABLE' },
         @{ Name = 'a JSON array is UNREADABLE'; Read = { New-FixtureRead -Now $now -Bytes ([System.Text.Encoding]::UTF8.GetBytes('[1,2]')) }; Expect = 'UNREADABLE' },
         @{ Name = 'an open that failed is UNREADABLE'; Read = { New-FixtureRead -Now $now -Error 'The process cannot access the file' }; Expect = 'UNREADABLE' },
-        @{ Name = 'no file with the HMI running is ABSENT and says so'; Read = { New-FixtureRead -Now $now -NoFile }; Expect = 'ABSENT'; Says = 'switched off' })) {
+        @{ Name = 'no file with the HMI running is ABSENT and says so'; Read = { New-FixtureRead -Now $now -NoFile }; Expect = 'ABSENT'; Says = 'switched off' },
+        @{ Name = 'ABSENT names an account that cannot see the file as a possibility'; Read = { New-FixtureRead -Now $now -NoFile }; Expect = 'ABSENT'; Says = 'not readable by this account' },
+        @{ Name = 'a directory this account cannot list is UNREADABLE, not ABSENT'; Read = { New-FixtureRead -Now $now -NoFile -DirectoryError 'Access to the path is denied.' }; Expect = 'UNREADABLE'; Says = 'this account cannot list' })) {
     Check "verdict: $($case.Name)" {
         $v = Get-SnapshotVerdict -Read (& $case.Read) -StaleAfterSeconds 15
         if ($v.outcome -ne $case.Expect -or ($case.Says -and $v.detail -notmatch [regex]::Escape($case.Says))) { throw "got $($v.outcome): $($v.detail)" }
@@ -269,6 +271,40 @@ foreach ($case in @(
         if (($diff -join '|') -ne $case.Diff) { throw "differences: '$($diff -join '|')', expected '$($case.Diff)'" }
     }
 }
+Check 'redaction: no value, account, other window or focused text survives, emptiness does, and the comparison does not change' {
+    $edit = { param($c) $c[(Find-Child $c 'ScanTextBox')].value = 'SUBLOT-SECRET-42' }
+    $raw = New-FixtureUia $edit
+    $raw | Add-Member -NotePropertyName host -NotePropertyValue 'LAB-WIN-SECRET' -Force
+    $raw | Add-Member -NotePropertyName user -NotePropertyValue 'account-secret' -Force
+    $raw | Add-Member -NotePropertyName visibleTexts -NotePropertyValue @('8005 AGV', 'SUBLOT-SECRET-42', 'SECRET-REASON-TEXT') -Force
+    $raw | Add-Member -NotePropertyName desktopWindows -NotePropertyValue @(
+        [pscustomobject]@{ process = 'SQCD.Agv.Wpf'; title = '8005 AGV' },
+        [pscustomobject]@{ process = 'msedge'; title = 'Edge tab SECRET-TITLE' },
+        [pscustomobject]@{ process = 'claude'; title = 'Claude SECRET-TITLE' }) -Force
+    $raw | Add-Member -NotePropertyName focusedElement -NotePropertyValue ([pscustomobject]@{ controlType = 'Edit'; name = 'prompt SECRET'; value = "SECRET-PROMPT`n" }) -Force
+    $raw | Add-Member -NotePropertyName foregroundAtStart -NotePropertyValue ([pscustomobject]@{ handle = '0x1'; process = 'SECRET-tool' }) -Force
+    $raw | Add-Member -NotePropertyName foregroundAtEnd -NotePropertyValue ([pscustomobject]@{ handle = '0x2'; process = 'LockApp' }) -Force
+    $raw.desktop = [pscustomobject]@{ locked = $false; foregroundProcess = 'SECRET-tool' }
+    $before = @(Compare-ScreenState $state $raw | ForEach-Object { "$($_.key).$($_.field)=$($_.match)" }) -join ';'
+    $safe = Protect-UiaReading $raw 'SQCD.Agv.Wpf'
+    $json = $safe | ConvertTo-Json -Depth 100
+    if ($json -match 'SECRET') { throw "left in the reading: $(([regex]::Matches($json, '[^"]*SECRET[^"]*') | ForEach-Object Value | Select-Object -Unique) -join ' | ')" }
+    if ($safe.foregroundAtEnd.process -ne 'LockApp') { throw 'LockApp, which the lock check reads, was redacted' }
+    if (@($safe.desktopWindows).Count -ne 1 -or $safe.otherDesktopWindows -ne 2) { throw "desktop windows kept $(@($safe.desktopWindows).Count), counted $($safe.otherDesktopWindows)" }
+    $empty = @(Get-UiaNodes (Get-UiaMainWindow $safe).uia | Where-Object { $_.automationId -eq 'ScanTextBox' })[0]
+    if ($empty.value -ne '<redacted>') { throw "a non-empty value became '$($empty.value)'" }
+    $after = @(Compare-ScreenState $state $safe | ForEach-Object { "$($_.key).$($_.field)=$($_.match)" }) -join ';'
+    if ($after -ne $before) { throw 'the comparison changed after redaction' }
+    $kept = Protect-UiaReading (New-FixtureUia) 'SQCD.Agv.Wpf'
+    if (@(Get-UiaNodes (Get-UiaMainWindow $kept).uia | Where-Object { $_.automationId -eq 'ScanTextBox' })[0].value -ne '') { throw 'an empty value did not stay empty' }
+}
+Check 'the summary says enabled states are not to be trusted while a dialog is open' {
+    $doc = ConvertTo-Object (New-FixtureDocument)
+    $doc.state.modals = ConvertTo-Object ([ordered]@{ depth = 1; open = @([ordered]@{ title = '确认取消'; callSite = 'x' }) })
+    if ((Format-Summary @{ document = $doc }) -join "`n" -notmatch 'not to be trusted') { throw 'no warning with a dialog open' }
+    if ((Format-Summary @{ document = (ConvertTo-Object (New-FixtureDocument)) }) -join "`n" -match 'not to be trusted') { throw 'a warning with no dialog' }
+}
+
 Check 'compare: a dialog title that differs' {
     $withDialog = ConvertTo-Object (New-FixtureState)
     $withDialog.modals = ConvertTo-Object ([ordered]@{ depth = 1; open = @([ordered]@{ title = '确认取消'; callSite = 'OnLoadCancellationClick' }) })
@@ -409,6 +445,8 @@ foreach ($case in @(
         if ($r.exit -ne $case.Exit) { throw "exit $($r.exit): $($r.text)" }
         $record = Get-Content -LiteralPath (@(Get-ChildItem -LiteralPath $evidence -Filter '*-crosscheck.json')[0].FullName) -Raw | ConvertFrom-Json
         if ($case.Exit -in 0, 10 -and @($record.rows).Count -ne 24) { throw "rows in the record: $(@($record.rows).Count)" }
+        $kept = @(Get-ChildItem -LiteralPath $evidence -Filter '*-uia.json' | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'SECRET' })
+        if ($case.Exit -in 0, 10 -and $kept.Count) { throw "the UIA reading kept in the evidence still holds input text: $($kept.Name -join ', ')" }
         if (@(Get-ChildItem -LiteralPath $evidence -Filter '*-state-before.json').Count -ne 1 -or @(Get-ChildItem -LiteralPath $evidence -Filter '*-state-after.json').Count -ne 1) { throw 'before/after copies missing' }
     }
 }
@@ -432,12 +470,12 @@ Check 'end to end -Local -CrossCheck: same comparison, no SSH, judged by 17''s r
     share mode does not buy the replace; what keeps the writer whole is its own retry (HmiScreenStateFileWriter:
     5 attempts, 10 ms apart) and a read that holds the handle for well under a millisecond. This test holds
     that the worst case is one lost write, never a blocked writer: with the writer's retry verbatim and a
-    reader 50 times a second (the script reads once per run), every read is a whole document and no two
-    replaces in a row give up. A single give-up does happen: 1 in 2064 on 2026-10-12 under Invoke-HeavyLocal's
-    BelowNormal priority (0 in 3280 at normal priority); the product then logs one line and the next
-    heartbeat writes again.
+    reader 50 times a second (the script reads once per run), every read is a whole document, no two
+    replaces in a row give up, and give-ups stay within max(1, 2% of the reads). A single give-up does happen:
+    1 in 2064 replaces on 2026-10-12 under Invoke-HeavyLocal's BelowNormal priority (0 in 3280 at normal
+    priority); the product then logs one line and the next heartbeat writes again.
 #>
-Check 'reading while the writer replaces the file: every read is whole, and the writer never gives up twice in a row' {
+Check 'reading while the writer replaces the file: every read is whole, and the writer rarely gives up and never twice in a row' {
     $dir = New-VehicleDirectory
     # 7 is the file New-VehicleDirectory wrote, read before the first replace.
     $a = [System.Text.Encoding]::UTF8.GetBytes(((New-FixtureDocument @{ contentRevision = 1 }) | ConvertTo-Json -Depth 20 -Compress))
@@ -478,5 +516,9 @@ Check 'reading while the writer replaces the file: every read is whole, and the 
     if ($reads -lt 20 -or $sync.replaces -lt 100) { throw "too little overlap to prove anything: $reads reads, $($sync.replaces) replaces" }
     if ($broken) { throw "$broken of $reads reads were not a whole document (last: $why)" }
     if ($sync.maxStreak -ge 2) { throw "$($sync.maxStreak) replaces in a row gave up after the writer's 5 attempts ($($sync.lastError)): the reader blocked the writer, not one heartbeat" }
+    # "Never twice in a row" alone passes a reader that holds the handle up to the writer's ~40 ms retry window and
+    # makes it give up once in six reads (review S3: 30 ms gave 5 give-ups in 36 reads, 40 ms 4 in 24, all streaks 1).
+    $allowed = [Math]::Max(1, [Math]::Floor($reads * 0.02))
+    if ($sync.exhausted -gt $allowed) { throw "$($sync.exhausted) give-ups in $reads reads, more than the $allowed allowed (max(1, 2% of reads)): the reader holds the handle too long" }
     Write-Host "  ($reads reads, $($sync.replaces) replaces, $($sync.retried) retries, $($sync.exhausted) single give-up(s), longest run $($sync.maxStreak))"
 }

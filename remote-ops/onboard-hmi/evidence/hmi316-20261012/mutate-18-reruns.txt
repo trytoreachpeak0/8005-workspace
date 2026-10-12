@@ -20,3 +20,14 @@ KILLED      banner taken from any Text with that wording  <- compare: a banner t
 
 All 36 mutations' From text present in the final 18-read-hmi-screen-state.ps1 (checked by parsing mutate-18.ps1).
 The other 31 were killed in the full run; the code they mutate is unchanged since.
+
+Review S3 (after the independent review of 435b56a): the concurrent test also asserts give-ups <= max(1, 2% of reads).
+Injected [System.Threading.Thread]::Sleep(N) after CopyTo in the read script of a copy (the read-only scan also fails
+on that copy, as it should; the line that matters is the concurrent test's):
+
+  hold 0 ms (unmodified):  PASS  (94 reads, 3002 replaces, 23 retries, 0 give-ups, longest run 0)
+  hold 30 ms:  FAIL ... -- 2 give-ups in 38 reads, more than the 1 allowed (max(1, 2% of reads)): the reader holds the handle too long
+  hold 40 ms:  FAIL ... -- 2 give-ups in 43 reads, more than the 1 allowed (max(1, 2% of reads)): the reader holds the handle too long
+
+Margin is thin: the review measured 5 give-ups in 36 reads at 30 ms and 4 in 24 at 40 ms; here it was 2, one over the
+limit. A run with a single give-up at 30-40 ms would pass. Holds of 45 ms and more also break "never twice in a row".

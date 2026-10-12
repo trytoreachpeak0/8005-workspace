@@ -10,14 +10,14 @@
   "dpiAware": true,
   "foregroundAtStart": {
     "handle": "0x1020C",
-    "process": "explorer"
+    "process": "<other>"
   },
   "focusDisturbed": false,
   "desktop": {
     "inputDesktop": "Default",
     "openError": 0,
     "logonUiInSession": false,
-    "foregroundProcess": "explorer",
+    "foregroundProcess": "<other>",
     "lockSignals": [],
     "locked": false
   },
@@ -1957,108 +1957,6 @@
   },
   "desktopWindows": [
     {
-      "handle": "0xAE0952",
-      "process": "explorer",
-      "processId": 9180,
-      "title": "PopupHost",
-      "className": "Xaml_WindowedPopupClass",
-      "visible": true,
-      "minimized": false,
-      "owner": "0x101B6",
-      "rect": [
-        2088,
-        1260,
-        159,
-        63
-      ],
-      "zOrder": 7
-    },
-    {
-      "handle": "0x205B2",
-      "process": "claude",
-      "processId": 10288,
-      "title": "Claude",
-      "className": "Chrome_WidgetWin_1",
-      "visible": true,
-      "minimized": false,
-      "owner": null,
-      "rect": [
-        -11,
-        -11,
-        2262,
-        1350
-      ],
-      "zOrder": 32
-    },
-    {
-      "handle": "0x420964",
-      "process": "Core Temp x64",
-      "processId": 25224,
-      "title": "Core Temp 1.20.1",
-      "className": "CORETEMP",
-      "visible": true,
-      "minimized": false,
-      "owner": null,
-      "rect": [
-        1698,
-        358,
-        504,
-        653
-      ],
-      "zOrder": 42
-    },
-    {
-      "handle": "0xA067E",
-      "process": "图吧工具箱2026",
-      "processId": 24400,
-      "title": "图吧工具箱",
-      "className": "WTWindow",
-      "visible": true,
-      "minimized": false,
-      "owner": null,
-      "rect": [
-        449,
-        307,
-        1536,
-        900
-      ],
-      "zOrder": 75
-    },
-    {
-      "handle": "0x20082E",
-      "process": "explorer",
-      "processId": 9180,
-      "title": "Local Disk (C:) - File Explorer",
-      "className": "CabinetWClass",
-      "visible": true,
-      "minimized": true,
-      "owner": null,
-      "rect": [
-        -32000,
-        -32000,
-        237,
-        39
-      ],
-      "zOrder": 93
-    },
-    {
-      "handle": "0x2026A",
-      "process": "TextInputHost",
-      "processId": 16368,
-      "title": "Windows Input Experience",
-      "className": "Windows.UI.Core.CoreWindow",
-      "visible": true,
-      "minimized": false,
-      "owner": null,
-      "rect": [
-        0,
-        0,
-        2560,
-        1600
-      ],
-      "zOrder": 177
-    },
-    {
       "handle": "0x1150342",
       "process": "SQCD.Agv.Wpf",
       "processId": 36612,
@@ -2074,57 +1972,6 @@
         1350
       ],
       "zOrder": 194
-    },
-    {
-      "handle": "0xD0BA0",
-      "process": "SQCD_8005AGV_Simulator",
-      "processId": 18680,
-      "title": "SQCD 8005 AGV 仓位 IO 仿真器",
-      "className": "HwndWrapper[SQCD_8005AGV_Simulator;;10a5c733-a41a-4ba2-9b9b-100f8a78bd44]",
-      "visible": true,
-      "minimized": false,
-      "owner": null,
-      "rect": [
-        304,
-        304,
-        2160,
-        1350
-      ],
-      "zOrder": 200
-    },
-    {
-      "handle": "0x70BD2",
-      "process": "图吧工具箱2026",
-      "processId": 35708,
-      "title": "图吧工具箱",
-      "className": "WTWindow",
-      "visible": true,
-      "minimized": true,
-      "owner": null,
-      "rect": [
-        -32000,
-        -32000,
-        237,
-        39
-      ],
-      "zOrder": 233
-    },
-    {
-      "handle": "0x101D2",
-      "process": "explorer",
-      "processId": 9180,
-      "title": "Program Manager",
-      "className": "Progman",
-      "visible": true,
-      "minimized": false,
-      "owner": null,
-      "rect": [
-        0,
-        0,
-        2240,
-        1400
-      ],
-      "zOrder": 234
     }
   ],
   "maskedPasswordBoxes": 0,
@@ -2149,7 +1996,8 @@
   ],
   "foregroundAtEnd": {
     "handle": "0x1020C",
-    "process": "explorer"
+    "process": "<other>"
   },
-  "finishedAt": "2026-10-12T19:34:49.2330140+08:00"
+  "finishedAt": "2026-10-12T19:34:49.2330140+08:00",
+  "otherDesktopWindows": 0
 }

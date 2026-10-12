@@ -137,11 +137,17 @@ function Read-Shared([string] `$Path, [long] `$Tail) {
     now = [DateTimeOffset]::Now.ToString('o')
     directory = '$dir'
     directoryExists = (Test-Path -LiteralPath '$dir' -PathType Container)
+    directoryError = `$null
     current = `$null
     currentError = `$null
     timeline = `$null
     timelineError = `$null
     processes = @()
+}
+# A directory this account may not list looks like an empty one to Test-Path; say which it is
+# (onboard-hmi#316 review S1: whether agvops can read HT's %LOCALAPPDATA% has no precedent).
+if (`$result.directoryExists) {
+    try { `$null = Get-ChildItem -LiteralPath '$dir' -File -Filter '$currentFileName' -ErrorAction Stop } catch { `$result.directoryError = `$_.Exception.Message }
 }
 `$path = Join-Path '$dir' '$currentFileName'
 if (Test-Path -LiteralPath `$path -PathType Leaf) {
@@ -242,11 +248,13 @@ function Get-SnapshotVerdict {
     }
     function Done([string] $Outcome, [string] $Detail) { $verdict.outcome = $Outcome; $verdict.detail = $Detail; return $verdict }
 
+    if ($Read.directoryError) { return Done 'UNREADABLE' "this account cannot list $($Read.directory): $($Read.directoryError)" }
     if ($Read.currentError) { return Done 'UNREADABLE' "opening $currentFileName failed: $($Read.currentError)" }
     if (-not $Read.current) {
         $running = @($Read.processes | ForEach-Object { $_.id })
         $why = if (-not $Read.directoryExists) { "the directory $($Read.directory) does not exist" } else { "no $currentFileName in $($Read.directory)" }
-        $hint = if ($running.Count) { "; the HMI is running (pid $($running -join ', ')), so the snapshot is probably switched off (screenState.enabled) or written elsewhere (screenState.directory)" } else { '; no HMI process is running' }
+        # Probably, not surely: an account that cannot see the file reads the same (review S1).
+        $hint = if ($running.Count) { "; the HMI is running (pid $($running -join ', ')), so the snapshot is probably switched off (screenState.enabled), written elsewhere (screenState.directory), or not readable by this account" } else { '; no HMI process is running' }
         return Done 'ABSENT' "$why$hint"
     }
     try {
@@ -394,6 +402,50 @@ function Compare-ScreenState {
     return $rows.ToArray()
 }
 
+<#
+    A UIA reading made safe to keep as evidence (onboard-hmi#316 review S4). agv-capture-hmi-screen.ps1 records
+    every value pattern it can read -- the recovery reason, the forced handoff receiver's name, a sublot -- the
+    titles of every visible window on the desktop, and whatever element has the keyboard focus, in any program.
+    Kept: everything the comparison reads, and whether each value was empty (hasText is compared on that).
+    Replaced: host and account, non-empty values (also where they reappear in visibleTexts), the focused
+    element's name and value; other programs' windows are dropped and only counted. Pure; returns the object.
+#>
+function Protect-UiaReading {
+    param($Uia, [string] $ProcessName)
+    $redacted = '<redacted>'
+    foreach ($field in 'host', 'user') { if ($Uia.PSObject.Properties[$field]) { $Uia.$field = $redacted } }
+    $values = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($window in @($Uia.hmiWindows)) {
+        foreach ($node in @(Get-UiaNodes $window.uia)) {
+            if ($node.PSObject.Properties['value'] -and -not [string]::IsNullOrEmpty($node.value)) {
+                $null = $values.Add([string] $node.value)
+                $node.value = $redacted
+            }
+        }
+    }
+    if ($Uia.PSObject.Properties['visibleTexts']) {
+        $Uia.visibleTexts = @($Uia.visibleTexts | ForEach-Object { $values.Contains([string] $_) ? $redacted : $_ })
+    }
+    if ($Uia.PSObject.Properties['desktopWindows']) {
+        $all = @($Uia.desktopWindows)
+        $Uia.desktopWindows = @($all | Where-Object { $_.process -eq $ProcessName })
+        $Uia | Add-Member -NotePropertyName otherDesktopWindows -NotePropertyValue ($all.Count - $Uia.desktopWindows.Count) -Force
+    }
+    if ($Uia.focusedElement) {
+        foreach ($field in 'name', 'value') {
+            if ($Uia.focusedElement.PSObject.Properties[$field] -and -not [string]::IsNullOrEmpty($Uia.focusedElement.$field)) { $Uia.focusedElement.$field = $redacted }
+        }
+    }
+    # Which other program had the foreground says what else is on that desktop; the lock and focus checks
+    # only need the HMI and LockApp by name.
+    $foreground = @($Uia.foregroundAtStart, $Uia.foregroundAtEnd) | Where-Object { $_ -and $_.PSObject.Properties['process'] }
+    foreach ($record in $foreground) { if ($record.process -and $record.process -notin $ProcessName, 'LockApp') { $record.process = '<other>' } }
+    if ($Uia.desktop -and $Uia.desktop.PSObject.Properties['foregroundProcess'] -and $Uia.desktop.foregroundProcess -and $Uia.desktop.foregroundProcess -notin $ProcessName, 'LockApp') {
+        $Uia.desktop.foregroundProcess = '<other>'
+    }
+    return $Uia
+}
+
 <# Whether a UIA reading is complete enough that "not in the tree" means "not visible". #>
 function Get-UiaCompleteness {
     param($Uia)
@@ -447,7 +499,11 @@ function Format-Summary {
     $banner = $state.banner
     $lines.Add("  banner: $($banner.stateText) (from $($banner.source)$(if ($banner.hasError) { ', error' } elseif ($banner.hasWarning) { ', warning' }))")
     if ($state.operatorNotice) { $lines.Add("  operator notice until $($state.operatorNotice.until): $($state.operatorNotice.text)") }
-    if ($state.modals.depth) { $lines.Add("  modal dialog(s) open: $(@($state.modals.open | ForEach-Object { $_.title }) -join ' > ')") }
+    if ($state.modals.depth) {
+        $lines.Add("  modal dialog(s) open: $(@($state.modals.open | ForEach-Object { $_.title }) -join ' > ')")
+        # The dialog disables the main window's HWND, not the WPF IsEnabled the snapshot and UIA both read (review L2).
+        $lines.Add('  a modal dialog is open: the main window''s enabled states below are not to be trusted, the operator can only press the dialog')
+    }
     $visibleButtons = @($state.buttons | Where-Object visible | ForEach-Object {
             $label = $_.content ?? (@($_.options | ForEach-Object label) -join '/')
             "$label[$($_.enabled ? '可按' : '不可按')]"
@@ -582,6 +638,10 @@ try {
         $record.secondRead = Select-VerdictRecord $after
 
         $rows = @(if ($before.document.state -and $uia) { Compare-ScreenState $before.document.state $uia })
+        # Compared first, on the reading as taken; what stays in the evidence is the redacted copy (review S4).
+        if ($uia -and $uiaFile -and (Test-Path -LiteralPath $uiaFile)) {
+            Protect-UiaReading $uia $ProcessName | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $uiaFile -Encoding utf8NoBOM
+        }
         $verdict = Get-CrossCheckVerdict -Before $before -After $after -CaptureOutcome $captureOutcome -Uia $uia -Rows $rows
         $record.outcome = $verdict.outcome
         $record.detail = $verdict.detail
