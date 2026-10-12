@@ -127,15 +127,33 @@ ssh agv01 "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"
 
 ### 读车载端应用日志（中文）
 
-车载端日志在 `C:\8005\OnboardHmi\logs\agv-yyyyMMdd.log`，由 `FileAppLogger` 写成**无 BOM 的
-UTF-8**。文件本身是好的（hmi#292：2026-10-11 从 agv02 原样取回 `agv-20261010.log`、
+车载端日志在 `C:\Users\HT\AppData\Local\SQCD\8005AGV\logs\agv-yyyyMMdd.log`，由 `FileAppLogger`
+写成**无 BOM 的 UTF-8**，每行 `时间戳<Tab>等级<Tab>类别<Tab>来源<Tab>消息`，类别是 REQ-0272 的七个面之一。
+
+这个位置是 `%LOCALAPPDATA%\SQCD\8005AGV\logs`（与日志簿同处），**只在车载端以 `HT` 账号运行时**
+才落在上面那条路径；换了运行账号，路径跟着那个账号的 `%LOCALAPPDATA%` 变。车载端自己清理超过 30 天的
+`agv-yyyyMMdd.log`，同目录别的文件不碰。为了在
+[`../../fleet.md`](../../fleet.md) 硬约束 2 那种 RTC 断电后的时钟前跳下不误删，它有两道闸：
+
+- 清理时认定的「现在」不超过「开机时目录里最新一份日志那天的零点＋本次运行时长」（运行时长取单调时钟，不受墙钟
+  跳变影响），所以重启后头一两天会比 30 天多留一点。
+- 从要删的最新一份到今天，相邻两份日志相隔超过 7 天就一份不删，只在当天日志里记一行 `LocalFault` 警告。按周断续
+  使用的备用车照常清理；停机一周以上后，超过 30 天的旧日志会多留到重新连续为止，这是有意的。
+
+两道都挡不住的情况：时钟错着跨过一次重启、而且只快了不到 7 天，这时会删掉按真实时间 23～30 天的日志。真实日期
+接近 RTC 落点（约 2027-02）时跳变会落在这个范围，那段时间开机后先确认已校时（`scripts/07-fix-clock.ps1`）。
+
+**版本分界（onboard-hmi#312）**：含该票的车载端之前，日志写在程序目录 `C:\8005\OnboardHmi\logs\`。
+部署脚本每次把程序目录整个改名成 `.previous`、再删掉上一代 `.previous`，所以那里的日志会随部署消失，
+这正是改位置的原因。升级时旧日志**不迁移**：升级那次部署把旧包连同旧日志改名到
+`C:\8005\OnboardHmi.previous\logs\`，下一次部署就删掉，要留就在那之前拷走。文件本身是好的（hmi#292：2026-10-11 从 agv02 原样取回 `agv-20261010.log`、
 `agv-20261011.log`，2135 行全部带中文，严格 UTF-8 解码通过，`EF BF BD` 计数为 0）。
 看到中文变成一串 `�`（U+FFFD）而英文正常，是**读取链路**上的编码错配，不是日志坏了。
 
 推荐读法：先原样拷回本机，再按 UTF-8 读。字节不经过任何控制台，不会被转码。
 
 ```bash
-scp agv02:C:/8005/OnboardHmi/logs/agv-20261010.log ./evidence/
+scp agv02:C:/Users/HT/AppData/Local/SQCD/8005AGV/logs/agv-20261010.log ./evidence/
 ```
 
 ```powershell
@@ -146,7 +164,7 @@ Get-Content ./evidence/agv-20261010.log -Encoding utf8 | Select-String 'RECOVERY
 的 UTF-8 profile（第 6 节）：
 
 ```bash
-ssh agv02 "Get-Content C:\8005\OnboardHmi\logs\agv-20261010.log -Tail 50"
+ssh agv02 "Get-Content C:\Users\HT\AppData\Local\SQCD\8005AGV\logs\agv-20261010.log -Tail 50"
 ```
 
 会出 `�` 的读法，别用：
