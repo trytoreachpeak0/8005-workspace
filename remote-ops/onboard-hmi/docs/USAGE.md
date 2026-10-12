@@ -132,7 +132,9 @@ ssh agv01 "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"
 
 这个位置是 `%LOCALAPPDATA%\SQCD\8005AGV\logs`（与日志簿同处），**只在车载端以 `HT` 账号运行时**
 才落在上面那条路径；换了运行账号，路径跟着那个账号的 `%LOCALAPPDATA%` 变。车载端自己清理超过 30 天的
-`agv-yyyyMMdd.log`，同目录别的文件不碰。
+`agv-yyyyMMdd.log`，同目录别的文件不碰。保留期边界两侧的按天日志相隔超过 2 天时（停机，或
+[`../../fleet.md`](../../fleet.md) 硬约束 2 那种 RTC 断电后的时钟前跳）它一份都不删，只在当天日志里记一行 `LocalFault` 警告，等两侧连续后再清；所以停机之后
+看到超过 30 天的旧日志还在，是有意的。
 
 **版本分界（onboard-hmi#312）**：含该票的车载端之前，日志写在程序目录 `C:\8005\OnboardHmi\logs\`。
 部署脚本每次把程序目录整个改名成 `.previous`、再删掉上一代 `.previous`，所以那里的日志会随部署消失，
