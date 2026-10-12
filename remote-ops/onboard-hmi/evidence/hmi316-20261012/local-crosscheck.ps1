@@ -23,6 +23,8 @@ param(
     [int] $IntervalSeconds = 5
 )
 $ErrorActionPreference = 'Stop'
+# Backslashes: process paths are compared against it, and Windows reports them with backslashes.
+$Root = [System.IO.Path]::GetFullPath($Root)
 $reader = Join-Path $Scripts '18-read-hmi-screen-state.ps1'
 $out = Join-Path $Root "out\$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 $run = Join-Path $Root 'run'
@@ -59,9 +61,9 @@ function Invoke-Reader([string] $Label, [string[]] $More) {
     $record = Get-ChildItem -LiteralPath $evidence -Filter '*.json' | Where-Object Name -Match '-(read|crosscheck)\.json$' | Select-Object -First 1
     $parsed = $record ? (Get-Content -LiteralPath $record.FullName -Raw | ConvertFrom-Json) : $null
     $entry = [ordered]@{
-        label = $Label; exit = $exit; outcome = $parsed?.outcome; detail = $parsed?.detail
-        rows = @($parsed?.rows).Count; differences = @($parsed?.rows | Where-Object { -not $_.match } | ForEach-Object { "$($_.category) $($_.key) $($_.field): $($_.snapshot) / $($_.uia)" })
-        captureSeconds = $parsed?.capture?.seconds; revision = $parsed?.read?.contentRevision
+        label = $Label; exit = $exit; outcome = ${parsed}?.outcome; detail = ${parsed}?.detail
+        rows = @(${parsed}?.rows).Count; differences = @(${parsed}?.rows | Where-Object { -not $_.match } | ForEach-Object { "$($_.category) $($_.key) $($_.field): $($_.snapshot) / $($_.uia)" })
+        captureSeconds = ${parsed}?.capture?.seconds; revision = ${parsed}?.read?.contentRevision
     }
     Add-Content -LiteralPath (Join-Path $out 'runs.jsonl') -Value ($entry | ConvertTo-Json -Compress -Depth 5)
     Note ("{0} exit={1} {2} rows={3} diffs={4} rev={5} capture={6}s {7}" -f $Label, $exit, $entry.outcome, $entry.rows, $entry.differences.Count, $entry.revision, $entry.captureSeconds, $entry.detail)
@@ -102,7 +104,7 @@ try {
     }
 
     # Close the onboard client the way an operator would, then the file must read EXITED.
-    foreach ($p in @(Get-Process -Name SQCD.Agv.Wpf -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Root*" })) {
+    foreach ($p in @(Get-Process -Name SQCD.Agv.Wpf -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Root\*" })) {
         $p.CloseMainWindow() | Out-Null
         if (-not $p.WaitForExit(15000)) { Note "hmi $($p.Id) did not close in 15 s, killed"; $p.Kill() }
     }
@@ -111,7 +113,7 @@ try {
 } finally {
     Note "final stack: sim=$((Get-Stack).Sim -join ',') hmi=$((Get-Stack).Hmi -join ',')"
     foreach ($name in 'SQCD.Agv.Wpf', 'SQCD_8005AGV_Simulator') {
-        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Root*" })) {
+        foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Root\*" })) {
             try { $p.CloseMainWindow() | Out-Null; if (-not $p.WaitForExit(10000)) { $p.Kill() } } catch { if (-not $p.HasExited) { throw } }
         }
     }

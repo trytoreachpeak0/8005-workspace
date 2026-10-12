@@ -1,0 +1,36 @@
+KILLED      STALE limit ignored  <- verdict: past the limit with the writer alive is STALE ; cross-check: a first read that is STALE stays STALE
+KILLED      STALE limit off by one (-ge)  <- verdict: exactly the limit is still ACTIVE
+KILLED      future writtenAt accepted  <- verdict: a writtenAt far in the future is STALE
+KILLED      process id not checked  <- verdict: no process with that id is EXITED ; verdict: no HMI process at all is EXITED
+KILLED      reused process id accepted  <- verdict: a reused process id is EXITED ; end to end over the ssh stand-in: a reused id exits 4
+KILLED      STALE checked before EXITED  <- verdict: past the limit with the writer alive is STALE ; verdict: gone and old is EXITED, not STALE
+KILLED      DISABLED not recognised  <- verdict: DISABLED is DISABLED ; verdict: DISABLED stays DISABLED with the process gone and the file old
+KILLED      schema version not checked  <- verdict: another schema version is UNREADABLE
+SURVIVED    lenient UTF-8  <- 
+KILLED      agv01 allowed  <- agv01 is refused before anything runs
+KILLED      Remove-Item and Stop-Process on the read allowlist  <- the read-only scan catches: Remove-Item -LiteralPath $path ; the read-only scan catches: Stop-Process -Id 1
+KILLED      File.Open access not checked  <- the read-only scan catches an Open for writing
+KILLED      share mode not checked  <- the read-only scan catches a share mode without Delete
+KILLED      MOVING ignores the revision  <- cross-check: a moved revision is MOVING, even with a difference ; end to end -CrossCheck over the stand-ins: a revision that moves during the capture is MOVING
+KILLED      MOVING ignores a restart  <- cross-check: a restart is MOVING
+KILLED      MOVING ignores the UIA process  <- cross-check: UIA reading another process is MOVING
+KILLED      second read not required ACTIVE  <- cross-check: a second read that is not ACTIVE is MOVING
+KILLED      truncated UIA accepted  <- cross-check: a truncated UIA walk is CAPTURE_FAILED ; cross-check: an element that went away mid-walk is CAPTURE_FAILED
+KILLED      capture outcome not checked  <- cross-check: a capture that timed out is CAPTURE_FAILED
+KILLED      button visibility not compared  <- compare: a button the snapshot shows but UIA does not ; compare: a button UIA shows but the snapshot hides
+KILLED      button enabledness not compared  <- compare: a button enabled on screen but not in the snapshot ; compare: a command button disabled on screen
+KILLED      ambiguous button not reported  <- compare: two buttons with the same caption
+KILLED      template options not compared  <- compare: a missing template option
+KILLED      banner taken from any Text with that wording  <- compare: a banner text elsewhere on screen does not stand in for the banner
+KILLED      hasText not compared  <- compare: an input box with text the snapshot calls empty
+KILLED      input visibility not compared  <- compare: an input box the snapshot hides
+KILLED      input enabledness not compared  <- compare: a disabled input box
+KILLED      dialog depth not compared  <- compare: a dialog the snapshot does not know
+SURVIVED    dialog titles not compared  <- 
+KILLED      hidden dialogs counted  <- compare: a hidden dialog window does not count
+KILLED      raw code value not compared  <- compare: a raw code with another value
+KILLED      raw code visibility not compared  <- compare: a raw code element that is gone ; compare: a raw code the snapshot hides
+KILLED      every row matches  <- compare: a button the snapshot shows but UIA does not ; compare: a button UIA shows but the snapshot hides
+KILLED      MISMATCH exits 0  <- every outcome has an exit code; only ACTIVE and MATCH exit 0, and no two others share one ; end to end -CrossCheck over the stand-ins: a different banner is MISMATCH
+SURVIVED    the reader holds the handle for tens of milliseconds  <- 
+MUTATIONS 35, killed 32, not killed 3

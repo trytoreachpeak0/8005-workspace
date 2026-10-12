@@ -1,0 +1,20 @@
+18:49:10.465 onboard settings: screenState.enabled=true, logging.directory=<Root>\run\logs, journalPath=<Root>\run\onboard-journal.db, wireToGate.enabled=False
+18:49:16.166 simulator up pid=24808
+18:49:30.180 hmi up pid=35744
+18:49:31.482 read-1 exit=0  rows=1 diffs=1 rev= capture=s 
+18:49:37.956 crosscheck-01 exit=10  rows=1 diffs=1 rev= capture=s 
+18:49:48.795 crosscheck-02 exit=10  rows=1 diffs=1 rev= capture=s 
+18:49:59.613 crosscheck-03 exit=10  rows=1 diffs=1 rev= capture=s 
+18:50:10.171 crosscheck-04 exit=10  rows=1 diffs=1 rev= capture=s 
+18:50:20.663 crosscheck-05 exit=10  rows=1 diffs=1 rev= capture=s 
+18:50:31.189 crosscheck-06 exit=10  rows=1 diffs=1 rev= capture=s 
+18:50:41.689 crosscheck-07 exit=10  rows=1 diffs=1 rev= capture=s 
+18:50:52.309 crosscheck-08 exit=10  rows=1 diffs=1 rev= capture=s 
+18:51:03.002 crosscheck-09 exit=10  rows=1 diffs=1 rev= capture=s 
+18:51:13.708 crosscheck-10 exit=10  rows=1 diffs=1 rev= capture=s 
+18:51:24.184 crosscheck-11 exit=10  rows=1 diffs=1 rev= capture=s 
+18:51:34.640 crosscheck-12 exit=10  rows=1 diffs=1 rev= capture=s 
+18:51:39.684 hmi closed
+18:51:40.724 read-after-exit exit=0  rows=1 diffs=1 rev= capture=s 
+18:51:40.754 final stack: sim=24808 hmi=35744
+18:51:41.576 output: F:\8005-scratch\hmi316\out\20261012-184910

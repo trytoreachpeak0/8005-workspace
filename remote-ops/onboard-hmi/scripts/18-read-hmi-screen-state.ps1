@@ -328,14 +328,17 @@ function Compare-ScreenState {
     $nodes = @(if ($main) { Get-UiaNodes $main.uia })
     $buttons = @($nodes | Where-Object { $_.controlType -eq 'Button' })
 
-    # Banner: the state text has no AutomationId; it is the first Text after the manual-submit button
-    # (MainWindow.xaml: scan box, 手动提交, then the banner's StateText).
+    # Banner: the state text has no AutomationId; it is the first Text after the manual-submit button and
+    # outside it (MainWindow.xaml: scan box, 手动提交, then the banner's StateText). A WPF button with string
+    # content carries its own Text child of the same name, which comes first in tree order (2026-10-12, the
+    # first run against a real onboard client).
     $anchorName = (@($State.buttons | Where-Object { $_.key -eq 'ManualSubmitCommand' }) | Select-Object -First 1).content ?? '手动提交'
     $bannerNode = $null
-    $afterAnchor = $false
-    foreach ($node in $nodes) {
-        if ($afterAnchor -and $node.controlType -eq 'Text') { $bannerNode = $node; break }
-        if (-not $afterAnchor -and $node.controlType -eq 'Button' -and $node.name -ceq $anchorName) { $afterAnchor = $true }
+    for ($i = 0; $i -lt $nodes.Count; $i++) {
+        if ($nodes[$i].controlType -ne 'Button' -or $nodes[$i].name -cne $anchorName) { continue }
+        $after = $i + @(Get-UiaNodes $nodes[$i]).Count
+        $bannerNode = @($nodes | Select-Object -Skip $after | Where-Object { $_.controlType -eq 'Text' }) | Select-Object -First 1
+        break
     }
     Row 'banner' 'StateText' 'text' $State.banner.stateText ($bannerNode ? $bannerNode.name : "<no Text after the '$anchorName' button>")
 
@@ -493,8 +496,6 @@ function Invoke-SelfTest {
     if ($failures.Count -ne 0) { exit 1 }
 }
 
-# Dot-sourced by an off-vehicle test: define the functions and stop.
-if ($MyInvocation.InvocationName -eq '.') { return }
 if ($PSCmdlet.ParameterSetName -eq 'SelfTest') { Invoke-SelfTest; return }
 
 if ($CrossCheck -and -not $EvidenceDirectory) { throw '-CrossCheck needs -EvidenceDirectory.' }
