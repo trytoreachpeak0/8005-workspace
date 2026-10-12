@@ -76,15 +76,40 @@
     An onboard whose template still shares the session variable (the MVP line,
     agv01) is unaffected either way.
 
+.PARAMETER KeepCurrentIo
+    workspace#28. Keep the IO target the vehicle's installed configuration
+    points at (ioModule.host and ioModule.port, nothing else -- the other
+    ioModule keys are this package's wiring and follow the template). Without
+    an installed configuration (a first deployment), or with one that cannot be
+    read, the deployment is refused rather than falling back to the site file.
+    Excludes -UseSiteIo.
+
+.PARAMETER UseSiteIo
+    workspace#28. Render the site file's IO module even though the vehicle's
+    installed configuration points at the slot simulator (loopback). THIS
+    CONNECTS THE VEHICLE TO REAL IO: switching to the real module is in the
+    "moves a vehicle" class, so get the user's authorisation for this occasion
+    and have someone on site before passing it. Without it, a deployment that
+    would switch a simulator-backed vehicle to the real module is refused.
+    A vehicle already on the real module (agv01) and a first deployment take
+    the site value without either switch, as they always did. Excludes
+    -KeepCurrentIo.
+
 .PARAMETER WhatIf
     Stage, verify and render the configuration locally, then stop before the
-    vehicle is touched. The rendered configuration is printed.
+    vehicle is touched. The rendered configuration is printed. The read-only
+    probes (is the client running, where does the installed IO point) still
+    run, so the IO decision shows up in a dry run too.
 
 .EXAMPLE
     ./06-deploy-onboard-hmi.ps1 -WhatIf
 
 .EXAMPLE
     ./06-deploy-onboard-hmi.ps1 -RunId 12345678
+
+.EXAMPLE
+    ./06-deploy-onboard-hmi.ps1 -SshAlias agv02 -KeepCurrentIo -WhatIf
+    A test vehicle on the slot simulator: deploy and keep it on the simulator.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Download')]
 param(
@@ -114,7 +139,11 @@ param(
 
     [switch] $Force,
 
-    [switch] $SharedSafetyCredential
+    [switch] $SharedSafetyCredential,
+
+    [switch] $KeepCurrentIo,
+
+    [switch] $UseSiteIo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -184,7 +213,95 @@ function Assert-VehicleSafetyEndpointNamesVehicle {
     }
 }
 
+function Test-SimulatorIoHost {
+    <#
+        workspace#28. The slot simulator runs on the vehicle itself, so a loopback IO host is the simulator and anything
+        else is a real module (the real ones sit on 192.168.71.x). Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+    #>
+    param([AllowNull()][AllowEmptyString()][string] $IoHost)
+    if ([string]::IsNullOrWhiteSpace($IoHost)) { return $false }
+    $trimmed = $IoHost.Trim()
+    if ($trimmed -ieq 'localhost') { return $true }
+    $address = [ipaddress]::Any
+    return [ipaddress]::TryParse($trimmed, [ref]$address) -and [ipaddress]::IsLoopback($address)
+}
+
+function Resolve-OnboardIoTarget {
+    <#
+        workspace#28. Which IO target the rendered configuration gets: ioModule.host and ioModule.port only.
+        $Installed describes the vehicle's installed appsettings.json: State is 'absent' (first deployment), 'present'
+        (with Host and Port) or 'unreadable' (with Error). Returns Host, Port, Line (the summary line) and Warning.
+        Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+
+        The rule it holds: no combination of switches turns a simulator-backed vehicle onto the real module unless
+        -UseSiteIo says so, because switching to real IO needs the user's authorisation for that occasion.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable] $Installed,
+        [Parameter(Mandatory = $true)][string] $SiteHost,
+        [Parameter(Mandatory = $true)][int] $TemplatePort,
+        [switch] $KeepCurrentIo,
+        [switch] $UseSiteIo
+    )
+    if ($KeepCurrentIo -and $UseSiteIo) {
+        throw 'IO_OPTIONS_EXCLUSIVE: -KeepCurrentIo and -UseSiteIo contradict each other; pass one.'
+    }
+    $describe = { param($h, $p) '{0} {1}:{2}' -f ((Test-SimulatorIoHost $h) ? 'simulator' : 'REAL MODULE'), $h, $p }
+
+    $state = [string] $Installed['State']
+    $installedHost = [string] $Installed['Host']
+    $installedPort = 0
+    $installedValid = $state -ceq 'present' -and -not [string]::IsNullOrWhiteSpace($installedHost) -and
+        $installedHost -notlike '*REPLACE*' -and [int]::TryParse([string] $Installed['Port'], [ref]$installedPort) -and
+        $installedPort -ge 1 -and $installedPort -le 65535
+    $previous = switch ($true) {
+        ($state -ceq 'absent') { 'none (no installed configuration: first deployment)'; break }
+        $installedValid { & $describe $installedHost $installedPort; break }
+        default { "unknown ($state$(if ($Installed['Error']) { ": $($Installed['Error'])" }); host '$installedHost', port '$($Installed['Port'])')" }
+    }
+
+    if ($KeepCurrentIo) {
+        if ($state -ceq 'absent') {
+            throw ('IO_KEEP_NO_INSTALLED_CONFIG: -KeepCurrentIo keeps the IO target of the installed configuration, and this ' +
+                'vehicle has none (first deployment). Refusing rather than silently using the site file''s IO module. ' +
+                'Deploy without -KeepCurrentIo to take the site value, then 09-switch-io-module.ps1 -Simulator if the simulator is wanted.')
+        }
+        if (-not $installedValid) {
+            throw "IO_KEEP_UNREADABLE: -KeepCurrentIo could not read a usable ioModule.host/port from the installed configuration: $previous. Refusing rather than guessing."
+        }
+        return [pscustomobject]@{
+            Host    = $installedHost
+            Port    = $installedPort
+            Line    = "IO target: $(& $describe $installedHost $installedPort), kept from the installed configuration (-KeepCurrentIo); before: $previous"
+            Warning = $null
+        }
+    }
+
+    $toReal = -not (Test-SimulatorIoHost $SiteHost)
+    # An installed configuration this script cannot read may well point at the simulator; treat it as one.
+    $fromSimulator = ($installedValid -and (Test-SimulatorIoHost $installedHost)) -or ($state -cne 'absent' -and -not $installedValid)
+    $target = & $describe $SiteHost $TemplatePort
+    if ($toReal -and $fromSimulator -and -not $UseSiteIo) {
+        throw ("IO_SIMULATOR_TO_REAL_REFUSED: the installed configuration's IO is $previous, and the site file would switch it to " +
+            "$target. Switching a vehicle to real IO needs the user's authorisation. Pass one of: -KeepCurrentIo to keep the " +
+            'current IO target, or -UseSiteIo to switch to the real module (authorised, with someone on site).')
+    }
+    $line = "IO target: $target, from the site file; before: $previous"
+    if ($UseSiteIo -and $toReal) {
+        $line += ' -- -UseSiteIo: this connects the vehicle to REAL IO; deploy only with the user''s authorisation and someone on site'
+    }
+    $warning = ($toReal -and $fromSimulator) ?
+        "This deployment switches the vehicle's IO from $previous to $target (-UseSiteIo). The vehicle will drive real slot IO the next time the client starts." :
+        $null
+    return [pscustomobject]@{ Host = $SiteHost; Port = $TemplatePort; Line = $line; Warning = $warning }
+}
+
 Write-Step "OnboardHmi deployment to $SshAlias"
+
+# Before anything is downloaded or read: the two IO switches contradict each other.
+if ($KeepCurrentIo -and $UseSiteIo) {
+    throw 'IO_OPTIONS_EXCLUSIVE: -KeepCurrentIo and -UseSiteIo contradict each other; pass one.'
+}
 
 # ---------------------------------------------------------------- site values ---
 
@@ -249,6 +366,32 @@ if ($running -contains 'RUNNING') {
     Write-Warning "SQCD.Agv.Wpf is running on $SshAlias and -Force was given; it will be stopped before the payload is placed."
 }
 Write-Step "Onboard client state on ${SshAlias}: $($running -join ' ')"
+
+# workspace#28. Where the installed configuration's IO points, read before the -WhatIf gate (read-only, like the
+# check above) so a dry run shows the IO decision too. Encoded, so no quoting survives two shells by accident.
+$ioProbe = @"
+`$path = Join-Path '$installRoot' 'appsettings.json'
+if (-not (Test-Path -LiteralPath `$path -PathType Leaf)) { 'IO-STATE ' + (@{ State = 'absent' } | ConvertTo-Json -Compress); return }
+try {
+    `$io = (Get-Content -Raw -LiteralPath `$path | ConvertFrom-Json -AsHashtable)['ioModule']
+    `$h = (`$io -is [System.Collections.IDictionary]) ? `$io['host'] : `$null
+    `$p = (`$io -is [System.Collections.IDictionary]) ? `$io['port'] : `$null
+    'IO-STATE ' + (@{ State = 'present'; Host = `$h; Port = `$p } | ConvertTo-Json -Compress)
+} catch {
+    'IO-STATE ' + (@{ State = 'unreadable'; Error = `$_.Exception.Message } | ConvertTo-Json -Compress)
+}
+"@
+$ioProbeEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ioProbe))
+$ioProbeLine = @(Invoke-Ssh -Quiet @("pwsh -NoProfile -EncodedCommand $ioProbeEncoded") | ForEach-Object { "$_" } |
+        Where-Object { $_.StartsWith('IO-STATE ') }) | Select-Object -Last 1
+$installedIo = $null
+if ($ioProbeLine) {
+    try { $installedIo = $ioProbeLine.Substring('IO-STATE '.Length) | ConvertFrom-Json -AsHashtable } catch { $installedIo = $null }
+}
+if ($installedIo -isnot [hashtable] -or -not $installedIo.ContainsKey('State')) {
+    $installedIo = @{ State = 'unreadable'; Error = 'the probe returned no IO-STATE line' }
+}
+Write-Step "Installed IO on ${SshAlias}: $($installedIo['State']) $($installedIo['Host']):$($installedIo['Port'])"
 
 # ------------------------------------------------------------------- package ---
 
@@ -354,6 +497,18 @@ try {
         throw "wireToGate.port reads back as '$($config.wireToGate.port)', not $OnboardPort."
     }
     Write-Step "wireToGate endpoint: $($config.wireToGate.host):$($config.wireToGate.port)"
+
+    # workspace#28. The IO target: the site file's module on the template's port, or the installed one with
+    # -KeepCurrentIo. Refuses a silent simulator-to-real switch. Only host and port; the rest is this package's wiring.
+    if (-not ($config.ioModule.PSObject.Properties.Name -contains 'port')) {
+        throw 'The template has no ioModule.port; refusing to add a key the client may not read.'
+    }
+    $ioTarget = Resolve-OnboardIoTarget -Installed $installedIo -SiteHost ([string] $site.ioModule.host) `
+        -TemplatePort ([int] $config.ioModule.port) -KeepCurrentIo:$KeepCurrentIo -UseSiteIo:$UseSiteIo
+    $config.ioModule.host = $ioTarget.Host
+    $config.ioModule.port = $ioTarget.Port
+    Write-Step $ioTarget.Line
+    if ($ioTarget.Warning) { Write-Warning $ioTarget.Warning }
 
     # OnboardSettings.IsPlaceholderValue, reproduced exactly. Note that the two
     # sample identities are themselves placeholders: a site file copied from the
@@ -523,6 +678,10 @@ Move-Item -LiteralPath `$incoming -Destination `$root
 `$endpoint = '{0}:{1}' -f `$placed.wireToGate.host, `$placed.wireToGate.port
 if (`$endpoint -ne '${ControlServerHost}:$OnboardPort') { throw "Placed wireToGate endpoint is `$endpoint, expected ${ControlServerHost}:$OnboardPort." }
 "wireToGate endpoint read back: `$endpoint"
+# workspace#28: the IO target is the other fact that decides what the vehicle does when the client starts.
+`$ioPlaced = '{0}:{1}' -f `$placed.ioModule.host, `$placed.ioModule.port
+if (`$ioPlaced -ne '$($ioTarget.Host):$($ioTarget.Port)') { throw "Placed ioModule is `$ioPlaced, expected $($ioTarget.Host):$($ioTarget.Port)." }
+"ioModule read back: `$ioPlaced"
 
 [Environment]::SetEnvironmentVariable('CONTROL_SERVER_ONBOARD_CREDENTIAL', '$($plain['OnboardCredential'])', 'Machine')
 [Environment]::SetEnvironmentVariable('CONTROL_SERVER_OPERATOR_ID', '$($plain['OperatorId'])', 'Machine')
@@ -573,6 +732,8 @@ try {
 
     Write-Host ''
     Write-Step 'Staged. NOT started -- that part is yours.'
+    Write-Step $ioTarget.Line
+    if ($ioTarget.Warning) { Write-Warning $ioTarget.Warning }
     Write-Host ''
     Write-Host '  On the vehicle, from a desktop session:' -ForegroundColor Yellow
     Write-Host "    $installRoot\SQCD.Agv.Wpf.exe" -ForegroundColor Yellow

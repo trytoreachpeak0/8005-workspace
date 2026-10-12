@@ -18,9 +18,15 @@
     for. The production guard that rejects loopback applies to wireToGate.host
     and vehicleSafety.endpoint, not to IO.
 
-    This is a post-deployment change to the file on the vehicle, so a later run
-    of 06-deploy-onboard-hmi.ps1 renders the site file again and puts the real
-    module address back. Re-run this afterwards if the simulator is still wanted.
+    This is a post-deployment change to the file on the vehicle. Since
+    workspace#28 a later run of 06-deploy-onboard-hmi.ps1 no longer puts the
+    real module back behind your back: on a vehicle this script pointed at the
+    simulator, 06 refuses unless it is told which one is wanted --
+    -KeepCurrentIo keeps the simulator (only host and port are kept; the rest
+    of ioModule follows the new package), -UseSiteIo switches to the real
+    module, which needs the user's authorisation and someone on site. Before
+    that change, 06 silently rendered the site file's module and this script
+    had to be run again after every deployment.
 
     The client reads its configuration once at startup, so a change while it is
     running is invisible until restart -- and swapping the IO target under a
