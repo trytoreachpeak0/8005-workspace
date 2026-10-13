@@ -1,5 +1,6 @@
 {
   "_comment": "Per-vehicle site values for 06-deploy-onboard-hmi.ps1. None of these are secrets -- vehicleKey is already in ControlServer appsettings.json; the credential and operator id come from the DPAPI store instead.",
+  "_status": "2026-10-13 cs#565 为切换试跑核对过：agvId、expectedVehicleKey（RIoT id=58）、onboardInstanceId 与 remote-ops/fleet.md 一致，ioModule.host 192.168.71.150 是这台车的仓位模块（fleet.md 2026-09-13 实测，三台车形状相同；下面 _ioModule 里「.50 是另一台车的模块」的说法已被那次实测推翻）。改连 v2 时这些值都不改：onboardInstanceId 规定跨部署稳定，v2 新库没见过它，不冲突；试跑用仓位模拟器由 09-switch-io-module.ps1 -Simulator 在部署之后切，不改这里的 ioModule。改连 v2 只改车与线的那一个字段（workspace PR #41 的 controlServerLine），步骤与回滚见 remote-ops/onboard-hmi/docs/cutover-three-car-v3-steps.md。",
   "_agvId": "agvId 与 onboardInstanceId 必须是真实的现场身份。客户端把 AGV-8005-01 和 OBU-8005-01 这两个示例值本身当作占位符，Production 环境下启动即抛 InvalidDataException。",
   "_onboardInstanceId": "wireToGate.onboardInstanceId 必须是 D 形式的 Guid（8-4-4-4-12），且跨部署稳定——服务端把新值当成另一台车。",
   "_ruleGateway": "规则服务器只在 wireToGate.enabled=false 时才连（App.xaml.cs:41 用 DisabledRuleGateway 顶掉它）。Production 强制 wireToGate.enabled=true，所以这个地址在本部署里不会被使用，但配置校验仍要求它不是占位值。有真实地址就填真实的；没有就保留 127.0.0.1。",
