@@ -115,6 +115,45 @@ if ($null -eq $formatAst) {
         -Name 'the target summary prints vehicles only through Format-VehicleLines' -Detail ("other Vehicle strings: $(@($vehicleStrings | ForEach-Object { $_.Extent.Text }) -join ' | '); calls: $($calls.Count)")
 }
 
+# control-server#617 (PR #679): the fault recovery credential is required when vehicleFaultRecovery or
+# foreignRunningOrderRelease is on. Hand-made definitions, so this holds whether or not the fixture's
+# control-server revision knows foreignRunningOrderRelease yet (its definition check would refuse the
+# section before the secrets are read); the AST walk pins that the script refuses only through this function.
+Write-Host ''
+Write-Host 'Fault recovery credential (control-server#454, #617)' -ForegroundColor Cyan
+$credentialAst = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-FaultRecoveryCredentialRefusal' }, $true)
+if ($null -eq $credentialAst) {
+    Write-Result -Ok $false -Name 'Get-FaultRecoveryCredentialRefusal is defined in the deploy script' -Detail 'not found'
+} else {
+    . ([scriptblock]::Create($credentialAst.Extent.Text))
+    function New-RecoveryDefinition($Recovery, $Release) {
+        $d = [ordered]@{ instanceId = 'selftest' }
+        if ($null -ne $Recovery) { $d['vehicleFaultRecovery'] = @{ enabled = $Recovery } }
+        if ($null -ne $Release) { $d['foreignRunningOrderRelease'] = @{ enabled = $Release } }
+        return $d
+    }
+    foreach ($case in @(
+            @{ Name = 'only foreignRunningOrderRelease on, no credential'; Recovery = $false; Release = $true; Has = $false; Expect = 'foreignRunningOrderRelease.enabled is true' }
+            @{ Name = 'only vehicleFaultRecovery on, no credential (unchanged)'; Recovery = $true; Release = $false; Has = $false; Expect = 'vehicleFaultRecovery.enabled is true' }
+            @{ Name = 'both on, no credential'; Recovery = $true; Release = $true; Has = $false; Expect = 'vehicleFaultRecovery.enabled and foreignRunningOrderRelease.enabled are true' }
+            @{ Name = 'only vehicleFaultRecovery on, no foreignRunningOrderRelease section (a definition before #679), no credential'; Recovery = $true; Release = $null; Has = $false; Expect = 'vehicleFaultRecovery.enabled is true' }
+            @{ Name = 'only foreignRunningOrderRelease on, credential present'; Recovery = $false; Release = $true; Has = $true; Expect = $null }
+            @{ Name = 'both on, credential present'; Recovery = $true; Release = $true; Has = $true; Expect = $null }
+            @{ Name = 'both off, no credential'; Recovery = $false; Release = $false; Has = $false; Expect = $null }
+            @{ Name = 'vehicleFaultRecovery off and no foreignRunningOrderRelease section (a definition before #679), no credential'; Recovery = $false; Release = $null; Has = $false; Expect = $null }
+            @{ Name = 'foreignRunningOrderRelease.enabled as the string "true" (not a JSON true), no credential'; Recovery = $false; Release = 'true'; Has = $false; Expect = $null })) {
+        $r = Get-FaultRecoveryCredentialRefusal -Definition (New-RecoveryDefinition $case.Recovery $case.Release) -HasCredential $case.Has -SecretPath 'C:\selftest\secrets.xml'
+        $ok = ($null -eq $case.Expect) ? ($null -eq $r) :
+            ($r -is [string] -and $r.StartsWith($case.Expect) -and $r.Contains("'V2FaultRecoveryCredential' is missing from C:\selftest\secrets.xml") -and $r.EndsWith('Nothing was downloaded or copied.'))
+        Write-Result -Ok $ok -Name "credential precheck: $($case.Name) -> $($null -eq $case.Expect ? 'accepted' : 'refused')" -Detail "got: $r"
+    }
+    $credentialCalls = @($deployAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-FaultRecoveryCredentialRefusal' }, $true))
+    $scriptText = Get-Content -LiteralPath $ScriptPath -Raw
+    Write-Result -Ok ($credentialCalls.Count -eq 1 -and $scriptText.Contains('if ($credentialRefusal) { throw $credentialRefusal }') -and
+            -not $scriptText.Contains("`$definition['vehicleFaultRecovery']['enabled'] -eq `$true -and -not `$plain.ContainsKey('V2FaultRecoveryCredential')")) `
+        -Name 'the deploy script refuses a missing credential only through Get-FaultRecoveryCredentialRefusal' -Detail "calls $($credentialCalls.Count)"
+}
+
 # ------------------------------------------------------------------ fixtures ---
 
 $work = Join-Path ([IO.Path]::GetTempPath()) "cs552-selftest-$([guid]::NewGuid().ToString('N').Substring(0, 8))"

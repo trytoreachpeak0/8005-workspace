@@ -231,6 +231,29 @@ function Assert-DefinitionFromClone {
     return $relative
 }
 
+function Get-FaultRecoveryCredentialRefusal {
+    <#
+        Whether this definition needs the parallel instance's fault recovery credential, and it is not in the store. $null
+        when deployable; otherwise the refusal. Pure: Test-DeployControlServerParallel.ps1 lifts it out and feeds it
+        hand-made definitions, so it holds whether or not the fixture's control-server revision knows each section.
+
+        Two sections use the one credential (CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL in the service Environment):
+        vehicleFaultRecovery (control-server#454, the Host recovery and clearance entries) and foreignRunningOrderRelease
+        (control-server#617, PR #679: releasing a car held by a foreign running order). Either one on requires it. A
+        definition without foreignRunningOrderRelease -- every one before #679 -- reads as off, so an older
+        control-server checkout deploys exactly as before. Only a JSON true counts as on; the definition check refuses any
+        other value where the module knows the section.
+    #>
+    param([System.Collections.IDictionary] $Definition, [bool] $HasCredential, [string] $SecretPath)
+    $on = @(foreach ($section in @('vehicleFaultRecovery', 'foreignRunningOrderRelease')) {
+            $node = $Definition.Contains($section) ? $Definition[$section] : $null
+            if ($node -is [System.Collections.IDictionary] -and $node.Contains('enabled') -and $node['enabled'] -is [bool] -and $node['enabled']) { "$section.enabled" }
+        })
+    if ($on.Count -eq 0 -or $HasCredential) { return $null }
+    return ("$($on -join ' and ') $($on.Count -eq 1 ? 'is' : 'are') true, but 'V2FaultRecoveryCredential' is missing from $SecretPath. " +
+        'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
+}
+
 function Format-VehicleLines {
     <#
         The vehicle line(s) of the target summary. A definition with a fleet table
@@ -724,13 +747,12 @@ foreach ($key in @('RiotCallApiKey', 'MesIngestSharedSecret', 'V2FaultRecoveryCr
 }
 # control-server#454. The parallel instance's own fault recovery credential, written into its
 # service Environment as CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL -- never the MVP's value. With
-# the Host entry on it is required, and refused here before anything is downloaded; with it off it
-# is sent when present, so turning the entry on later needs no new secret on the server. The server
-# makes the same check again, and a rollback carries over what the service already holds.
-if ($definition['vehicleFaultRecovery']['enabled'] -eq $true -and -not $plain.ContainsKey('V2FaultRecoveryCredential')) {
-    throw ("vehicleFaultRecovery.enabled is true, but 'V2FaultRecoveryCredential' is missing from $SecretPath. " +
-        'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
-}
+# the Host entry on -- or, since control-server#617, the foreign running order release -- it is
+# required, and refused here before anything is downloaded; with both off it is sent when present,
+# so turning one on later needs no new secret on the server. The server makes the same check again,
+# and a rollback carries over what the service already holds.
+$credentialRefusal = Get-FaultRecoveryCredentialRefusal -Definition $definition -HasCredential $plain.ContainsKey('V2FaultRecoveryCredential') -SecretPath $SecretPath
+if ($credentialRefusal) { throw $credentialRefusal }
 # control-server#535. Reading the production MesIngest needs its Bearer token; without it every read
 # is 401 and nothing is dispatched. Refused here, before anything is downloaded; the server checks again.
 if ($productionSource -and -not $plain.ContainsKey('MesIngestSharedSecret')) {
@@ -738,7 +760,7 @@ if ($productionSource -and -not $plain.ContainsKey('MesIngestSharedSecret')) {
         'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
 }
 Write-Step ("Secrets loaded from the DPAPI store (V2FaultRecoveryCredential {0})" -f
-    ($plain.ContainsKey('V2FaultRecoveryCredential') ? 'present, will be sent' : 'absent; the Host recovery entry is off'))
+    ($plain.ContainsKey('V2FaultRecoveryCredential') ? 'present, will be sent' : 'absent; the Host recovery entry and the foreign order release are off'))
 
 # control-server#600. A roster definition makes the v2 server answer each vehicle's vehicle-safety projection only to that
 # vehicle's own credential, and refuse to start without one per roster row. They are generated on this machine
