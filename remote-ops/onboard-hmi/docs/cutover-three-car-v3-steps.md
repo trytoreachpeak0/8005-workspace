@@ -23,8 +23,8 @@ onboard-hmi `w2g/fp-v2-impl@5c00a513`、slots-simulator `main@fb5f7c59`。「读
 - **有两处方案原文要改**（已报调度，见第 7 节；数据方案第 3.3 节已按同样的结论写）：方案第 6 节第 5 步说 `C:\8005\OnboardHmi` 的备份「含日志簿、发件箱」，实际日志簿与发件箱在
   `C:\Users\HT\AppData\Local\SQCD\8005AGV\onboard-journal.db`，不在安装目录里，要单独备份；`agv02`／`agv03` 的发件箱必须在 v2 换新库**之前**核，
   换库之后再核就只能看着欠送的行被新库当历史吞掉。
-- **执行前还缺的东西**列在第 6 节「待填项」：出包的 run id、`agv01` 当前装的版本串、`agv03` 停在哪个点、`agv01` 有没有装仓位模拟器、
-  仓位应答脚本 `cs566-sim-respond.ps1` 的源头（它不在任何仓库里，只在 `agv02`／`agv03` 车上）。
+- **执行前还缺的东西**列在第 7 节「待填项」：出包的 run id，以及执行时现场读的 `agv01` 版本串、有没有仓位模拟器、时钟。
+  `agv03` 的停放点（站号 222）、仓位应答脚本的来源、数据方案 U1～U8 用户 10-13 已定，见第 7 节。
 
 ## 1. 约定
 
@@ -78,7 +78,7 @@ $db = 'C:\ProgramData\8005\ControlServer.V2\data\controlserver.db'
 
 | 时点（方案步号） | `agv01` | `agv02` | `agv03` |
 | --- | --- | --- | --- |
-| 切换前，MVP 还在跑 | A-1 只读记录现状【问用户·agv01】 | B-1 只读记录现状 | C-1 只读记录现状；C-0 挪到停放点【问用户·动车】 |
+| 切换前，MVP 还在跑 | A-1 只读记录现状【问用户·agv01】 | B-1 只读记录现状 | C-1 只读记录现状；C-0 挪到站 222【问用户·动车】 |
 | 第 2～3 步：MVP 关闸、等 `agv01` 这趟 `Completed` | A-2a 停栈、`-CheckOnly` 查欠送与在载（对 MVP，MVP 停服之前）【问用户·agv01】 | — | — |
 | 第 4～5 步：停 MVP、备份 | A-2b 备份安装目录与机器级变量；日志簿目录检查后改名留存【问用户·agv01】 | — | — |
 | 第 6 步：用户在 RIoT 把 `agv01` 搬到 map 26 | （用户本人做） | — | — |
@@ -108,7 +108,7 @@ v2 会把别的车派过去撞上它（推的，依据方案第 11 节第 3 条�
 | B-1 | 记录现状：车载端版本、端口、IO 指向、进程、日志簿目录、时钟、机器级变量名 | 见下方「只读快照命令」，把别名换成 `agv02`，输出存 `<EV>/agv02/01-before.txt` | 【只读】不需问 | 输出里有 `onboardBuildCommit`、`port 58105`、`ioModule 127.0.0.1:1502`（模拟器）、`8005AGV` 目录 | 只读，无需退回 |
 | B-2 | **换库前**（方案第 7 步之前，v2 旧库已关闸、无在途、仍在线）：停栈，检查欠送与在载，都为零就把日志簿整目录改名留存（数据方案第 3.3 节） | `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1 -SshAlias agv02 -Stop`；`pwsh -File <WT>/remote-ops/onboard-hmi/scripts/19-archive-onboard-journal.ps1 -SshAlias agv02 -Suffix pre-cutover-trial-20261013 -EvidencePath <EV>/agv02/journal` | 不需问（`agv02` 不在 MVP 上；v2 闸门关着） | 输出 `pending=0`、`loadsOnBoard=null` 或 `0`、`ARCHIVED to ...8005AGV.pre-cutover-trial-20261013`；`<EV>/agv02/journal/journal-check.json` 里 `renamed` 为 `true` | 拒绝 `JOURNAL_OUTBOX_PENDING`：旧库还在线，起栈 `10-start-onboard-stack.ps1 -SshAlias agv02` 让它送完，再停栈重跑。`JOURNAL_LOADS_ON_BOARD`：车载端认为车上有货，停下报调度。撤销改名：栈停着时 `ssh agv02 'Rename-Item C:\Users\HT\AppData\Local\SQCD\8005AGV.pre-cutover-trial-20261013 8005AGV'` |
 | B-3 | 部署 v3 车载端（方案第 9 步）。前提：S1 定义已由 19 号装上（方案第 8 步），v2 已认识 `agv02` 的投影凭据。先干跑再真跑 | `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort 58105 -HealthPort 58107 -RunId <RUN> -KeepCurrentIo -WhatIf`，看完摘要去掉 `-WhatIf` 再跑一次 | 不需问。`-KeepCurrentIo` 让车留在模拟器上（`agv02` 现在是 `127.0.0.1:1502`）。**不要用 `-UseSiteIo`**，那是切真 IO，属「动车」类 | 输出 `OnboardHmi commit:` 等于 P2 的 SHA；`wireToGate endpoint read back: 172.19.205.222:58105`；`ioModule read back: 127.0.0.1:1502`；`vehicle-safety 200`，`vehicleKey` 是 `BROKERX-f389…`、`motionState` 是 `STOPPED`。看到 401 先读车上 `vehicleSafety.endpoint` 的端口（记忆「V2 车载端部署两个端口都要传」） | 放置脚本报错：安装目录没换成功时 06 以非零退出，旧版本仍在 `C:\8005\OnboardHmi` 或 `.previous`。要回到上一版：停栈后 `Rename-Item C:\8005\OnboardHmi OnboardHmi.failed-<D>; Rename-Item C:\8005\OnboardHmi.previous OnboardHmi` |
-| B-4 | 新库里为 `agv02` 配置（方案第 10 步，与服务端导入一起做）：仓位模型（整库一次）、`bind-io`、充电策略与名册、等待点的车队范围 | factory01 上：`& $f seed-approved-facts --database $db`（整库一次）；`& $f bind-io --database $db --agv '老厂前线新多仓位2'`；充电策略、名册、等待点按 program#170 第 2 节导入，`--fleet` 写本阶段车队：`BROKERX-f38975561adf46ccb1d2f23833c7d0e4` | 不需问（对 v2 新库，不碰车） | `bind-io` 回 `"outcome":"OK"`、`boundSlots 8`；`& $f status --database $db` 里 `老厂前线新多仓位2` 的 `slotsMissingBinding` 为空；`& $f charging-policy --database $db --fleet <本阶段车队>` 里本车 `commissioned:true`。**试跑段 `status` 显示 `SLOT_CONFIGURATION_NEVER_VERIFIED` 是预期**，10-10、10-11 两轮试跑都是这样（模拟 IO 下不做逐仓核验，见第 5 步） | 导入是版本化的：错了就再导一版正确的，不改库表。换库后要重新激活任务类型站点绑定（记忆「v2 换库要连车载端日志簿一起清」） |
+| B-4 | 新库里为 `agv02` 配置（方案第 10 步，与服务端导入一起做）：仓位模型（整库一次）、`bind-io`、充电策略与名册、等待点的车队范围 | factory01 上：`& $f seed-approved-facts --database $db`（整库一次）；`& $f bind-io --database $db --agv '老厂前线新多仓位2'`；充电策略、名册、等待点按 program#170 第 2.2 节导入（用户 10-13 定：名册登记充电桩 211、充电策略 v1 按同一句授权在新库重批，数据方案 U3、U4），`--fleet` 写本阶段车队：`BROKERX-f38975561adf46ccb1d2f23833c7d0e4` | 不需问（对 v2 新库，不碰车） | `bind-io` 回 `"outcome":"OK"`、`boundSlots 8`；`& $f status --database $db` 里 `老厂前线新多仓位2` 的 `slotsMissingBinding` 为空；`& $f charging-policy --database $db --fleet <本阶段车队>` 里本车 `commissioned:true`。**试跑段 `status` 显示 `SLOT_CONFIGURATION_NEVER_VERIFIED` 是预期**，10-10、10-11 两轮试跑都是这样（模拟 IO 下不做逐仓核验，见第 5 步） | 导入是版本化的：错了就再导一版正确的，不改库表。换库后要重新激活任务类型站点绑定（记忆「v2 换库要连车载端日志簿一起清」） |
 | B-5 | 逐仓核对 | 试跑段不做（方案第 5 节表：模拟 IO 下没有意义）。生产段见第 5 节 | — | — | — |
 | B-6 | 起栈，看握手 `Ready`，**不开闸** | `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1 -SshAlias agv02` | 起栈本身不动车（闸门关着、v2 不建单）；开闸是方案第 16 步，另行【问用户·动车】 | factory01 上 V2 日志出现 `1103 SessionReadiness ... to "老厂前线新多仓位2" ... "READY"`（形式见 `evidence/field/20261011-W2-prep6-two-car/22-readiness-two-cars.txt`）；按 `evidence/field/20261010-W2-prep/18-precheck-after-onboard-start.txt` 的预检形式读一次：会话 `Readiness=Ready`、无未完成旅程、无故障 | 停在 `RecoveryRequired`：先看时钟（`07-fix-clock.ps1` 那一类问题）和投影 200 与否；`SNAPSHOT_REVISION_CONTENT_CONFLICT` 说明 B-2 没做或做在了起栈之后，停栈重做 B-2 |
 
@@ -143,8 +143,8 @@ v2 会把别的车派过去撞上它（推的，依据方案第 11 节第 3 条�
 | # | 做什么 | 命令 | 授权 | 怎么验证 | 失败退回 |
 | --- | --- | --- | --- | --- | --- |
 | C-1 | 记录现状 | 「只读快照命令」换成 `agv03`，存 `<EV>/agv03/01-before.txt` | 【只读】 | 同 B-1 | — |
-| C-2 | **换库前**（与 B-2 同时，C-0 挪完之后）：停栈，检查后日志簿改名留存；之后栈一直停到 S3 | `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1 -SshAlias agv03 -Stop`；`pwsh -File <WT>/remote-ops/onboard-hmi/scripts/19-archive-onboard-journal.ps1 -SshAlias agv03 -Suffix pre-cutover-trial-20261013 -EvidencePath <EV>/agv03/journal` | 不需问 | 同 B-2 | `JOURNAL_OUTBOX_PENDING`：`agv03` 不在旧库当前车队表里，未必送得出去。按数据方案第 6 节 U6 等用户定（建议是行内容已在证据副本里，改名留存、不再送）；脚本没有绕过开关，用户定了再手动改名。其余同 B-2 |
-| C-0 | 挪到停放点（v2 不管的点，见第 7 节待填项 F2），挪完再做 C-2 | 由用户或现场在 RIoT 上下发移动；`agv03` 电量低时先充电（10-12 收工时 30%） | 【问用户·动车】移动是动车 | RIoT 读回 `agv03` 在 map 26、站点等于选定的点、`MT_FINISHED` | 停不到位就停在原处，报调度；**不要在 v2 的等待点、充电位或任务固定站上开 S1 的闸** |
+| C-2 | **换库前**（与 B-2 同时，C-0 挪完之后）：停栈，检查后日志簿改名留存；之后栈一直停到 S3 | `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/10-start-onboard-stack.ps1 -SshAlias agv03 -Stop`；`pwsh -File <WT>/remote-ops/onboard-hmi/scripts/19-archive-onboard-journal.ps1 -SshAlias agv03 -Suffix pre-cutover-trial-20261013 -EvidencePath <EV>/agv03/journal` | 不需问 | 同 B-2 | `JOURNAL_OUTBOX_PENDING`：`agv03` 不在旧库当前车队表里，未必送得出去。按数据方案第 6 节 U6（用户 10-13 已定）：行内容已在 `<EV>/agv03/journal` 的副本与 `journal-check.json` 的 `pendingRows` 里，不再送，改名留存。脚本没有绕过开关，所以这一种情况手动改名：`ssh agv03 'Rename-Item C:\Users\HT\AppData\Local\SQCD\8005AGV 8005AGV.pre-cutover-trial-20261013'`，再列目录回读。其余同 B-2 |
+| C-0 | 挪到停放点**站号 222**（用户 2026-10-13 定，原话「停在站号222」，Coordinator 10 记在 cs#565），挪完再做 C-2 | 由用户或现场在 RIoT 上下发移动到 222；`agv03` 电量低时先充电（10-12 收工时 30%） | 【问用户·动车】移动是动车，挪车仍逐次授权 | RIoT 读回 `agv03` 在 map 26、站点 222、`MT_FINISHED` | 停不到位就停在原处，报调度；**不要在 v2 的等待点、充电位或任务固定站上开 S1 的闸** |
 | C-3 | 部署 v3 车载端 | `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv03 -OnboardPort 58105 -HealthPort 58107 -RunId <RUN> -KeepCurrentIo -WhatIf`，再去掉 `-WhatIf` | 不需问 | 同 B-3，`vehicleKey` 是 `BROKERX-7dac…`、`ioModule read back: 127.0.0.1:1502` | 同 B-3 |
 | C-4 | `bind-io`；`--fleet` 三车；S3 合并归属表照方案第 12～14 步 | `& $f bind-io --database $db --agv '老厂前线新多仓位3'`；`--fleet` 三个 key 分号分隔 | 不碰车 | 同 B-4；等待点 `coverage.sufficient` 为 `true`（三车需三个等待点，map 26 现有 214～216 三个） | 同 B-4 |
 | C-5 | 逐仓核对 | 试跑段不做 | — | — | — |
@@ -212,13 +212,20 @@ v2 按方案回滚第 8 步「离开切换」时会换成空库，所以车这�
 | # | 项 | 现状 | 谁定 |
 | --- | --- | --- | --- |
 | F1 | `<RUN>`：切换包的 release run id | 要等方案第 7a 步的提交 | 调度（P2） |
-| F2 | `agv03` 在 S1、S2 期间的停放点 | 推不出：要在 RIoT map 26 上选一个不是 210～221、不在 `agv02` 去 217 与 N 区通道上的点，方案第 11 节没有给 `agv03` 的建议 | 用户（现场看地图） |
+| F2 | `agv03` 在 S1、S2 期间的停放点 | **已定：站号 222**（用户 10-13，原话「停在站号222」）。挪车仍逐次授权 | 已定 |
 | F3 | `agv01` 当前车载端版本串 | 记忆里是 09-20 的 `eec9364`，之后可能再部署过 | A-1 实读 |
 | F4 | `agv01` 有没有 `C:\8005\SlotsSimulator` | 不知道 | A-1 实读，决定 A-3d 做不做 |
-| F5 | 仓位应答脚本 `cs566-sim-respond.ps1` 的源头 | 不在任何仓库里，只在 `agv02`／`agv03` 车上 | 调度（P5） |
+| F5 | 仓位应答脚本 `cs566-sim-respond.ps1` 的源头 | **已定**：执行当天先从 `agv02` 只读取回、入库，再推给 `agv01`（P5） | 已定 |
 | F6 | `agv01` 的时钟 | 09-21 修过，断电会复发 | A-1 实读，必要时 `07-fix-clock.ps1` |
 | F7 | 17、18 号读屏脚本对 `agv01` 的拒绝怎么处理 | 方案审查 M2 已提，未定 | 调度／用户 |
 | F8 | `agv01` 的 `onboardInstanceId` | **不改**，沿用 `620ee2ce-cf8a-4429-8a0b-0c4098bcba7e`：规则是跨部署稳定，v2 新库从没见过它，不冲突 | 已定（本文） |
+
+### 用户 10-13 已定、本文照此写的（经 Coordinator 10 转达）
+
+- 数据方案第 6 节 U1～U8 全部按建议：**试跑段不做逐仓核对**（B-5、A-5、C-5）；试跑等待时长**离站 5 分钟、持货 5 分钟**，与切换定义一致、不手改已装配置（U5）；
+  名册登记充电桩 211（U3）；充电策略 v1 一句授权覆盖新库 A、B 的重批（U4）；`agv03` 若有欠送，存证后改名、不再送（U6，见 C-2）。
+- `agv03` 在 S1、S2 停在站号 222（F2）；仓位应答脚本执行当天从 `agv02` 取回（F5）。
+- 对切换方案的两处修正（第 7 节末）与「`agv01` 先 19 后 06」（A-3c）已由调度转给 cs#564 去改，本文按现在的写法保留。
 
 ### 需授权步骤清单
 
