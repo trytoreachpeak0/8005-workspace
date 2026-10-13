@@ -234,7 +234,11 @@ if ($null -eq $bindingAst) {
             @{ Name = 'station departure 00:30:00 bound: refused'; Lines = @($asDefined -replace 'stationDepartureWaitTimeout=00:05:00', 'stationDepartureWaitTimeout=00:30:00'); Expect = "EFFECTIVE_JOURNEY_BINDING_MISMATCH: stationDepartureWaitTimeout bound '00:30:00', the definition says '00:05:00'" }
             @{ Name = 'a mismatch on -Rollback is refused too'; Lines = @($asDefined -replace 'Version=6 ', 'Version=5 '); Rollback = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: admissionPolicyVersion' }
             @{ Name = 'the last line counts (the Released read-back comes after the Held one)'; Lines = @(($asDefined -replace 'Version=6 ', 'Version=5 '), $asDefined); Expect = 'OK' }
-            @{ Name = 'an unreadable line: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=admissionPolicyVersion=6'); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
+            @{ Name = 'a line missing one of the four: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=admissionPolicyVersion=6'); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
+            @{ Name = 'a line naming a field twice: refused'; Lines = @("$asDefined admissionPolicyVersion=5"); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
+            @{ Name = 'a line that is not name=value pairs: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=6 MAP-26'); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
+            @{ Name = 'a field the installer adds later (cs#686) is ignored, the four still compared'; Lines = @("$asDefined slotReadinessGate=enforce"); Expect = 'OK' }
+            @{ Name = 'fields in another order are read by name'; Lines = @('EFFECTIVE_JOURNEY_BINDING=stationDepartureWaitTimeout=00:05:00 cargoHoldingTimeout=00:05:00 admissionPolicyDeploymentId=MAP-26-WIRE_TO_GATE-20261007 admissionPolicyVersion=6'); Expect = 'OK' }
             @{ Name = 'no line at all (installer scripts older than control-server#672): refused, on -Rollback too'; Lines = @($other); Rollback = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_UNREAD:' }
             @{ Name = 'not logged (a package older than control-server#672) on an install: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=not-logged'); Expect = 'EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED:' }
             @{ Name = 'not logged on -Rollback: warned, not refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=not-logged'); Rollback = $true; Expect = 'WARN EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED:' })) {

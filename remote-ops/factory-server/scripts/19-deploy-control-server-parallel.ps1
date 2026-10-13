@@ -673,16 +673,25 @@ function Assert-JourneyBindingReported {
         }
         throw "$message Install a package built from a commit with #672."
     }
-    $match = [regex]::Match($line, '^EFFECTIVE_JOURNEY_BINDING=admissionPolicyVersion=(?<admissionPolicyVersion>\S+) admissionPolicyDeploymentId=(?<admissionPolicyDeploymentId>\S+) cargoHoldingTimeout=(?<cargoHoldingTimeout>\S+) stationDepartureWaitTimeout=(?<stationDepartureWaitTimeout>\S+)$')
-    if (-not $match.Success) {
-        throw "EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported '$line', which is not the four values this script compares."
+    # name=value pairs, one space apart, read by name: a field the installer adds later (its read-back table grows one row at a
+    # time) is printed and ignored here, and each of the four below must be there exactly once.
+    $reportedFields = @{}
+    foreach ($pair in $line.Substring('EFFECTIVE_JOURNEY_BINDING='.Length).Split(' ')) {
+        $at = $pair.IndexOf('=')
+        if ($at -le 0) { throw "EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported '$line', which is not name=value pairs." }
+        $name = $pair.Substring(0, $at)
+        if ($reportedFields.ContainsKey($name)) { throw "EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported '$line', which names $name twice." }
+        $reportedFields[$name] = $pair.Substring($at + 1)
     }
     $journey = $definition['journeyRuntime']
     [string[]] $problems = @()
     foreach ($key in @('admissionPolicyVersion', 'admissionPolicyDeploymentId', 'cargoHoldingTimeout', 'stationDepartureWaitTimeout')) {
+        if (-not $reportedFields.ContainsKey($key)) {
+            throw "EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported '$line', which does not name $key."
+        }
         if (-not ($journey -is [System.Collections.IDictionary] -and $journey.Contains($key))) { continue }
         $expected = "$($journey[$key])"
-        $actual = $match.Groups[$key].Value
+        $actual = $reportedFields[$key]
         if ($actual -cne $expected) { $problems += "$key bound '$actual', the definition says '$expected'" }
     }
     if ($problems.Count -gt 0) {
