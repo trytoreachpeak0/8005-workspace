@@ -61,7 +61,12 @@
 
 .PARAMETER NewVehicleSafetyCredential
     Generate the vehicle-safety projection credential of these vehicles, by SSH
-    alias (agv02, agv03). The vehicleKey comes from
+    alias (agv01, agv02, agv03). agv01 is allowed since the production cutover
+    (control-server#564, step 16a, cs#565 P3): generating its credential only
+    writes this machine's store and connects nothing. What keeps agv01 off the
+    v2 instance is elsewhere and unchanged -- 19-deploy refuses agv01 in a roster
+    without -ProductionCutover and an approval record, and 06-deploy refuses v2
+    ports for a vehicle whose controlServerLine is still "mvp". The vehicleKey comes from
     remote-ops/onboard-hmi/config/site-<alias>.json. A vehicle that already has
     one is refused unless -Rotate; a rotated credential needs the server and
     that vehicle deployed again. Prints names only, never a value.
@@ -97,7 +102,7 @@ param(
     [switch] $Show,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'VehicleSafety')]
-    [ValidatePattern('^agv0[23]$')]
+    [ValidatePattern('^agv0[123]$')]
     [string[]] $NewVehicleSafetyCredential,
 
     [Parameter(ParameterSetName = 'VehicleSafety')]
