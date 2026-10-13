@@ -222,8 +222,12 @@ Write-Result -Ok ($null -eq $r.Error -and $r.Value.Warning.Contains('simulator 1
 
 Write-Host ''
 Write-Host 'ControlServer ports (workspace#32)' -ForegroundColor Cyan
-function Invoke-Ports([string[]] $Given, [int] $Onboard, [int] $Health, [string] $Alias = 'agv02') {
-    try { return @{ Value = (Assert-ControlServerPorts -Given $Given -OnboardPort $Onboard -HealthPort $Health -SshAlias $Alias); Error = $null } }
+# control-server#564: which line a car is on comes from its site file. Here the lines of today's real site files, unless a
+# case says otherwise (-Line); 'unset' stands for a site file without the field (the reader throws).
+function Invoke-Ports([string[]] $Given, [int] $Onboard, [int] $Health, [string] $Alias = 'agv02', [string] $Line) {
+    $resolved = $Line ? $Line : (($Alias.Trim().ToLowerInvariant() -ceq 'agv01') ? 'mvp' : 'v2')
+    $reader = ($resolved -ceq 'unset') ? { throw 'VEHICLE_LINE_UNSET: test reader' } : [scriptblock]::Create("'$resolved'")
+    try { return @{ Value = (Assert-ControlServerPorts -Given $Given -OnboardPort $Onboard -HealthPort $Health -SshAlias $Alias -LineReader $reader); Error = $null } }
     catch { return @{ Value = $null; Error = $_.Exception.Message } }
 }
 $both = @('OnboardPort', 'HealthPort')
@@ -245,10 +249,29 @@ foreach ($alias in @('agv02', 'agv03', 'AGV02', ' agv03 ')) {
 }
 $r = Invoke-Ports $both 58005 58007 'agv01'
 Write-Result -Ok ($null -eq $r.Error -and $r.Value -eq $true) -Name 'the MVP pair for agv01 passes and says so' -Detail "error: $($r.Error); value $($r.Value)"
-foreach ($alias in @('agv02', 'agv03', 'agv01')) {
+foreach ($alias in @('agv02', 'agv03')) {
     $r = Invoke-Ports $both 58105 58107 $alias
     Write-Result -Ok ($null -eq $r.Error -and $r.Value -eq $false) -Name "the two v2 ports pass for $alias" -Detail "error: $($r.Error); value $($r.Value)"
 }
+# control-server#564: the pairing is the site file's controlServerLine. agv01 on the MVP line gets the MVP pair only; once the
+# cutover changes its field to "v2" it gets the v2 ports only; a site file without the field is refused, but only after the
+# port checks (a missing port is still PORTS_REQUIRED whatever the file says).
+$r = Invoke-Ports $both 58105 58107 'agv01'
+Write-Result -Ok ($null -ne $r.Error -and $r.Error.StartsWith('V2_PORTS_FOR_MVP_VEHICLE:')) -Name 'the two v2 ports for agv01 on the MVP line are refused' -Detail "error: $($r.Error)"
+$r = Invoke-Ports $both 58105 58107 'agv01' -Line 'v2'
+Write-Result -Ok ($null -eq $r.Error -and $r.Value -eq $false) -Name 'the two v2 ports pass for agv01 once its site file says v2 (the cutover)' -Detail "error: $($r.Error); value $($r.Value)"
+$r = Invoke-Ports $both 58005 58007 'agv01' -Line 'v2'
+Write-Result -Ok ($null -ne $r.Error -and $r.Error.StartsWith('MVP_PORTS_FOR_V2_VEHICLE:')) -Name 'the MVP pair for agv01 on the v2 line is refused (the half-done cutover)' -Detail "error: $($r.Error)"
+$r = Invoke-Ports $both 58005 58007 'agv02' -Line 'mvp'
+Write-Result -Ok ($null -eq $r.Error -and $r.Value -eq $true) -Name 'the MVP pair passes for any car whose site file says mvp (the alias decides nothing)' -Detail "error: $($r.Error); value $($r.Value)"
+foreach ($pair in @(@(58105, 58107), @(58005, 58007))) {
+    $r = Invoke-Ports $both $pair[0] $pair[1] 'agv01' -Line 'unset'
+    Write-Result -Ok ($null -ne $r.Error -and $r.Error.StartsWith('VEHICLE_LINE_UNSET:')) -Name "a site file without controlServerLine is refused ($($pair[0])/$($pair[1]))" -Detail "error: $($r.Error)"
+}
+$r = Invoke-Ports @('OnboardPort') 58105 0 'agv01' -Line 'unset'
+Write-Result -Ok ($null -ne $r.Error -and $r.Error.StartsWith('PORTS_REQUIRED:')) -Name 'a missing port is refused before the site file is read' -Detail "error: $($r.Error)"
+$r = Invoke-Ports $both 58105 58107 'agv01' -Line 'MVP'
+Write-Result -Ok ($null -ne $r.Error -and $r.Error.StartsWith('VEHICLE_LINE_UNSET:')) -Name 'a reader returning anything but mvp or v2 exactly is refused' -Detail "error: $($r.Error)"
 
 function Invoke-Rendered([string] $Endpoint, [string] $SafetyVariable, [int] $Health, [bool] $Mvp) {
     try { Assert-RenderedServerTarget -Endpoint $Endpoint -SafetyVariable $SafetyVariable -SessionVariable $session -HealthPort $Health -IsMvpPair $Mvp; return $null }
@@ -361,7 +384,14 @@ try {
     $sitePath = Join-Path $work 'site-fake.json'
     @{ agvId = 'TEST-CAR-WS28'; onboardInstanceId = 'OBU-TEST-WS28'; wireToGate = @{ onboardInstanceId = '3f2504e0-4f89-41d3-9a0c-0305e82c3301' }
         vehicleSafety = @{ expectedVehicleKey = $agv02Key }; ruleGateway = @{ host = '127.0.0.1' }; ioModule = @{ host = $realSite }
-        install = @{ root = 'C:\8005\OnboardHmi' } } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sitePath
+        install = @{ root = 'C:\8005\OnboardHmi' }; controlServerLine = 'v2' } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sitePath
+    # control-server#564: the same car on the MVP line, and a site file that does not say.
+    $sitePathMvp = Join-Path $work 'site-fake-mvp.json'
+    $siteMvp = Get-Content -Raw -LiteralPath $sitePath | ConvertFrom-Json -AsHashtable; $siteMvp['controlServerLine'] = 'mvp'
+    $siteMvp | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sitePathMvp
+    $sitePathUnset = Join-Path $work 'site-fake-unset.json'
+    $siteUnset = Get-Content -Raw -LiteralPath $sitePath | ConvertFrom-Json -AsHashtable; $siteUnset.Remove('controlServerLine')
+    $siteUnset | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sitePathUnset
     # workspace#32: the same package with the v2 line's template -- its own projection variable, ?vehicleKey= endpoint.
     New-Item -ItemType Directory -Force -Path (Join-Path $work 'pkg-v2/onboard-hmi') | Out-Null
     (Get-Content -Raw -LiteralPath (Join-Path $work 'pkg/onboard-hmi/appsettings.Production.template.json')).
@@ -446,10 +476,10 @@ exit 0
     $env:WS28_FAKE_ALIAS = $fakeAlias
     $env:WS28_VEHICLES = $vehicles
     function Invoke-Deploy([string] $IoState, [string[]] $Switches, [string[]] $Ports = @('-OnboardPort', '58105', '-HealthPort', '58107'),
-        [string] $Package = $zip) {
+        [string] $Package = $zip, [string] $Site = $sitePath) {
         $env:WS28_IO_STATE = $IoState
         if (Test-Path -LiteralPath $sshLog) { Remove-Item -LiteralPath $sshLog }
-        $output = & pwsh -NoProfile -File $source -PackagePath $Package -SshAlias $fakeAlias -SitePath $sitePath -SecretPath $secretPath `
+        $output = & pwsh -NoProfile -File $source -PackagePath $Package -SshAlias $fakeAlias -SitePath $Site -SecretPath $secretPath `
             -WhatIf @Ports @Switches *>&1 | Out-String
         $code = $LASTEXITCODE
         # Strip colour codes, and rejoin error messages the console view wrapped at its width (newline, spaces, "| ").
@@ -520,7 +550,7 @@ exit 0
                 -Name "E2E $($case.Name), $(Split-Path -Leaf $package): $($case.Code), refused before any ssh" -Detail "exit $($d.Code), calls $($d.Calls.Count)`n$($d.Output)"
         }
     }
-    $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58005', '-HealthPort', '58007') -Package $zipV2
+    $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58005', '-HealthPort', '58007') -Package $zipV2 -Site $sitePathMvp
     Write-Result -Ok ((Test-Refused $d 'MVP_PORTS_FOR_V2_TEMPLATE') -and -not $d.Output.Contains('WhatIf: stopping')) `
         -Name 'E2E v2 template on the MVP pair: refused before the configuration is rendered' -Detail "exit $($d.Code), calls $($d.Calls.Count)`n$($d.Output)"
     $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58105', '-HealthPort', '58107') -Package $zipV2
@@ -528,10 +558,23 @@ exit 0
         (Get-Endpoint $d) -ceq "http://172.19.205.222:58107/api/onboard/v1/vehicle-safety?vehicleKey=$agv02Key" -and
         $d.Config.vehicleSafety.credentialEnvironmentVariable -ceq $safety -and $d.Output.Contains('ControlServer ports: NDJSON 58105, HTTP 58107 (not the MVP service)')) `
         -Name 'E2E v2 template on the two v2 ports: renders 58105 and the 58107 endpoint naming the vehicle' -Detail "exit $($d.Code), endpoint $(Get-Endpoint $d)`n$($d.Output)"
-    $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58005', '-HealthPort', '58007') -Package $zip
+    $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58005', '-HealthPort', '58007') -Package $zip -Site $sitePathMvp
     Write-Result -Ok ($d.Code -eq 0 -and $d.Config.wireToGate.port -eq 58005 -and (Get-Endpoint $d) -ceq 'http://172.19.205.222:58007/api/onboard/v1/vehicle-safety' -and
         $d.Output.Contains('(the MVP service)')) `
         -Name 'E2E MVP template on the MVP pair (agv01 as before): renders 58005 and the 58007 endpoint' -Detail "exit $($d.Code), endpoint $(Get-Endpoint $d)`n$($d.Output)"
+    # control-server#564: the car's line is its site file's controlServerLine; a mismatch or a file that does not say is refused
+    # before any ssh, so no probe and no credential goes to the wrong server.
+    $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58105', '-HealthPort', '58107') -Package $zipV2 -Site $sitePathMvp
+    Write-Result -Ok ((Test-Refused $d 'V2_PORTS_FOR_MVP_VEHICLE') -and $d.Calls.Count -eq 0) `
+        -Name 'E2E v2 ports for a car whose site file says mvp: refused before any ssh' -Detail "exit $($d.Code), calls $($d.Calls.Count)`n$($d.Output)"
+    $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58005', '-HealthPort', '58007') -Package $zip
+    Write-Result -Ok ((Test-Refused $d 'MVP_PORTS_FOR_V2_VEHICLE') -and $d.Calls.Count -eq 0) `
+        -Name 'E2E the MVP pair for a car whose site file says v2: refused before any ssh' -Detail "exit $($d.Code), calls $($d.Calls.Count)`n$($d.Output)"
+    foreach ($ports in @(@('-OnboardPort', '58105', '-HealthPort', '58107'), @('-OnboardPort', '58005', '-HealthPort', '58007'))) {
+        $d = Invoke-Deploy 'real' @() -Ports $ports -Package $zip -Site $sitePathUnset
+        Write-Result -Ok ((Test-Refused $d 'VEHICLE_LINE_UNSET') -and $d.Calls.Count -eq 0) `
+            -Name "E2E a site file without controlServerLine ($($ports[1])/$($ports[3])): refused before any ssh" -Detail "exit $($d.Code), calls $($d.Calls.Count)`n$($d.Output)"
+    }
 
     # workspace#32 review S1: past the -WhatIf gate. A placement that throws on the vehicle (a read-back mismatch) must
     # fail the deployment, not print the "Staged" hand-off. Covers ws#28's IO read-back too: same call.

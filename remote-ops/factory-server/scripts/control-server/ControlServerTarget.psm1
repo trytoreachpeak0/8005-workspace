@@ -36,12 +36,14 @@
                                         write, so a copy would stop one instance to write another file.
         -BaseUrl is optional: without it Health.url is not checked (12 and Complete-ChargingRun take no URL).
 
-      Assert-ControlServerVehicleTarget (no I/O; 11 and 12, which also act on a vehicle)
-        TARGET_VEHICLE_INSTANCE_MISMATCH  -SshAlias is agv01 and the instance is not the MVP, or agv02/agv03 and it
-                                          is the MVP. agv01 runs against the MVP and the two spare cars against
-                                          v2 instances; until the cutover changes that, such a run reads one
-                                          side's data to act on the other side's vehicle. Another alias is not
-                                          judged.
+      Assert-ControlServerVehicleTarget (reads the car's site file only; 11 and 12, which also act on a vehicle)
+        TARGET_VEHICLE_INSTANCE_MISMATCH  -SshAlias is a car whose site file says "controlServerLine": "mvp" and the
+                                          instance is not the MVP, or "v2" and it is the MVP. Such a run reads one
+                                          side's data to act on the other side's vehicle. Which side a car is on is
+                                          that one field (VehicleControlServerLine.psm1, control-server#564): the
+                                          cutover and its rollback change the site file, not this module. An alias
+                                          that is no car of the fleet is not judged; a fleet car whose site file
+                                          does not say is refused (VEHICLE_LINE_UNSET).
 
     The MVP values are written out here, once. If the MVP ever moves, change them here.
 #>
@@ -56,9 +58,9 @@ $script:MvpTarget = [ordered]@{
     LogDirectory = 'C:\ProgramData\8005\ControlServer\logs'
 }
 $script:InstanceDataTree = 'C:\ProgramData\8005\'
-# SSH aliases (remote-ops/fleet.md) and the side each car runs against today. Change them at the cutover.
-$script:MvpVehicleAliases = @('agv01')
-$script:V2VehicleAliases = @('agv02', 'agv03')
+# SSH aliases of the three cars (remote-ops/fleet.md). Which side each runs against is its site file's controlServerLine.
+$script:FleetVehicleAliases = @('agv01', 'agv02', 'agv03')
+Import-Module (Join-Path $PSScriptRoot '..\..\..\onboard-hmi\scripts\VehicleControlServerLine.psm1') -Force
 
 function ConvertTo-ComparablePath {
     param([AllowNull()][string] $Path)
@@ -241,10 +243,11 @@ function Assert-ControlServerTargetReadback {
 
 # Whether the vehicle a run acts on runs against the instance whose data it reads or writes (workspace#38).
 function Assert-ControlServerVehicleTarget {
-    param([Parameter(Mandatory)][AllowEmptyString()][string] $SshAlias, [Parameter(Mandatory)][bool] $IsMvp)
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $SshAlias, [Parameter(Mandatory)][bool] $IsMvp, [string] $ConfigDirectory)
     $alias = $SshAlias.Trim().ToLowerInvariant()
-    $side = ($alias -in $script:MvpVehicleAliases) ? 'MVP' : (($alias -in $script:V2VehicleAliases) ? 'v2' : $null)
-    if (-not $side) { return [pscustomobject]@{ Judged = $false } }
+    if ($alias -notin $script:FleetVehicleAliases) { return [pscustomobject]@{ Judged = $false } }
+    $sitePath = $ConfigDirectory ? (Get-VehicleSitePath -SshAlias $alias -ConfigDirectory $ConfigDirectory) : (Get-VehicleSitePath -SshAlias $alias)
+    $side = ((Read-VehicleControlServerLine -SitePath $sitePath) -ceq 'mvp') ? 'MVP' : 'v2'
     if (($side -eq 'MVP') -ne $IsMvp) {
         $instance = $IsMvp ? 'the production MVP service (defaulted or given as the MVP''s)' : 'an instance that is not the MVP'
         throw ("TARGET_VEHICLE_INSTANCE_MISMATCH: -SshAlias $SshAlias runs against the $side side, but the server " +

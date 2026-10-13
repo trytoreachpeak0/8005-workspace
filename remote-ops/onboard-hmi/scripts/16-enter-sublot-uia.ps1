@@ -18,7 +18,9 @@
     Boundaries (control-server#566, Coordinator 10, 2026-10-10):
       * test only: not part of any onboard package, changes nothing in the onboard client or its
         configuration, and runs only when someone types this command;
-      * spare vehicles only: -SshAlias accepts agv02 or agv03 and nothing else;
+      * v2-line vehicles only: -SshAlias names one of the three cars, and its site file must say
+        "controlServerLine": "v2" (VehicleControlServerLine.psm1). Until the production cutover that is
+        agv02 and agv03; the cutover trial (control-server#564) moves agv01 by changing that one field;
       * it is used only inside a run the user has already authorized; entering the sublot may let
         the vehicle leave the station, and this tool is not an authorization of its own;
       * every result carries autoEntered=true and method=UIA. The server records the entry as
@@ -35,7 +37,7 @@
 #>
 [CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Run')][ValidateSet('agv02', 'agv03')][string] $SshAlias,
+    [Parameter(Mandatory, ParameterSetName = 'Run')][ValidateSet('agv01', 'agv02', 'agv03')][string] $SshAlias,
     [Parameter(Mandatory, ParameterSetName = 'Run')][ValidatePattern('^[A-Za-z0-9._-]{1,64}$')][string] $Sublot,
     [Parameter(ParameterSetName = 'Run')][string] $EvidencePath,
     [Parameter(ParameterSetName = 'Run')][string] $ServerAlias = 'factory01',
@@ -462,6 +464,13 @@ function Invoke-SelfTest {
 
 if ($PSCmdlet.ParameterSetName -eq 'SelfTest') { Invoke-SelfTest; return }
 
+# control-server#564: only a car on the v2 line. The pairing is the site file's one field, not a list here.
+Import-Module (Join-Path $PSScriptRoot 'VehicleControlServerLine.psm1') -Force
+$vehicleLine = Read-VehicleControlServerLine -SitePath (Get-VehicleSitePath -SshAlias $SshAlias)
+if ($vehicleLine -cne 'v2') {
+    throw ("VEHICLE_NOT_ON_V2_LINE: $SshAlias's site file says controlServerLine ""$vehicleLine""; this tool reads the v2 " +
+        'instance and enters a sublot on a v2 onboard HMI only. Nothing was read or typed.')
+}
 $ServerDatabase = Assert-V2Database $ServerDatabase
 $site = Get-Content (Join-Path $PSScriptRoot "..\config\site-$SshAlias.json") -Raw | ConvertFrom-Json
 $agvId = $site.agvId

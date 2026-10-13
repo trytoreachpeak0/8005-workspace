@@ -93,6 +93,16 @@
 .PARAMETER RemoveData
     With -Uninstall: also remove the data root, the backups and the ops directory.
 
+.PARAMETER ProductionCutover
+    control-server#564 (that repository's docs/production-cutover-mode-plan.md; user decision 2026-10-13). Deploys a
+    production cutover definition -- one carrying productionCutover.approvalRecord, agv01 in its roster, all six task types
+    from the production MesIngest -- and is passed on to the server's installer. The definition check lifts those two guards
+    only with this switch and that record together; the MVP's service name, paths, ports and map 25 stay refused. On the
+    server the first cutover install must find an empty data root and must not be -Rollback, and once the instance is a
+    cutover every later install and rollback must carry this switch. Running it reads the production MesIngest for every
+    task type and drives agv01: the cutover steps that touch agv01, the MVP or the production MesIngest are asked of the
+    user first, every time.
+
 .PARAMETER WhatIf
     Stage and verify everything, print what would run, and stop before changing the server. One
     read-only ssh still runs (except with -Uninstall): reading the admission policy version in the
@@ -136,7 +146,9 @@ param(
 
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\control-server-deployment.xml'),
 
-    [switch] $AllowRiotCreateDispatch
+    [switch] $AllowRiotCreateDispatch,
+
+    [switch] $ProductionCutover
 )
 
 $ErrorActionPreference = 'Stop'
@@ -467,7 +479,13 @@ if ($Uninstall) {
     if ($opsProblem) { throw "opsRoot in $InstanceDefinitionPath $opsProblem." }
     Write-Step "Uninstall: using opsRoot $($definition['opsRoot']) from $InstanceDefinitionPath; the server asserts its own installed definition."
 } else {
-    $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch:$AllowRiotCreateDispatch
+    # control-server#564: a -ControlServerRepository older than the switch has no such parameter; say which, not a binding error.
+    if ($ProductionCutover -and -not (Get-Command Assert-ParallelInstanceDefinition).Parameters.ContainsKey('ProductionCutover')) {
+        throw '-ProductionCutover was passed, but -ControlServerRepository is older than control-server#564 (its ParallelInstance.psm1 has no cutover switch). Deploy from a checkout that has it.'
+    }
+    # Splatted only when on: an older module must keep accepting today's deployments without the parameter.
+    $cutoverArgument = $ProductionCutover ? @{ ProductionCutover = $true } : @{}
+    $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch:$AllowRiotCreateDispatch @cutoverArgument
     # A checkout from before control-server#454 validates a definition without the clearance exit
     # sections and deploys an instance that silently has no exit. Say so instead.
     foreach ($section in @('vehicleFaultRecovery', 'fieldOperatorRoles')) {
@@ -674,7 +692,7 @@ if ($Rollback) {
             return
         }
         Copy-ParallelScripts
-        $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
+        $allow = ($AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : '') + ($ProductionCutover ? ' -ProductionCutover' : '')
         $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
         Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
         Write-Step 'Rollback complete. The MVP service was not involved.'
@@ -926,7 +944,7 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     # ------------------------------------------------------------- install ---
 
     Write-Step 'Running the parallel installer on the server'
-    $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
+    $allow = ($AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : '') + ($ProductionCutover ? ' -ProductionCutover' : '')
     $installOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" " +
         "-PackageZip `"$remoteZip`" -ExpectedSha256 $actual " +
         "-DeploymentConfigPath `"$remoteConfig`" $fakeArgument" +
@@ -955,7 +973,8 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     Write-Step "Deployed. Onboard NDJSON: tcp://${listenAddress}:$onboardPort"
     Write-Step "Vehicle safety: http://${healthBindAddress}:$healthPort/api/onboard/v1/vehicle-safety"
     Write-Step "Package root on the server: $packageRoot"
-    Write-Step 'Next: deploy the matching onboard commit to agv02/agv03 with'
+    Write-Step ($ProductionCutover ? 'Next: deploy the matching onboard commit to every car in the roster (agv01 too: its site file must say controlServerLine "v2"; asked of the user first) with' :
+        'Next: deploy the matching onboard commit to agv02/agv03 with')
     # -SshAlias, not -SiteAlias: 06-deploy has no such parameter (control-server#600 review L8). The ports are this
     # instance's; 06 has had no port defaults since workspace#32 and refuses a call without both.
     Write-Step "  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort $onboardPort -HealthPort $healthPort"

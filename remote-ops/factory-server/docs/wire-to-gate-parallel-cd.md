@@ -1261,3 +1261,29 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
   （`remote-ops/onboard-hmi/scripts/`），规矩没变：搬完就停，启动要有人走到车前。
 - **不跑门禁。** `G1`／`G2`／`G3`／`RC` 属于切发布候选的流程，不在部署路径上。
 - **不装 Dashboard，也不支持装。** 见第 3 节。
+
+## 14. 生产切换：`-ProductionCutover` 与车与线的字段（control-server#564）
+
+方案与逐步操作单在 control-server 仓 `docs/production-cutover-mode-plan.md`（用户 2026-10-13 选定方案甲：并行实例转正，端口仍 58105／58107，
+MVP 只停不删）。这里只记部署脚本这一侧的三件事。
+
+**开关。**19 号脚本加 `-ProductionCutover`，传给服务器上的安装器。定义校验只有在命令带这个开关、**并且**定义里写了 `productionCutover.approvalRecord`
+（谁、哪天、在哪里批准了这一次切换）时，才放开两道护栏：车队表里可以有 `agv01`（按登记册四个坐标比对），生产 MesIngest 来源下 `allowedWorkTypes`
+必须恰好是六类。缺一半就拒，拒绝码是 `CUTOVER_SWITCH_WITHOUT_RECORD`、`CUTOVER_RECORD_WITHOUT_SWITCH`。MVP 的服务名、目录、端口、map 25 在开关下照旧拒绝。
+
+**安装历史。**服务器上的安装器在动任何东西之前查：
+
+| 情况 | 结果 |
+| --- | --- |
+| 已装的是切换定义，这次没带开关（安装或 `-Rollback`） | `CUTOVER_SWITCH_MISSING`。离开切换走方案文档第 7 节的回滚，不是不带开关重装 |
+| 第一次以切换模式安装，数据目录里还有 `*.db`／`-wal`／`-shm` | `CUTOVER_REQUIRES_NEW_DATABASE`。先停服、把数据目录改名留存、建空目录 |
+| 第一次以切换模式安装却是 `-Rollback` | `CUTOVER_FIRST_INSTALL_NOT_ROLLBACK` |
+| 已是切换模式、带开关重装或换阶段定义、带开关回滚 v2 的包 | 放行 |
+
+卸载、关开闸门（20 号）、恢复窗口从服务器上 `installed-instance.json` 里的批准记录取开关，出口方向不会被它挡住。
+
+**车与线。**哪台车连 MVP、哪台连 v2，只看 `remote-ops/onboard-hmi/config/site-agv0N.json` 的一个字段 `"controlServerLine": "mvp" | "v2"`
+（`VehicleControlServerLine.psm1`），`ControlServerTarget.psm1`、`06-deploy-onboard-hmi.ps1`、`16-enter-sublot-uia.ps1` 都读它；没有这个字段或值不对就拒
+（`VEHICLE_LINE_UNSET`），不按别名猜。今天 `agv01` 是 `"mvp"`，`agv02`／`agv03` 是 `"v2"`。06 在端口上两个方向都查：v2 线的车拿到 58005／58007
+是 `MVP_PORTS_FOR_V2_VEHICLE`，MVP 线的车拿到别的端口是 `V2_PORTS_FOR_MVP_VEHICLE`。切换时把 `site-agv01.json` 改成 `"v2"`，回滚时改回 `"mvp"`，
+各改一处。**改 `agv01` 的这一行、以及之后每一步碰 `agv01`、MVP、生产 MesIngest 的操作，执行前问用户。**

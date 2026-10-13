@@ -4,6 +4,8 @@
   "_onboardInstanceId": "wireToGate.onboardInstanceId 必须是 D 形式的 Guid（8-4-4-4-12），且跨部署稳定——服务端把新值当成另一台车。",
   "_ruleGateway": "规则服务器只在 wireToGate.enabled=false 时才连（App.xaml.cs:41 用 DisabledRuleGateway 顶掉它）。Production 强制 wireToGate.enabled=true，所以这个地址在本部署里不会被使用，但配置校验仍要求它不是占位值。有真实地址就填真实的；没有就保留 127.0.0.1。",
   "_ioModule": "八仓 Modbus IO 模块。192.168.71.150 来自车载端仓库 appsettings.json 里被注释掉的那行，实测 502 开放。注意同网段的 192.168.71.50 是另一台车的模块。",
+  "_controlServerLine": "Which ControlServer this car runs against: \"mvp\" (the MVP service, 58005/58007) or \"v2\" (the v2 instance, 58105/58107). Read by VehicleControlServerLine.psm1 in 06-deploy, 16-enter-sublot and ControlServerTarget.psm1; the cutover and its rollback change it here and nowhere else (control-server#564).",
+  "controlServerLine": "v2",
   "agvId": "REPLACE_WITH_REAL_AGV_ID",
   "onboardInstanceId": "REPLACE_WITH_REAL_ONBOARD_INSTANCE_ID",
   "wireToGate": {
