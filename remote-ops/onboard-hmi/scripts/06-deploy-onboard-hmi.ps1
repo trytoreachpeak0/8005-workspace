@@ -351,17 +351,22 @@ function Resolve-OnboardIoTarget {
 function Assert-ControlServerPorts {
     <#
         workspace#32. Run before anything is read from the vehicle or sent anywhere. Both ports must be given; the MVP
-        pair is exactly 58005/58007 and a port of it never travels with a non-MVP one; a v2-only vehicle never gets the
-        MVP pair. Returns $true for the MVP pair, $false otherwise. Pure: Test-DeployOnboardHmi.ps1 lifts it out.
+        pair is exactly 58005/58007 and a port of it never travels with a non-MVP one; a car on the v2 line never gets the
+        MVP pair, and a car on the MVP line gets nothing else. -LineReader returns the car's site file controlServerLine
+        (VehicleControlServerLine.psm1, control-server#564) and is called only once both ports are given and not mixed,
+        so a missing port is refused as before whatever the site file says. The cutover moves agv01 by changing that
+        field, not this function. Returns $true for the MVP pair, $false otherwise. Pure apart from -LineReader:
+        Test-DeployOnboardHmi.ps1 lifts it out and passes a reader of its own.
     #>
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Given,
         [int] $OnboardPort,
         [int] $HealthPort,
-        [Parameter(Mandatory = $true)][string] $SshAlias
+        [Parameter(Mandatory = $true)][string] $SshAlias,
+        [Parameter(Mandatory = $true)][scriptblock] $LineReader
     )
-    # The MVP service's two ports on factory01, and the cars that only ever talk to the v2 instance (agv01 is the MVP's).
-    $mvpOnboard = 58005; $mvpHealth = 58007; $v2OnlyAliases = @('agv02', 'agv03')
+    # The MVP service's two ports on factory01.
+    $mvpOnboard = 58005; $mvpHealth = 58007
     $missing = @(@('OnboardPort', 'HealthPort') | Where-Object { $Given -notcontains $_ })
     if ($missing.Count -gt 0) {
         throw ("PORTS_REQUIRED: pass both -OnboardPort and -HealthPort (missing: -$($missing -join ', -')). Neither has a " +
@@ -377,10 +382,20 @@ function Assert-ControlServerPorts {
             "($mvpOnboard/$mvpHealth) with another. A vehicle talks to one server: the MVP " +
             "pair exactly, or neither MVP port. Mixing them is how a v2 vehicle's credentials reach the MVP.")
     }
-    if ($isMvpPair -and $v2OnlyAliases -contains $SshAlias.Trim().ToLowerInvariant()) {
-        throw ("MVP_PORTS_FOR_V2_VEHICLE: $SshAlias is a v2-line vehicle and never talks to the MVP service, but the " +
-            "ports given are the MVP's ($mvpOnboard/$mvpHealth). The v2 parallel instance is " +
-            '-OnboardPort 58105 -HealthPort 58107.')
+    $Line = & $LineReader
+    if ($Line -cnotin @('mvp', 'v2')) {
+        throw "VEHICLE_LINE_UNSET: the site file of $SshAlias gave controlServerLine '$Line'; it must be ""mvp"" or ""v2""."
+    }
+    if ($isMvpPair -and $Line -ceq 'v2') {
+        throw ("MVP_PORTS_FOR_V2_VEHICLE: $SshAlias is a v2-line vehicle (its site file says controlServerLine ""v2"") and " +
+            "never talks to the MVP service, but the ports given are the MVP's ($mvpOnboard/$mvpHealth). The v2 parallel " +
+            'instance is -OnboardPort 58105 -HealthPort 58107.')
+    }
+    if (-not $isMvpPair -and $Line -ceq 'mvp') {
+        throw ("V2_PORTS_FOR_MVP_VEHICLE: $SshAlias is an MVP-line vehicle (its site file says controlServerLine ""mvp""), " +
+            "but the ports given ($OnboardPort/$HealthPort) are not the MVP's ($mvpOnboard/$mvpHealth). Moving a car to " +
+            'the v2 instance is the production cutover: change controlServerLine to "v2" in its site file first ' +
+            '(control-server#564; agv01 is asked of the user first).')
     }
     return $isMvpPair
 }
@@ -417,7 +432,9 @@ function Assert-RenderedServerTarget {
 Write-Step "OnboardHmi deployment to $SshAlias"
 
 # workspace#32. Before anything is read from the vehicle, downloaded, or sent: which server, on both ports.
-$isMvpPair = Assert-ControlServerPorts -Given @($PSBoundParameters.Keys) -OnboardPort $OnboardPort -HealthPort $HealthPort -SshAlias $SshAlias
+Import-Module (Join-Path $scriptRoot 'VehicleControlServerLine.psm1') -Force
+$isMvpPair = Assert-ControlServerPorts -Given @($PSBoundParameters.Keys) -OnboardPort $OnboardPort -HealthPort $HealthPort -SshAlias $SshAlias `
+    -LineReader { Read-VehicleControlServerLine -SitePath $SitePath }
 Write-Step ("ControlServer ports: NDJSON {0}, HTTP {1} ({2})" -f $OnboardPort, $HealthPort, ($isMvpPair ? 'the MVP service' : 'not the MVP service'))
 
 # Before anything is downloaded or read: the two IO switches contradict each other.

@@ -6,6 +6,7 @@
   "_vehicleKey": "expectedVehicleKey 就是这台车在 RIoT 上的 deviceKey（RIoT id=59），已于 2026-09-03 核对填入。还须与 ControlServer appsettings.json 里登记的一致——目前 JourneyRuntime 只登记了 1 号车。",
   "_ruleGateway": "规则服务器只在 wireToGate.enabled=false 时才连（App.xaml.cs:41 用 DisabledRuleGateway 顶掉它）。Production 强制 wireToGate.enabled=true，所以这个地址在本部署里不会被使用，但配置校验仍要求它不是占位值。有真实地址就填真实的；没有就保留 127.0.0.1。",
   "_ioModule": "八仓 Modbus IO 模块。2026-09-13 从这台车上实测：局域网里 192.168.71.50 与 192.168.71.150 的 502 都应答；150 读 DO 100 起 16 路、DI 200 起 16 路得到输出全 0、锁反馈全 1、光幕全 1，是仓位模块；50 对 DI 200 返回 Modbus 异常 0x02（没有这段地址），是另一种设备。三台车都是这个形状，所以早先「50 是另一台车的模块」的推测是错的。",
+  "controlServerLine": "v2",
   "agvId": "老厂前线新多仓位2",
   "onboardInstanceId": "OBU-LAOCHANG-XDCW-02",
   "wireToGate": {

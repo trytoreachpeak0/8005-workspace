@@ -33,7 +33,11 @@ if (-not (Test-Path -LiteralPath $definitionPath -PathType Leaf)) {
     throw "No installed definition at ${definitionPath}: the v2 instance was never installed through 19-deploy. Nothing was changed."
 }
 $definition = Read-ParallelInstanceDefinition -Path $definitionPath
-$null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch -AllowRiotForeignOrderCancel -ForStopDirection
+# control-server#564: an installed production cutover definition carries its record, which got there only through an
+# install with -ProductionCutover; the switch is taken from it (Get-V2InstalledCutoverArgument).
+$cutoverArgument = Get-V2InstalledCutoverArgument -Definition $definition `
+    -ModuleKnowsCutover ((Get-Command Get-ParallelCutoverContractVersion -ErrorAction SilentlyContinue) -and (Get-ParallelCutoverContractVersion) -ge 2)
+$null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch -AllowRiotForeignOrderCancel -ForStopDirection @cutoverArgument
 $layout = Get-ParallelInstanceLayout -Definition $definition
 $onboardPort = [int] $definition['onboardPort']
 # Only these four, all from the installed definition: the registry root, the services path and the restart

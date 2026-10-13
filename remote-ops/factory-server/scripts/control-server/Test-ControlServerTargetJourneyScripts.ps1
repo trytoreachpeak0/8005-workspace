@@ -151,6 +151,69 @@ foreach ($c in @(
 $r = Invoke-Expected { Assert-ControlServerVehicleTarget -SshAlias 'ws38-vehicle.invalid' -IsMvp $true }
 Write-Result -Ok ($r.Judged -eq $false) -Name 'an alias that is no car of the fleet is not judged' -Detail ($r | ConvertTo-Json -Compress)
 
+# control-server#564 (D7): which side a car is on is its site file's controlServerLine, read by VehicleControlServerLine.psm1.
+# The cases above use the real site files (agv01 "mvp", agv02/agv03 "v2"). Here a scratch config directory stands for the
+# cutover: agv01's one field changed to "v2" moves it, and nothing else does.
+Write-Host ''
+Write-Host 'controlServerLine: the pairing comes from the site file (control-server#564)' -ForegroundColor Cyan
+Import-Module (Join-Path $root 'onboard-hmi\scripts\VehicleControlServerLine.psm1') -Force
+$lineConfig = Join-Path ([IO.Path]::GetTempPath()) "cs564-line-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $lineConfig | Out-Null
+try {
+    foreach ($alias in @('agv01', 'agv02', 'agv03')) {
+        $real = Get-Content -LiteralPath (Join-Path $root "onboard-hmi\config\site-$alias.json") -Raw | ConvertFrom-Json -AsHashtable
+        Write-Result -Ok ($real['controlServerLine'] -ceq (($alias -ceq 'agv01') ? 'mvp' : 'v2')) -Name "the real site-$alias.json says $(($alias -ceq 'agv01') ? 'mvp' : 'v2') (today, before the cutover)" -Detail "got '$($real['controlServerLine'])'"
+        $real['controlServerLine'] = 'v2'
+        $real | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $lineConfig "site-$alias.json") -Encoding utf8
+    }
+    foreach ($c in @(
+            @{ Alias = 'agv01'; IsMvp = $true; Code = 'TARGET_VEHICLE_INSTANCE_MISMATCH' }
+            @{ Alias = 'agv01'; IsMvp = $false; Code = 'OK' }
+            @{ Alias = 'agv02'; IsMvp = $false; Code = 'OK' })) {
+        $code = Get-Code { Assert-ControlServerVehicleTarget -SshAlias $c.Alias -IsMvp $c.IsMvp -ConfigDirectory $lineConfig }
+        Write-Result -Ok ($code -eq $c.Code) -Name "after the cutover's site file change: '$($c.Alias)' with $($c.IsMvp ? 'the MVP' : 'a v2 instance') -> $($c.Code)" -Detail $code
+    }
+    foreach ($bad in @(
+            @{ Name = 'without the field'; Edit = { param($h) $h.Remove('controlServerLine') } }
+            @{ Name = 'saying "MVP" (not exactly lower case)'; Edit = { param($h) $h['controlServerLine'] = 'MVP' } }
+            @{ Name = 'saying "v3"'; Edit = { param($h) $h['controlServerLine'] = 'v3' } }
+            @{ Name = 'with the field as a JSON boolean'; Edit = { param($h) $h['controlServerLine'] = $true } })) {
+        $h = Get-Content -LiteralPath (Join-Path $root 'onboard-hmi\config\site-agv01.json') -Raw | ConvertFrom-Json -AsHashtable
+        $null = & $bad.Edit $h
+        $h | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $lineConfig 'site-agv01.json') -Encoding utf8
+        foreach ($isMvp in @($true, $false)) {
+            $code = Get-Code { Assert-ControlServerVehicleTarget -SshAlias 'agv01' -IsMvp $isMvp -ConfigDirectory $lineConfig }
+            Write-Result -Ok ($code -eq 'VEHICLE_LINE_UNSET') -Name "a site file $($bad.Name) is refused, not guessed ($($isMvp ? 'MVP' : 'v2') target)" -Detail $code
+        }
+    }
+    Remove-Item -LiteralPath (Join-Path $lineConfig 'site-agv01.json')
+    $code = Get-Code { Assert-ControlServerVehicleTarget -SshAlias 'agv01' -IsMvp $true -ConfigDirectory $lineConfig }
+    Write-Result -Ok ($code -eq 'VEHICLE_LINE_UNSET') -Name 'a fleet car with no site file is refused, not guessed' -Detail $code
+    Set-Content -LiteralPath (Join-Path $lineConfig 'site-agv01.json') -Value '{ not json' -Encoding utf8
+    $code = Get-Code { Read-VehicleControlServerLine -SitePath (Join-Path $lineConfig 'site-agv01.json') }
+    Write-Result -Ok ($code -eq 'VEHICLE_LINE_UNSET') -Name 'a site file that is not JSON is refused' -Detail $code
+} finally {
+    Remove-Item -LiteralPath $lineConfig -Recurse -Force -ErrorAction SilentlyContinue
+}
+# The other two readers of the field: 06 (Test-DeployOnboardHmi.ps1 covers its port rule) and 16, which must refuse a car
+# that is not on the v2 line before it reads the v2 database or types anything.
+$text16 = Get-Content -LiteralPath (Join-Path $root 'onboard-hmi\scripts\16-enter-sublot-uia.ps1') -Raw
+$at16 = $text16.IndexOf('if ($vehicleLine -cne ''v2'') {')
+Write-Result -Ok ($at16 -gt 0 -and $text16.Contains('$vehicleLine = Read-VehicleControlServerLine -SitePath (Get-VehicleSitePath -SshAlias $SshAlias)') -and
+    $at16 -lt $text16.IndexOf('$ServerDatabase = Assert-V2Database $ServerDatabase') -and $text16.Contains('[ValidateSet(''agv01'', ''agv02'', ''agv03'')][string] $SshAlias')) `
+    -Name '16-enter-sublot-uia.ps1 refuses a car not on the v2 line before it reads the v2 database' -Detail "at $at16"
+$text18 = Get-Content -LiteralPath (Join-Path $root 'onboard-hmi\scripts\18-set-v2-recovery-window.ps1') -Raw
+$at18 = $text18.IndexOf('if ($vehicleLine -cne ''v2'') {')
+Write-Result -Ok ($at18 -gt 0 -and $text18.Contains('$vehicleLine = Read-VehicleControlServerLine -SitePath (Get-VehicleSitePath -SshAlias $SshAlias)') -and
+    $at18 -lt $text18.IndexOf('$repoRoot = (Resolve-Path -LiteralPath $ControlServerRepository).Path') -and $text18.Contains('[ValidateSet(''agv01'', ''agv02'', ''agv03'')]')) `
+    -Name '18-set-v2-recovery-window.ps1 refuses a car not on the v2 line before it reads anything (review M2)' -Detail "at $at18"
+foreach ($file in @('factory-server\scripts\control-server\ControlServerTarget.psm1', 'onboard-hmi\scripts\06-deploy-onboard-hmi.ps1', 'onboard-hmi\scripts\16-enter-sublot-uia.ps1',
+        'onboard-hmi\scripts\18-set-v2-recovery-window.ps1')) {
+    $code = Get-Content -LiteralPath (Join-Path $root $file) -Raw
+    $lists = [regex]::Matches($code, "MvpVehicleAliases|V2VehicleAliases|v2OnlyAliases|ValidateSet\('agv02', 'agv03'\)")
+    Write-Result -Ok ($lists.Count -eq 0) -Name "$(Split-Path -Leaf $file) keeps no list of which car is on which line" -Detail (($lists | ForEach-Object Value) -join ' | ')
+}
+
 # ---------------------------------------------------------------------------------------------------- read-back ---
 
 Write-Host ''

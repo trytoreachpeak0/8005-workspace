@@ -81,8 +81,9 @@
     defaults are the production MVP service. Give all three or none
     (workspace#38): a partial set is refused with TARGET_PARTIAL, and a set where
     some name the MVP and others do not with TARGET_MIXED_MVP. -SshAlias must be a
-    vehicle of that instance: agv01 with the MVP, agv02/agv03 with any other
-    (TARGET_VEHICLE_INSTANCE_MISMATCH). All of that before anything reaches either
+    vehicle of that instance: its site file's controlServerLine "mvp" with the MVP,
+    "v2" with any other (TARGET_VEHICLE_INSTANCE_MISMATCH; agv01 "mvp" and
+    agv02/agv03 "v2" until the cutover, control-server#564). All of that before anything reaches either
     machine. Then the server is asked which directory the service runs from and
     what <install root>\appsettings.Production.json names as its database; unless
     the service runs from -ServerInstallRoot and that database is -ServerDatabase,

@@ -93,6 +93,22 @@
 .PARAMETER RemoveData
     With -Uninstall: also remove the data root, the backups and the ops directory.
 
+.PARAMETER ProductionCutover
+    control-server#564 (that repository's docs/production-cutover-mode-plan.md; user decision 2026-10-13). Deploys a
+    production cutover definition -- one carrying productionCutover.approvalRecord, agv01 in its roster, all six task types
+    from the production MesIngest -- and is passed on to the server's installer. The definition check lifts those two guards
+    only with this switch and that record together; the MVP's service name, paths, ports and map 25 stay refused. On the
+    server the first cutover install must find an empty data root and must not be -Rollback, and once the instance is a
+    cutover every later install and rollback must carry this switch. Running it reads the production MesIngest for every
+    task type and drives agv01: the cutover steps that touch agv01, the MVP or the production MesIngest are asked of the
+    user first, every time.
+
+.PARAMETER LeaveProductionCutover
+    control-server#564 review S4. The governed way out of an installed production cutover: installs the parallel
+    definition given with -InstanceDefinitionPath over it. The server's installer requires an empty data root -- the
+    cutover database renamed aside first, as evidence -- and refuses it with -ProductionCutover or -Rollback. The last
+    step of the rollback in that repository's docs/production-cutover-mode-plan.md section 7; asked of the user first.
+
 .PARAMETER WhatIf
     Stage and verify everything, print what would run, and stop before changing the server. One
     read-only ssh still runs (except with -Uninstall): reading the admission policy version in the
@@ -136,7 +152,11 @@ param(
 
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\control-server-deployment.xml'),
 
-    [switch] $AllowRiotCreateDispatch
+    [switch] $AllowRiotCreateDispatch,
+
+    [switch] $ProductionCutover,
+
+    [switch] $LeaveProductionCutover
 )
 
 $ErrorActionPreference = 'Stop'
@@ -217,6 +237,39 @@ function Assert-DefinitionFromClone {
             'the admission policy version for one deployment use -AdmissionPolicyVersionOverride. Nothing was downloaded or copied.')
     }
     return $relative
+}
+
+function Get-InstallerSwitchArgument {
+    <#
+        The switches this script hands on to Install-ParallelInstanceLocal.ps1, as the text appended to its command line.
+        One place for the install and the rollback command (control-server#564 review, MW1). Pure.
+    #>
+    param([bool] $AllowRiotCreateDispatch, [bool] $ProductionCutover, [bool] $LeaveProductionCutover)
+    return ($AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : '') + ($ProductionCutover ? ' -ProductionCutover' : '') +
+        ($LeaveProductionCutover ? ' -LeaveProductionCutover' : '')
+}
+
+function Get-FaultRecoveryCredentialRefusal {
+    <#
+        Whether this definition needs the parallel instance's fault recovery credential, and it is not in the store. $null
+        when deployable; otherwise the refusal. Pure: Test-DeployControlServerParallel.ps1 lifts it out and feeds it
+        hand-made definitions, so it holds whether or not the fixture's control-server revision knows each section.
+
+        Two sections use the one credential (CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL in the service Environment):
+        vehicleFaultRecovery (control-server#454, the Host recovery and clearance entries) and foreignRunningOrderRelease
+        (control-server#617, PR #679: releasing a car held by a foreign running order). Either one on requires it. A
+        definition without foreignRunningOrderRelease -- every one before #679 -- reads as off, so an older
+        control-server checkout deploys exactly as before. Only a JSON true counts as on; the definition check refuses any
+        other value where the module knows the section.
+    #>
+    param([System.Collections.IDictionary] $Definition, [bool] $HasCredential, [string] $SecretPath)
+    $on = @(foreach ($section in @('vehicleFaultRecovery', 'foreignRunningOrderRelease')) {
+            $node = $Definition.Contains($section) ? $Definition[$section] : $null
+            if ($node -is [System.Collections.IDictionary] -and $node.Contains('enabled') -and $node['enabled'] -is [bool] -and $node['enabled']) { "$section.enabled" }
+        })
+    if ($on.Count -eq 0 -or $HasCredential) { return $null }
+    return ("$($on -join ' and ') $($on.Count -eq 1 ? 'is' : 'are') true, but 'V2FaultRecoveryCredential' is missing from $SecretPath. " +
+        'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
 }
 
 function Format-VehicleLines {
@@ -467,7 +520,16 @@ if ($Uninstall) {
     if ($opsProblem) { throw "opsRoot in $InstanceDefinitionPath $opsProblem." }
     Write-Step "Uninstall: using opsRoot $($definition['opsRoot']) from $InstanceDefinitionPath; the server asserts its own installed definition."
 } else {
-    $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch:$AllowRiotCreateDispatch
+    if ($ProductionCutover -and $LeaveProductionCutover) {
+        throw '-ProductionCutover installs a production cutover and -LeaveProductionCutover leaves one; pass one. Nothing was downloaded or copied.'
+    }
+    # control-server#564: a -ControlServerRepository older than the switch has no such parameter; say which, not a binding error.
+    if (($ProductionCutover -or $LeaveProductionCutover) -and -not (Get-Command Assert-ParallelInstanceDefinition).Parameters.ContainsKey('ProductionCutover')) {
+        throw '-ProductionCutover was passed, but -ControlServerRepository is older than control-server#564 (its ParallelInstance.psm1 has no cutover switch). Deploy from a checkout that has it.'
+    }
+    # Splatted only when on: an older module must keep accepting today's deployments without the parameter.
+    $cutoverArgument = $ProductionCutover ? @{ ProductionCutover = $true } : @{}
+    $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch:$AllowRiotCreateDispatch @cutoverArgument
     # A checkout from before control-server#454 validates a definition without the clearance exit
     # sections and deploys an instance that silently has no exit. Say so instead.
     foreach ($section in @('vehicleFaultRecovery', 'fieldOperatorRoles')) {
@@ -581,6 +643,8 @@ function Assert-MesIngestSourceReported {
         per mode, that what it reports agrees with what the control host meant to deploy:
           * the MES_INGEST_SOURCE result line names this mode and this baseUrl;
           * 'production': allowedWorkTypes is STAGING_TO_WIRE alone, and no FAKE_MES_INGEST line;
+          * 'production' under -ProductionCutover (control-server#564 review M1): allowedWorkTypes is the definition's list
+            and that list is the six types, the line says PRODUCTION CUTOVER, and no FAKE_MES_INGEST line;
           * 'fake', on an install: the FAKE_MES_INGEST line is there (a rollback never printed one).
         A checkout older than #535 prints no MES_INGEST_SOURCE line and is only ever 'fake'.
     #>
@@ -597,7 +661,17 @@ function Assert-MesIngestSourceReported {
     if ($audit.Count -eq 0) {
         throw "MES_INGEST_SOURCE_MISMATCH: the installer reported no line starting '$prefix'. What it did report: $(@($lines | Where-Object { $_ -match 'MES_INGEST' }) -join ' | ')"
     }
-    if ($productionSource) {
+    $cutoverTypes = @('DIE_TO_WIRE_STAGING', 'DIE_TO_OVEN', 'WIRE_TO_GATE', 'WIRE_TO_OPTICAL', 'STAGING_TO_WIRE', 'WIRE_TO_NITROGEN')
+    $definedTypes = @($definition['journeyRuntime']['allowedWorkTypes'])
+    $sixDefined = $definedTypes.Count -eq 6 -and (@($definedTypes | Sort-Object -CaseSensitive) -join ',') -ceq (@($cutoverTypes | Sort-Object -CaseSensitive) -join ',')
+    if ($productionSource -and $ProductionCutover) {
+        if (-not $sixDefined -or -not $audit[-1].Contains("allowedWorkTypes=$($definedTypes -join ',') -- PRODUCTION CUTOVER")) {
+            throw "MES_INGEST_SOURCE_MISMATCH: production cutover, but the installer reported '$($audit[-1])'."
+        }
+        if ($fakeLines.Count -gt 0) {
+            throw "MES_INGEST_SOURCE_MISMATCH: production cutover, but the installer also reported $($fakeLines -join ', ')."
+        }
+    } elseif ($productionSource) {
         if (-not $audit[-1].Contains('allowedWorkTypes=STAGING_TO_WIRE ')) {
             throw "MES_INGEST_SOURCE_MISMATCH: production mode, but the installer reported '$($audit[-1])'."
         }
@@ -626,7 +700,8 @@ function Assert-MesIngestSourceReported {
     if ($effective[-1] -cne $expectedEffective) {
         throw "EFFECTIVE_CONFIGURATION_MISMATCH: the Host bound '$($effective[-1])', the definition says '$expectedEffective'."
     }
-    if ($productionSource -and -not $effective[-1].StartsWith('EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE ', [StringComparison]::Ordinal)) {
+    # Under the cutover the definition's own list, compared above, is the six types ($sixDefined).
+    if ($productionSource -and -not $ProductionCutover -and -not $effective[-1].StartsWith('EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE ', [StringComparison]::Ordinal)) {
         throw "EFFECTIVE_CONFIGURATION_MISMATCH: production mode, but the Host bound '$($effective[-1])'."
     }
     Write-Step "What the Host bound, confirmed by the server: $($effective[-1])"
@@ -674,7 +749,7 @@ if ($Rollback) {
             return
         }
         Copy-ParallelScripts
-        $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
+        $allow = Get-InstallerSwitchArgument -AllowRiotCreateDispatch $AllowRiotCreateDispatch -ProductionCutover $ProductionCutover -LeaveProductionCutover $LeaveProductionCutover
         $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
         Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
         Write-Step 'Rollback complete. The MVP service was not involved.'
@@ -706,13 +781,12 @@ foreach ($key in @('RiotCallApiKey', 'MesIngestSharedSecret', 'V2FaultRecoveryCr
 }
 # control-server#454. The parallel instance's own fault recovery credential, written into its
 # service Environment as CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL -- never the MVP's value. With
-# the Host entry on it is required, and refused here before anything is downloaded; with it off it
-# is sent when present, so turning the entry on later needs no new secret on the server. The server
-# makes the same check again, and a rollback carries over what the service already holds.
-if ($definition['vehicleFaultRecovery']['enabled'] -eq $true -and -not $plain.ContainsKey('V2FaultRecoveryCredential')) {
-    throw ("vehicleFaultRecovery.enabled is true, but 'V2FaultRecoveryCredential' is missing from $SecretPath. " +
-        'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
-}
+# the Host entry on -- or, since control-server#617, the foreign running order release -- it is
+# required, and refused here before anything is downloaded; with both off it is sent when present,
+# so turning one on later needs no new secret on the server. The server makes the same check again,
+# and a rollback carries over what the service already holds.
+$credentialRefusal = Get-FaultRecoveryCredentialRefusal -Definition $definition -HasCredential $plain.ContainsKey('V2FaultRecoveryCredential') -SecretPath $SecretPath
+if ($credentialRefusal) { throw $credentialRefusal }
 # control-server#535. Reading the production MesIngest needs its Bearer token; without it every read
 # is 401 and nothing is dispatched. Refused here, before anything is downloaded; the server checks again.
 if ($productionSource -and -not $plain.ContainsKey('MesIngestSharedSecret')) {
@@ -720,7 +794,7 @@ if ($productionSource -and -not $plain.ContainsKey('MesIngestSharedSecret')) {
         'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
 }
 Write-Step ("Secrets loaded from the DPAPI store (V2FaultRecoveryCredential {0})" -f
-    ($plain.ContainsKey('V2FaultRecoveryCredential') ? 'present, will be sent' : 'absent; the Host recovery entry is off'))
+    ($plain.ContainsKey('V2FaultRecoveryCredential') ? 'present, will be sent' : 'absent; the Host recovery entry and the foreign order release are off'))
 
 # control-server#600. A roster definition makes the v2 server answer each vehicle's vehicle-safety projection only to that
 # vehicle's own credential, and refuse to start without one per roster row. They are generated on this machine
@@ -926,7 +1000,7 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     # ------------------------------------------------------------- install ---
 
     Write-Step 'Running the parallel installer on the server'
-    $allow = $AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : ''
+    $allow = Get-InstallerSwitchArgument -AllowRiotCreateDispatch $AllowRiotCreateDispatch -ProductionCutover $ProductionCutover -LeaveProductionCutover $LeaveProductionCutover
     $installOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" " +
         "-PackageZip `"$remoteZip`" -ExpectedSha256 $actual " +
         "-DeploymentConfigPath `"$remoteConfig`" $fakeArgument" +
@@ -955,7 +1029,8 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     Write-Step "Deployed. Onboard NDJSON: tcp://${listenAddress}:$onboardPort"
     Write-Step "Vehicle safety: http://${healthBindAddress}:$healthPort/api/onboard/v1/vehicle-safety"
     Write-Step "Package root on the server: $packageRoot"
-    Write-Step 'Next: deploy the matching onboard commit to agv02/agv03 with'
+    Write-Step ($ProductionCutover ? 'Next: deploy the matching onboard commit to every car in the roster (agv01 too: its site file must say controlServerLine "v2"; asked of the user first) with' :
+        'Next: deploy the matching onboard commit to agv02/agv03 with')
     # -SshAlias, not -SiteAlias: 06-deploy has no such parameter (control-server#600 review L8). The ports are this
     # instance's; 06 has had no port defaults since workspace#32 and refuses a call without both.
     Write-Step "  remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort $onboardPort -HealthPort $healthPort"

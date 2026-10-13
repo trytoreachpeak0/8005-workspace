@@ -74,8 +74,9 @@
     database is read for the sublot and the open slot, and their defaults are the
     production MVP service. Give both or neither (workspace#38): one alone is
     refused with TARGET_PARTIAL, one MVP and one not with TARGET_MIXED_MVP, and
-    -SshAlias must be a vehicle of that instance -- agv01 with the MVP,
-    agv02/agv03 with any other (TARGET_VEHICLE_INSTANCE_MISMATCH). All before
+    -SshAlias must be a vehicle of that instance -- its site file's controlServerLine
+    "mvp" with the MVP, "v2" with any other (TARGET_VEHICLE_INSTANCE_MISMATCH;
+    agv01 "mvp" and agv02/agv03 "v2" until the cutover, control-server#564). All before
     anything reaches either machine. Before workspace#38, -SshAlias agv02 alone
     read the MVP's pending sublot and open slot and drove agv02 with them.
 
