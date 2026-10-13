@@ -219,7 +219,31 @@ if ($null -eq $gateFunction) {
         $ok = $case.Refused ? ($r -is [string] -and $r.StartsWith('CHECKOUT_PREDATES_CUTOVER:') -and $r.EndsWith('Nothing was copied or changed.')) : ($null -eq $r)
         Write-Result -Ok $ok -Name "20: checkout knows the cutover $($case.K), installed is a cutover $($case.I) -> $($case.Refused ? 'refused' : 'goes ahead')" -Detail "got: $r"
     }
+    # Review round 2, V2: the probe the server runs, run here against scratch files -- the record of a cutover says True,
+    # a parallel one False, no record False.
+    $probeAst = $gateAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-InstalledCutoverProbeCommand' }, $true)
+    if ($null -eq $probeAst) {
+        Write-Result -Ok $false -Name 'Get-InstalledCutoverProbeCommand is defined in 20' -Detail 'not found'
+    } else {
+        . ([scriptblock]::Create($probeAst.Extent.Text))
+        $probeRoot = Join-Path ([IO.Path]::GetTempPath()) "cs564-probe-$([guid]::NewGuid().ToString('N')) it's"
+        New-Item -ItemType Directory -Path $probeRoot | Out-Null
+        try {
+            $cutoverRecord = Join-Path $probeRoot 'cutover.json'
+            '{ "instanceId": "x", "productionCutover": { "approvalRecord": "x", "phase": "trial" } }' | Set-Content -LiteralPath $cutoverRecord -Encoding utf8NoBOM
+            $parallelRecord = Join-Path $probeRoot 'parallel.json'
+            '{ "instanceId": "x", "approvalRecord": "productionCutover is only a word here" }' | Set-Content -LiteralPath $parallelRecord -Encoding utf8NoBOM
+            foreach ($case in @(@{ Path = $cutoverRecord; Expect = 'True' }, @{ Path = $parallelRecord; Expect = 'False' }, @{ Path = (Join-Path $probeRoot 'none.json'); Expect = 'False' })) {
+                $got = "$(& ([scriptblock]::Create((Get-InstalledCutoverProbeCommand -RecordPath $case.Path))))".Trim()
+                Write-Result -Ok ($got -ceq $case.Expect) -Name "20 probe: $(Split-Path -Leaf $case.Path) -> $($case.Expect)" -Detail "got '$got'"
+            }
+        } finally { Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
     $gateText = Get-Content -LiteralPath $gateScript -Raw
+    Write-Result -Ok ($gateText.Contains('$probe = Invoke-Ssh @(Get-InstalledCutoverProbeCommand -RecordPath "$opsRoot\installed-instance.json")') -and
+            $gateText.Contains('$contract = (Get-Command Get-ParallelCutoverContractVersion -ErrorAction SilentlyContinue) ? (Get-ParallelCutoverContractVersion) : 0') -and
+            $gateText.Contains('if ($contract -lt $script:RequiredCutoverContract) {') -and $gateText.Contains('$script:RequiredCutoverContract = 2')) `
+        -Name '20 judges the checkout by the cutover contract version (review round 2, L3) and asks the server with that probe' -Detail 'pinned text missing'
     $at = $gateText.IndexOf('if ($checkoutRefusal) { throw $checkoutRefusal }')
     Write-Result -Ok ($at -gt 0 -and $at -lt $gateText.IndexOf('Invoke-Ssh @("New-Item -ItemType Directory -Force -Path ''$gateRoot'' | Out-Null")')) `
         -Name '20 refuses an old checkout on a cutover instance before anything is staged' -Detail "at $at"

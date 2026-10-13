@@ -36,7 +36,7 @@ $definition = Read-ParallelInstanceDefinition -Path $definitionPath
 # control-server#564: an installed production cutover definition carries its record, which got there only through an
 # install with -ProductionCutover; the switch is taken from it (Get-V2InstalledCutoverArgument).
 $cutoverArgument = Get-V2InstalledCutoverArgument -Definition $definition `
-    -ModuleKnowsCutover ($null -ne (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue))
+    -ModuleKnowsCutover ((Get-Command Get-ParallelCutoverContractVersion -ErrorAction SilentlyContinue) -and (Get-ParallelCutoverContractVersion) -ge 2)
 $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch -AllowRiotForeignOrderCancel -ForStopDirection @cutoverArgument
 $layout = Get-ParallelInstanceLayout -Definition $definition
 $onboardPort = [int] $definition['onboardPort']

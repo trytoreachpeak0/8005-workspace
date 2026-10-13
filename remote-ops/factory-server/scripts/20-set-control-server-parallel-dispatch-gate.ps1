@@ -107,6 +107,21 @@ function Get-CheckoutCutoverRefusal {
         'Use a checkout that has control-server#564. Nothing was copied or changed.')
 }
 
+function Get-InstalledCutoverProbeCommand {
+    <#
+        The read-only PowerShell the server runs to say whether its installed definition is a production cutover: 'True' or
+        'False' on one line. No double quote in it (it travels through ssh): the key's quotes are [char]34. Pure; Test-DeployControlServerParallel.ps1 runs the text it returns against scratch files.
+    #>
+    param([Parameter(Mandatory = $true)][string] $RecordPath)
+    $quoted = $RecordPath.Replace("'", "''")
+    return "if (Test-Path -LiteralPath '$quoted') { (Get-Content -Raw -LiteralPath '$quoted').Contains([string][char]34 + 'productionCutover' + [char]34) } else { 'False' }"
+}
+
+# The cutover contract this script was written for (control-server#564 review round 2, L3): a checkout must carry at least
+# this version of Get-ParallelCutoverContractVersion to act on an installed cutover. Revision 1 of #677 already had
+# Test-ParallelProductionCutoverDefinition, but not the MVP checks.
+$script:RequiredCutoverContract = 2
+
 function Invoke-Ssh {
     param([string[]] $Arguments)
     $output = & ssh $SshAlias @Arguments 2>&1
@@ -139,9 +154,10 @@ $opsRoot = [string] $definition['opsRoot']
 $opsProblem = Test-ParallelInstanceOwnedPath -Path $opsRoot
 if ($opsProblem) { throw "opsRoot in $InstanceDefinitionPath $opsProblem. Nothing was changed." }
 # Review S5: an old checkout and a cutover instance. Only then is the server asked (read-only) what is installed.
-if ($null -eq (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue)) {
-    $installedRecord = "$opsRoot\installed-instance.json"
-    $probe = Invoke-Ssh @("if (Test-Path -LiteralPath '$installedRecord') { (Get-Content -Raw -LiteralPath '$installedRecord').Contains('productionCutover') } else { 'False' }")
+# Review round 2, L3: "old" is judged by the cutover contract version, not by a function revision 1 of #677 already had.
+$contract = (Get-Command Get-ParallelCutoverContractVersion -ErrorAction SilentlyContinue) ? (Get-ParallelCutoverContractVersion) : 0
+if ($contract -lt $script:RequiredCutoverContract) {
+    $probe = Invoke-Ssh @(Get-InstalledCutoverProbeCommand -RecordPath "$opsRoot\installed-instance.json")
     $checkoutRefusal = Get-CheckoutCutoverRefusal -ModuleKnowsCutover $false -InstalledIsCutover (@($probe | ForEach-Object { "$_".Trim() }) -contains 'True') -Repository $repoRoot
     if ($checkoutRefusal) { throw $checkoutRefusal }
 }

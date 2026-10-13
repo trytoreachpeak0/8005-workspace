@@ -721,7 +721,7 @@ $rows
     }
     $serverText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-v2-recovery-window.ps1'))
     Write-Result -Ok ($serverText.Contains('$cutoverArgument = Get-V2InstalledCutoverArgument -Definition $definition') -and
-            $serverText.Contains('-ModuleKnowsCutover ($null -ne (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue))') -and
+            $serverText.Contains('-ModuleKnowsCutover ((Get-Command Get-ParallelCutoverContractVersion -ErrorAction SilentlyContinue) -and (Get-ParallelCutoverContractVersion) -ge 2)') -and
             $serverText.Contains('-ForStopDirection @cutoverArgument')) `
         -Name 'the server entry asserts the installed definition with the argument Get-V2InstalledCutoverArgument gives' -Detail 'pinned text missing'
 

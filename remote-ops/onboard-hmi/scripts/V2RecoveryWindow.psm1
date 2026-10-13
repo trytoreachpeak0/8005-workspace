@@ -443,7 +443,9 @@ function Get-V2InstalledCutoverArgument {
     <#
         control-server#564. The -ProductionCutover argument for asserting the installed definition, as a splat: present
         when the definition carries productionCutover -- it got there only through an install that carried the switch --
-        absent otherwise. -ModuleKnowsCutover says whether the staged ParallelInstance.psm1 has the switch; a cutover
+        absent otherwise. -ModuleKnowsCutover says whether the staged ParallelInstance.psm1 carries cutover contract 2 or
+        later (Get-ParallelCutoverContractVersion; review round 2, L3: revision 1 of #677 had the switch but not the MVP
+        checks); a cutover
         definition with a module from before control-server#564 is refused here with what to do, instead of by that
         module's whitelist naming agv01 (review S5). Pure.
     #>
