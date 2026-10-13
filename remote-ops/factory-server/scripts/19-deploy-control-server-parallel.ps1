@@ -636,6 +636,61 @@ function Copy-ParallelScripts {
     Write-Step "Parallel scripts and instance definition staged in $opsRoot"
 }
 
+function Assert-JourneyBindingReported {
+    <#
+        control-server#672. What the Host bound for the admission policy version and deployment label and the cargo holding
+        and station departure waits, as the server-side installer read it from the Host's EFFECTIVE_CONFIGURATION event and
+        printed it (EFFECTIVE_JOURNEY_BINDING=, the last one: the Released read-back follows the Held one), against the
+        definition this script sent -- $definition, which is the derived copy under -AdmissionPolicyVersionOverride. Until
+        #672 only the overlay file or the database said which version was in effect, and on 2026-10-12 a hand edit of the
+        holding wait to five minutes was reinstalled back to thirty unseen.
+          * any of the four the definition names that differs: EFFECTIVE_JOURNEY_BINDING_MISMATCH, install or rollback;
+            a key the definition leaves out is the package's appsettings.json's to decide, so it is printed, not compared;
+          * no such line: EFFECTIVE_JOURNEY_BINDING_UNREAD, always -- the installer scripts come from the same clone as this
+            script, so a checkout without the line is the wrong checkout;
+          * EFFECTIVE_JOURNEY_BINDING=not-logged (the package is older than #672, its event does not carry them): refused on
+            an install, warned on -Rollback. Asymmetric on purpose: a rollback goes to the previous package, which may well
+            predate #672, and refusing it would leave no way back; an install brings the package this script was built for,
+            and one that cannot say what it bound is not accepted.
+        Runs after the installer has already compared the same values and stopped the service on a difference; this is the
+        control host's own check, on what was really sent.
+    #>
+    [CmdletBinding()]
+    param([object[]] $Output, [switch] $Rollback)
+    $lines = @($Output | ForEach-Object { "$_".Trim() })
+    $reported = @($lines | Where-Object { $_.StartsWith('EFFECTIVE_JOURNEY_BINDING=', [StringComparison]::Ordinal) })
+    if ($reported.Count -eq 0) {
+        throw ('EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer reported no EFFECTIVE_JOURNEY_BINDING line (installer scripts older than ' +
+            'control-server#672), so which admission policy version and waits the Host bound is unknown. Deploy from a control-server checkout that has #672.')
+    }
+    $line = $reported[-1]
+    if ($line -ceq 'EFFECTIVE_JOURNEY_BINDING=not-logged') {
+        $message = ('EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED: the Host''s EFFECTIVE_CONFIGURATION event does not carry the admission policy ' +
+            'version, the deployment label or the two waits (a package older than control-server#672), so what it bound is unknown.')
+        if ($Rollback) {
+            Write-Warning "$message On -Rollback this is reported, not refused: the previous package may predate #672, and a rollback has to stay possible. Check AdmissionPolicyState and appsettings.Production.json by hand."
+            return
+        }
+        throw "$message Install a package built from a commit with #672."
+    }
+    $match = [regex]::Match($line, '^EFFECTIVE_JOURNEY_BINDING=admissionPolicyVersion=(?<admissionPolicyVersion>\S+) admissionPolicyDeploymentId=(?<admissionPolicyDeploymentId>\S+) cargoHoldingTimeout=(?<cargoHoldingTimeout>\S+) stationDepartureWaitTimeout=(?<stationDepartureWaitTimeout>\S+)$')
+    if (-not $match.Success) {
+        throw "EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported '$line', which is not the four values this script compares."
+    }
+    $journey = $definition['journeyRuntime']
+    [string[]] $problems = @()
+    foreach ($key in @('admissionPolicyVersion', 'admissionPolicyDeploymentId', 'cargoHoldingTimeout', 'stationDepartureWaitTimeout')) {
+        if (-not ($journey -is [System.Collections.IDictionary] -and $journey.Contains($key))) { continue }
+        $expected = "$($journey[$key])"
+        $actual = $match.Groups[$key].Value
+        if ($actual -cne $expected) { $problems += "$key bound '$actual', the definition says '$expected'" }
+    }
+    if ($problems.Count -gt 0) {
+        throw "EFFECTIVE_JOURNEY_BINDING_MISMATCH: $($problems -join '; '). The installer reported '$line'."
+    }
+    Write-Step "Admission policy and waits the Host bound, confirmed by the server: $line"
+}
+
 function Assert-MesIngestSourceReported {
     <#
         control-server#535. The server-side installer reads the overlay back and asserts that the
@@ -752,6 +807,7 @@ if ($Rollback) {
         $allow = Get-InstallerSwitchArgument -AllowRiotCreateDispatch $AllowRiotCreateDispatch -ProductionCutover $ProductionCutover -LeaveProductionCutover $LeaveProductionCutover
         $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
         Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
+        Assert-JourneyBindingReported -Output $rollbackOutput -Rollback
         Write-Step 'Rollback complete. The MVP service was not involved.'
         Write-Step "Record admissionPolicyVersion=$AdmissionPolicyVersionOverride in the deployment record: the next install needs a higher one."
         Write-Step 'The onboard half was NOT rolled back. The two ends do not negotiate versions --'
@@ -1006,6 +1062,7 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
         "-DeploymentConfigPath `"$remoteConfig`" $fakeArgument" +
         "-InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
     Assert-MesIngestSourceReported -Output $installOutput
+    Assert-JourneyBindingReported -Output $installOutput
 
     # --------------------------------------------------------------- check ---
 
