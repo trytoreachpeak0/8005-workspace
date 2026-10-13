@@ -221,6 +221,8 @@ if ($null -eq $bindingAst) {
     $definition = @{ journeyRuntime = @{ admissionPolicyVersion = 6; admissionPolicyDeploymentId = 'MAP-26-WIRE_TO_GATE-20261007'; cargoHoldingTimeout = '00:05:00'; stationDepartureWaitTimeout = '00:05:00' } }
     $asDefined = 'EFFECTIVE_JOURNEY_BINDING=admissionPolicyVersion=6 admissionPolicyDeploymentId=MAP-26-WIRE_TO_GATE-20261007 cargoHoldingTimeout=00:05:00 stationDepartureWaitTimeout=00:05:00'
     $other = 'MES_INGEST_SOURCE=fake baseUrl=http://127.0.0.1:58188 allowedWorkTypes=STAGING_TO_WIRE'
+    $effectiveLine = 'EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE allowedDispatchZones=WIRE_BONDING mesIngestBaseUrl=http://127.0.0.1:58188'
+    $productionSource = $false
     function Get-BindingVerdict([object[]] $Lines, [switch] $Rollback) {
         $warnings = $null
         try { Assert-JourneyBindingReported -Output $Lines -Rollback:$Rollback -WarningVariable warnings -WarningAction SilentlyContinue; return ($warnings ? "WARN $warnings" : 'OK') } catch { return $_.Exception.Message }
@@ -239,12 +241,18 @@ if ($null -eq $bindingAst) {
             @{ Name = 'a line that is not name=value pairs: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=6 MAP-26'); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
             @{ Name = 'a field the installer adds later (cs#686) is ignored, the four still compared'; Lines = @("$asDefined slotReadinessGate=enforce"); Expect = 'OK' }
             @{ Name = 'fields in another order are read by name'; Lines = @('EFFECTIVE_JOURNEY_BINDING=stationDepartureWaitTimeout=00:05:00 cargoHoldingTimeout=00:05:00 admissionPolicyDeploymentId=MAP-26-WIRE_TO_GATE-20261007 admissionPolicyVersion=6'); Expect = 'OK' }
-            @{ Name = 'no line at all (installer scripts older than control-server#672): refused, on -Rollback too'; Lines = @($other); Rollback = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_UNREAD:' }
+            @{ Name = 'EFFECTIVE_CONFIGURATION= but no EFFECTIVE_JOURNEY_BINDING line (installer scripts older than control-server#672): refused, naming the checkout, on -Rollback too'; Lines = @($other, $effectiveLine); Rollback = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer reported an EFFECTIVE_CONFIGURATION= line' }
+            # Review S1 (Q5): neither line -- the installer read no event and, in fake mode, only warned. Not the checkout's fault.
+            @{ Name = 'neither result line, fake mode, on -Rollback: warned, not refused'; Lines = @($other); Rollback = $true; Expect = 'WARN EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer read no EFFECTIVE_CONFIGURATION event' }
+            @{ Name = 'neither result line, fake mode, on an install: warned, as for the EFFECTIVE_CONFIGURATION= line'; Lines = @($other); Expect = 'WARN EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer read no EFFECTIVE_CONFIGURATION event' }
+            @{ Name = 'neither result line, production mode, on -Rollback: refused'; Lines = @($other); Rollback = $true; Production = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer read no EFFECTIVE_CONFIGURATION event' }
             @{ Name = 'not logged (a package older than control-server#672) on an install: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=not-logged'); Expect = 'EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED:' }
             @{ Name = 'not logged on -Rollback: warned, not refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=not-logged'); Rollback = $true; Expect = 'WARN EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED:' })) {
+        $productionSource = [bool] $case['Production']
         $v = Get-BindingVerdict $case.Lines -Rollback:([bool] $case['Rollback'])
         Write-Result -Ok ($case.Expect -ceq 'OK' ? ($v -ceq 'OK') : $v.StartsWith($case.Expect, [StringComparison]::Ordinal)) -Name "journey binding: $($case.Name)" -Detail "got: $v"
     }
+    $productionSource = $false
     # A key the definition leaves out: the package's appsettings.json decides, so it is printed, not compared.
     $definition['journeyRuntime'].Remove('stationDepartureWaitTimeout')
     $v = Get-BindingVerdict @($asDefined -replace 'stationDepartureWaitTimeout=00:05:00', 'stationDepartureWaitTimeout=00:30:00')
@@ -254,7 +262,7 @@ if ($null -eq $bindingAst) {
     $v = Get-BindingVerdict @($asDefined)
     Write-Result -Ok ($v.StartsWith("EFFECTIVE_JOURNEY_BINDING_MISMATCH: admissionPolicyVersion bound '6', the definition says '7'", [StringComparison]::Ordinal)) -Name 'journey binding: compared with $definition as it stands (the derived copy after an override)' -Detail "got: $v"
     Remove-Item function:Write-Step
-    Remove-Variable definition -ErrorAction SilentlyContinue
+    Remove-Variable definition, productionSource, effectiveLine -ErrorAction SilentlyContinue
     # Both read-backs call it, right after Assert-MesIngestSourceReported, with -Rollback on the rollback only.
     $scriptText672 = Get-Content -LiteralPath $ScriptPath -Raw
     $bindingCalls = @($deployAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Assert-JourneyBindingReported' }, $true))

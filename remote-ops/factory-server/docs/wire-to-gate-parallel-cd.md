@@ -248,7 +248,8 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
   记下 `admissionPolicyVersion`、`admissionPolicyDeploymentId`、`cargoHoldingTimeout`、`stationDepartureWaitTimeout`，安装器与定义
   比对（不一致 `EFFECTIVE_CONFIGURATION_MISMATCH` 并停服务），再打一行 `EFFECTIVE_JOURNEY_BINDING=…`；19 装完与回滚后按字段名
   与它实际发出的定义（`-AdmissionPolicyVersionOverride` 时是派生副本）再核一次：不一致 `EFFECTIVE_JOURNEY_BINDING_MISMATCH`，
-  没有这一行 `EFFECTIVE_JOURNEY_BINDING_UNREAD`。#672 之前的包记不下这四项，安装器报 `EFFECTIVE_JOURNEY_BINDING=not-logged`：
+  有 `EFFECTIVE_CONFIGURATION=` 行却没有这一行 `EFFECTIVE_JOURNEY_BINDING_UNREAD`（克隆早于 #672）；两行都没有说明安装器没读到事件，
+  与 `EFFECTIVE_CONFIGURATION=` 行同口径：`production` 拒、`fake` 警告，回滚也一样。#672 之前的包记不下这四项，安装器报 `EFFECTIVE_JOURNEY_BINDING=not-logged`：
   非回滚安装 19 拒绝（`EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED`），`-Rollback` 只警告，好让回滚到旧包仍然可行。
 - **从 `fake` 换成 `production`**：安装器在记录新定义之前，先撤掉上一次安装留下的替身（计划任务、
   进程、目录）。否则 `installed-instance.json` 换成新定义之后就再没有东西指向它，卸载会找不到。

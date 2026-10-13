@@ -646,8 +646,10 @@ function Assert-JourneyBindingReported {
         holding wait to five minutes was reinstalled back to thirty unseen.
           * any of the four the definition names that differs: EFFECTIVE_JOURNEY_BINDING_MISMATCH, install or rollback;
             a key the definition leaves out is the package's appsettings.json's to decide, so it is printed, not compared;
-          * no such line: EFFECTIVE_JOURNEY_BINDING_UNREAD, always -- the installer scripts come from the same clone as this
-            script, so a checkout without the line is the wrong checkout;
+          * no such line but an EFFECTIVE_CONFIGURATION= line: EFFECTIVE_JOURNEY_BINDING_UNREAD, always -- the installer scripts
+            come from the same clone as this script, so a checkout without the line is the wrong checkout;
+          * neither line: the installer read no event at all (review S1), judged as Assert-MesIngestSourceReported judges it --
+            refused in 'production', warned in 'fake', on a rollback as well;
           * EFFECTIVE_JOURNEY_BINDING=not-logged (the package is older than #672, its event does not carry them): refused on
             an install, warned on -Rollback. Asymmetric on purpose: a rollback goes to the previous package, which may well
             predate #672, and refusing it would leave no way back; an install brings the package this script was built for,
@@ -660,8 +662,20 @@ function Assert-JourneyBindingReported {
     $lines = @($Output | ForEach-Object { "$_".Trim() })
     $reported = @($lines | Where-Object { $_.StartsWith('EFFECTIVE_JOURNEY_BINDING=', [StringComparison]::Ordinal) })
     if ($reported.Count -eq 0) {
-        throw ('EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer reported no EFFECTIVE_JOURNEY_BINDING line (installer scripts older than ' +
-            'control-server#672), so which admission policy version and waits the Host bound is unknown. Deploy from a control-server checkout that has #672.')
+        # cs#672 review S1. Neither result line: the installer read no EFFECTIVE_CONFIGURATION event at all and, in 'fake' mode,
+        # only warned (Get-ParallelEffectiveConfigurationAction's Warn) -- the checkout is not the cause. Judged the way
+        # Assert-MesIngestSourceReported judges a missing EFFECTIVE_CONFIGURATION= line, which has already run: refused in
+        # 'production' (it threw first), warned in 'fake', on a rollback as well.
+        if (-not @($lines | Where-Object { $_.StartsWith('EFFECTIVE_CONFIGURATION=', [StringComparison]::Ordinal) })) {
+            $message = ('EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer read no EFFECTIVE_CONFIGURATION event from the Host''s log ' +
+                '(no EFFECTIVE_CONFIGURATION= line either), so which admission policy version and waits it bound is unknown.')
+            if ($productionSource) { throw "$message Production mode: refused." }
+            Write-Warning "$message Fake mode: reported, not refused, as for the EFFECTIVE_CONFIGURATION= line."
+            return
+        }
+        throw ('EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer reported an EFFECTIVE_CONFIGURATION= line but no EFFECTIVE_JOURNEY_BINDING line ' +
+            '(installer scripts older than control-server#672), so which admission policy version and waits the Host bound is unknown. ' +
+            'Deploy from a control-server checkout that has #672.')
     }
     $line = $reported[-1]
     if ($line -ceq 'EFFECTIVE_JOURNEY_BINDING=not-logged') {
