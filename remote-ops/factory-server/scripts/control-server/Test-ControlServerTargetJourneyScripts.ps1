@@ -312,7 +312,7 @@ exit 0
     $journey = {
         param([string] $Id, [string] $Key)
         [ordered]@{ journeyId = $Id; stage = 'Blocked'; agvId = "car-of-$Key"; vehicleKey = $Key; updatedAt = 'x'; revisions = 'r'
-            demands = @(); lease = $null; outbox = @(); riotLegs = @(); cancelDemandIds = @(); suppressDemandIds = @(); settleDemandIds = @(); releaseLease = $false }
+            demands = @(); lease = $null; outbox = @(); riotLegs = @(); refusals = @(); cancelDemandIds = @(); suppressDemandIds = @(); settleDemandIds = @(); releaseLease = $false }
     }
     $survey = { param([object[]] $Journeys) @{ status = 'SURVEY'; journeys = @($Journeys); refusals = @(); unattributedOutbox = @() } | ConvertTo-Json -Depth 6 -Compress }
     $m1 = $all12 + @('-SiteConfigPath', $site)
