@@ -468,7 +468,7 @@ $refusal = @(Get-JournalArchiveRefusal @verdictArgs)
 $record = [ordered]@{
     vehicle = $SshAlias; startedAt = $started; journalPath = $journalPath; journalPathConfigured = $configured; archiveTo = $target
     checkOnly = [bool] $CheckOnly; copiedFiles = $hashes; confirmNoCargo = $ConfirmNoCargo
-    archivePendingPerU6 = [bool] $ArchivePendingPerU6; pendingCutoff = $PendingCutoff?.ToString('o'); fakeDemandIdPattern = $FakeDemandIdPattern
+    archivePendingPerU6 = [bool] $ArchivePendingPerU6; pendingCutoff = ${PendingCutoff}?.ToString('o'); fakeDemandIdPattern = $FakeDemandIdPattern
     reading = $reading; refusal = $refusal; renamed = $false
 }
 $write = { $record | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $EvidencePath 'journal-check.json') }
