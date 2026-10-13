@@ -1279,11 +1279,20 @@ MVP 只停不删）。这里只记部署脚本这一侧的三件事。
 | 第一次以切换模式安装，数据目录里还有 `*.db`／`-wal`／`-shm` | `CUTOVER_REQUIRES_NEW_DATABASE`。先停服、把数据目录改名留存、建空目录 |
 | 第一次以切换模式安装却是 `-Rollback` | `CUTOVER_FIRST_INSTALL_NOT_ROLLBACK` |
 | 已是切换模式、带开关重装或换阶段定义、带开关回滚 v2 的包 | 放行 |
+| 已装 `phase: "trial"`，这次 `phase: "production"`，数据目录里还有库 | `CUTOVER_PRODUCTION_REQUIRES_NEW_DATABASE`（试跑转生产必须换新库）；是 `-Rollback` 则 `CUTOVER_PRODUCTION_NOT_ROLLBACK` |
+| 已装 `production`，这次 `trial` | `CUTOVER_PHASE_BACKWARDS` |
+| 带开关安装、或给切换实例开闸，而 MVP 服务在跑或启动类型不是 Disabled | `CUTOVER_MVP_NOT_STOPPED`（关闸不查） |
+| 离开切换：19 号带 `-LeaveProductionCutover` 装并行定义 | 数据目录必须为空，否则 `CUTOVER_LEAVE_REQUIRES_NEW_DATABASE`；不能同时带 `-ProductionCutover`、不能是 `-Rollback`。卸载不带 `-RemoveData` 会留着 `installed-instance.json`，之后不带开关的重装照样被拒，所以离开切换只走这一条 |
 
-卸载、关开闸门（20 号）、恢复窗口从服务器上 `installed-instance.json` 里的批准记录取开关，出口方向不会被它挡住。
+卸载、关开闸门（20 号）、恢复窗口从服务器上 `installed-instance.json` 里的批准记录取开关，出口方向不会被它挡住。用 control-server#564 之前的检出
+操作切换实例时，20 号与 18 号会先报 `CHECKOUT_PREDATES_CUTOVER`（旧模块会按名字拒切换定义，关闸也一样）。批准记录、阶段定义都要先提交、跑一次 release
+才能部署：19 号要求定义是克隆里被跟踪的文件，包的提交等于克隆 HEAD。
 
 **车与线。**哪台车连 MVP、哪台连 v2，只看 `remote-ops/onboard-hmi/config/site-agv0N.json` 的一个字段 `"controlServerLine": "mvp" | "v2"`
-（`VehicleControlServerLine.psm1`），`ControlServerTarget.psm1`、`06-deploy-onboard-hmi.ps1`、`16-enter-sublot-uia.ps1` 都读它；没有这个字段或值不对就拒
+（`VehicleControlServerLine.psm1`），`ControlServerTarget.psm1`、`06-deploy-onboard-hmi.ps1`、`16-enter-sublot-uia.ps1`、`18-set-v2-recovery-window.ps1` 都读它；没有这个字段或值不对就拒
 （`VEHICLE_LINE_UNSET`），不按别名猜。今天 `agv01` 是 `"mvp"`，`agv02`／`agv03` 是 `"v2"`。06 在端口上两个方向都查：v2 线的车拿到 58005／58007
 是 `MVP_PORTS_FOR_V2_VEHICLE`，MVP 线的车拿到别的端口是 `V2_PORTS_FOR_MVP_VEHICLE`。切换时把 `site-agv01.json` 改成 `"v2"`，回滚时改回 `"mvp"`，
 各改一处。**改 `agv01` 的这一行、以及之后每一步碰 `agv01`、MVP、生产 MesIngest 的操作，执行前问用户。**
+
+`17-capture-hmi-screen.ps1`、`18-read-hmi-screen-state.ps1` 今天仍然拒绝 `agv01`：它们是「碰 `agv01` 先问用户」那一类护栏，试跑段若要用脚本读
+`agv01` 的屏幕，执行前单独决定。

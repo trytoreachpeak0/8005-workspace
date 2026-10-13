@@ -701,6 +701,30 @@ $rows
             -Name 'a write that drops an entry is caught, the original written back, nothing restarted' -Detail $r.All
     }
 
+    # ------------------------------------------------- control-server#564: the installed cutover ---
+    Write-Host ''
+    Write-Host 'The installed definition as a production cutover (control-server#564, review MW3 and S5)'
+    $parallelDefinition = @{ instanceId = 'selftest' }
+    $cutoverInstalled = @{ instanceId = 'selftest'; productionCutover = @{ approvalRecord = 'x'; phase = 'trial' } }
+    $a = Get-V2InstalledCutoverArgument -Definition $cutoverInstalled -ModuleKnowsCutover $true
+    Write-Result -Ok ($a -is [hashtable] -and $a.Count -eq 1 -and $a['ProductionCutover'] -eq $true) -Name 'an installed cutover definition is asserted with -ProductionCutover' -Detail (ConvertTo-Json $a -Compress)
+    $a = Get-V2InstalledCutoverArgument -Definition $parallelDefinition -ModuleKnowsCutover $true
+    Write-Result -Ok ($a -is [hashtable] -and $a.Count -eq 0) -Name 'a parallel definition is asserted without it' -Detail (ConvertTo-Json $a -Compress)
+    $a = Get-V2InstalledCutoverArgument -Definition $parallelDefinition -ModuleKnowsCutover $false
+    Write-Result -Ok ($a -is [hashtable] -and $a.Count -eq 0) -Name 'a parallel definition with a module from before #564: as before' -Detail (ConvertTo-Json $a -Compress)
+    $r = Invoke-Captured { Get-V2InstalledCutoverArgument -Definition $cutoverInstalled -ModuleKnowsCutover $false }
+    Write-Result -Ok ($r.Error -match '^CHECKOUT_PREDATES_CUTOVER:') -Name 'a cutover definition with a module from before #564 is refused, saying which checkout to use' -Detail $r.All
+    if (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue) {
+        $real = @{ instanceId = 'selftest'; productionCutover = @{ approvalRecord = 'x'; phase = 'trial' } }
+        $a = Get-V2InstalledCutoverArgument -Definition $real -ModuleKnowsCutover $true
+        Write-Result -Ok ((Test-ParallelProductionCutoverDefinition -Definition $real) -and $a['ProductionCutover'] -eq $true) -Name '... and agrees with the staged module''s own Test-ParallelProductionCutoverDefinition' -Detail (ConvertTo-Json $a -Compress)
+    }
+    $serverText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'server-v2-recovery-window.ps1'))
+    Write-Result -Ok ($serverText.Contains('$cutoverArgument = Get-V2InstalledCutoverArgument -Definition $definition') -and
+            $serverText.Contains('-ModuleKnowsCutover ($null -ne (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue))') -and
+            $serverText.Contains('-ForStopDirection @cutoverArgument')) `
+        -Name 'the server entry asserts the installed definition with the argument Get-V2InstalledCutoverArgument gives' -Detail 'pinned text missing'
+
     # ================================================================ Part 3 ===
 
     Write-Host ''

@@ -34,11 +34,9 @@ if (-not (Test-Path -LiteralPath $definitionPath -PathType Leaf)) {
 }
 $definition = Read-ParallelInstanceDefinition -Path $definitionPath
 # control-server#564: an installed production cutover definition carries its record, which got there only through an
-# install with -ProductionCutover; the switch is taken from it. A module installed before #564 has neither the function nor
-# the parameter, and no cutover definition can have been installed with it.
-$cutover = (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue) ?
-    (Test-ParallelProductionCutoverDefinition -Definition $definition) : $false
-$cutoverArgument = $cutover ? @{ ProductionCutover = $true } : @{}
+# install with -ProductionCutover; the switch is taken from it (Get-V2InstalledCutoverArgument).
+$cutoverArgument = Get-V2InstalledCutoverArgument -Definition $definition `
+    -ModuleKnowsCutover ($null -ne (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue))
 $null = Assert-ParallelInstanceDefinition -Definition $definition -AllowRiotCreateDispatch -AllowRiotForeignOrderCancel -ForStopDirection @cutoverArgument
 $layout = Get-ParallelInstanceLayout -Definition $definition
 $onboardPort = [int] $definition['onboardPort']

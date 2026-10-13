@@ -93,6 +93,20 @@ function Write-Step {
     Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message) -ForegroundColor Cyan
 }
 
+function Get-CheckoutCutoverRefusal {
+    <#
+        control-server#564 review S5. A -ControlServerRepository from before control-server#564 has a module that refuses a
+        production cutover definition by name (agv01, WIRE_TO_GATE) -- and the gate script asserts the installed definition
+        in both directions, so closing the gate would be refused too. $null when the checkout knows the cutover or the
+        installed definition is not one; otherwise the refusal, before anything is copied. Pure.
+    #>
+    param([bool] $ModuleKnowsCutover, [bool] $InstalledIsCutover, [string] $Repository)
+    if ($ModuleKnowsCutover -or -not $InstalledIsCutover) { return $null }
+    return ("CHECKOUT_PREDATES_CUTOVER: the installed definition on the server is a production cutover (control-server#564), " +
+        "and $Repository is older than that ticket: its module would refuse that definition, closing the gate included. " +
+        'Use a checkout that has control-server#564. Nothing was copied or changed.')
+}
+
 function Invoke-Ssh {
     param([string[]] $Arguments)
     $output = & ssh $SshAlias @Arguments 2>&1
@@ -124,6 +138,13 @@ $definition = Read-ParallelInstanceDefinition -Path $InstanceDefinitionPath
 $opsRoot = [string] $definition['opsRoot']
 $opsProblem = Test-ParallelInstanceOwnedPath -Path $opsRoot
 if ($opsProblem) { throw "opsRoot in $InstanceDefinitionPath $opsProblem. Nothing was changed." }
+# Review S5: an old checkout and a cutover instance. Only then is the server asked (read-only) what is installed.
+if ($null -eq (Get-Command Test-ParallelProductionCutoverDefinition -ErrorAction SilentlyContinue)) {
+    $installedRecord = "$opsRoot\installed-instance.json"
+    $probe = Invoke-Ssh @("if (Test-Path -LiteralPath '$installedRecord') { (Get-Content -Raw -LiteralPath '$installedRecord').Contains('productionCutover') } else { 'False' }")
+    $checkoutRefusal = Get-CheckoutCutoverRefusal -ModuleKnowsCutover $false -InstalledIsCutover (@($probe | ForEach-Object { "$_".Trim() }) -contains 'True') -Repository $repoRoot
+    if ($checkoutRefusal) { throw $checkoutRefusal }
+}
 $gateRoot = "$opsRoot\dispatch-gate\$commit"
 $remoteScript = "$gateRoot\$serverScript"
 # The installed definition stays where the installer recorded it, beside 19's unit; the gate script is told where.

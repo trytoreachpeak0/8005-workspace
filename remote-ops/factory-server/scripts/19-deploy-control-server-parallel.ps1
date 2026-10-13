@@ -103,6 +103,12 @@
     task type and drives agv01: the cutover steps that touch agv01, the MVP or the production MesIngest are asked of the
     user first, every time.
 
+.PARAMETER LeaveProductionCutover
+    control-server#564 review S4. The governed way out of an installed production cutover: installs the parallel
+    definition given with -InstanceDefinitionPath over it. The server's installer requires an empty data root -- the
+    cutover database renamed aside first, as evidence -- and refuses it with -ProductionCutover or -Rollback. The last
+    step of the rollback in that repository's docs/production-cutover-mode-plan.md section 7; asked of the user first.
+
 .PARAMETER WhatIf
     Stage and verify everything, print what would run, and stop before changing the server. One
     read-only ssh still runs (except with -Uninstall): reading the admission policy version in the
@@ -148,7 +154,9 @@ param(
 
     [switch] $AllowRiotCreateDispatch,
 
-    [switch] $ProductionCutover
+    [switch] $ProductionCutover,
+
+    [switch] $LeaveProductionCutover
 )
 
 $ErrorActionPreference = 'Stop'
@@ -229,6 +237,16 @@ function Assert-DefinitionFromClone {
             'the admission policy version for one deployment use -AdmissionPolicyVersionOverride. Nothing was downloaded or copied.')
     }
     return $relative
+}
+
+function Get-InstallerSwitchArgument {
+    <#
+        The switches this script hands on to Install-ParallelInstanceLocal.ps1, as the text appended to its command line.
+        One place for the install and the rollback command (control-server#564 review, MW1). Pure.
+    #>
+    param([bool] $AllowRiotCreateDispatch, [bool] $ProductionCutover, [bool] $LeaveProductionCutover)
+    return ($AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : '') + ($ProductionCutover ? ' -ProductionCutover' : '') +
+        ($LeaveProductionCutover ? ' -LeaveProductionCutover' : '')
 }
 
 function Get-FaultRecoveryCredentialRefusal {
@@ -502,8 +520,11 @@ if ($Uninstall) {
     if ($opsProblem) { throw "opsRoot in $InstanceDefinitionPath $opsProblem." }
     Write-Step "Uninstall: using opsRoot $($definition['opsRoot']) from $InstanceDefinitionPath; the server asserts its own installed definition."
 } else {
+    if ($ProductionCutover -and $LeaveProductionCutover) {
+        throw '-ProductionCutover installs a production cutover and -LeaveProductionCutover leaves one; pass one. Nothing was downloaded or copied.'
+    }
     # control-server#564: a -ControlServerRepository older than the switch has no such parameter; say which, not a binding error.
-    if ($ProductionCutover -and -not (Get-Command Assert-ParallelInstanceDefinition).Parameters.ContainsKey('ProductionCutover')) {
+    if (($ProductionCutover -or $LeaveProductionCutover) -and -not (Get-Command Assert-ParallelInstanceDefinition).Parameters.ContainsKey('ProductionCutover')) {
         throw '-ProductionCutover was passed, but -ControlServerRepository is older than control-server#564 (its ParallelInstance.psm1 has no cutover switch). Deploy from a checkout that has it.'
     }
     # Splatted only when on: an older module must keep accepting today's deployments without the parameter.
@@ -622,6 +643,8 @@ function Assert-MesIngestSourceReported {
         per mode, that what it reports agrees with what the control host meant to deploy:
           * the MES_INGEST_SOURCE result line names this mode and this baseUrl;
           * 'production': allowedWorkTypes is STAGING_TO_WIRE alone, and no FAKE_MES_INGEST line;
+          * 'production' under -ProductionCutover (control-server#564 review M1): allowedWorkTypes is the definition's list
+            and that list is the six types, the line says PRODUCTION CUTOVER, and no FAKE_MES_INGEST line;
           * 'fake', on an install: the FAKE_MES_INGEST line is there (a rollback never printed one).
         A checkout older than #535 prints no MES_INGEST_SOURCE line and is only ever 'fake'.
     #>
@@ -638,7 +661,17 @@ function Assert-MesIngestSourceReported {
     if ($audit.Count -eq 0) {
         throw "MES_INGEST_SOURCE_MISMATCH: the installer reported no line starting '$prefix'. What it did report: $(@($lines | Where-Object { $_ -match 'MES_INGEST' }) -join ' | ')"
     }
-    if ($productionSource) {
+    $cutoverTypes = @('DIE_TO_WIRE_STAGING', 'DIE_TO_OVEN', 'WIRE_TO_GATE', 'WIRE_TO_OPTICAL', 'STAGING_TO_WIRE', 'WIRE_TO_NITROGEN')
+    $definedTypes = @($definition['journeyRuntime']['allowedWorkTypes'])
+    $sixDefined = $definedTypes.Count -eq 6 -and (@($definedTypes | Sort-Object -CaseSensitive) -join ',') -ceq (@($cutoverTypes | Sort-Object -CaseSensitive) -join ',')
+    if ($productionSource -and $ProductionCutover) {
+        if (-not $sixDefined -or -not $audit[-1].Contains("allowedWorkTypes=$($definedTypes -join ',') -- PRODUCTION CUTOVER")) {
+            throw "MES_INGEST_SOURCE_MISMATCH: production cutover, but the installer reported '$($audit[-1])'."
+        }
+        if ($fakeLines.Count -gt 0) {
+            throw "MES_INGEST_SOURCE_MISMATCH: production cutover, but the installer also reported $($fakeLines -join ', ')."
+        }
+    } elseif ($productionSource) {
         if (-not $audit[-1].Contains('allowedWorkTypes=STAGING_TO_WIRE ')) {
             throw "MES_INGEST_SOURCE_MISMATCH: production mode, but the installer reported '$($audit[-1])'."
         }
@@ -667,7 +700,8 @@ function Assert-MesIngestSourceReported {
     if ($effective[-1] -cne $expectedEffective) {
         throw "EFFECTIVE_CONFIGURATION_MISMATCH: the Host bound '$($effective[-1])', the definition says '$expectedEffective'."
     }
-    if ($productionSource -and -not $effective[-1].StartsWith('EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE ', [StringComparison]::Ordinal)) {
+    # Under the cutover the definition's own list, compared above, is the six types ($sixDefined).
+    if ($productionSource -and -not $ProductionCutover -and -not $effective[-1].StartsWith('EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE ', [StringComparison]::Ordinal)) {
         throw "EFFECTIVE_CONFIGURATION_MISMATCH: production mode, but the Host bound '$($effective[-1])'."
     }
     Write-Step "What the Host bound, confirmed by the server: $($effective[-1])"
@@ -715,7 +749,7 @@ if ($Rollback) {
             return
         }
         Copy-ParallelScripts
-        $allow = ($AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : '') + ($ProductionCutover ? ' -ProductionCutover' : '')
+        $allow = Get-InstallerSwitchArgument -AllowRiotCreateDispatch $AllowRiotCreateDispatch -ProductionCutover $ProductionCutover -LeaveProductionCutover $LeaveProductionCutover
         $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
         Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
         Write-Step 'Rollback complete. The MVP service was not involved.'
@@ -966,7 +1000,7 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     # ------------------------------------------------------------- install ---
 
     Write-Step 'Running the parallel installer on the server'
-    $allow = ($AllowRiotCreateDispatch ? ' -AllowRiotCreateDispatch' : '') + ($ProductionCutover ? ' -ProductionCutover' : '')
+    $allow = Get-InstallerSwitchArgument -AllowRiotCreateDispatch $AllowRiotCreateDispatch -ProductionCutover $ProductionCutover -LeaveProductionCutover $LeaveProductionCutover
     $installOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" " +
         "-PackageZip `"$remoteZip`" -ExpectedSha256 $actual " +
         "-DeploymentConfigPath `"$remoteConfig`" $fakeArgument" +

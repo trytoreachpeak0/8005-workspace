@@ -61,7 +61,8 @@
     and an Explorer that was already running does not see a machine variable written that way.
 
 .PARAMETER SshAlias
-    agv02 or agv03. Required; there is no default, and agv01 is refused by the parameter validation.
+    One of the three cars, required, no default. Only a car whose site file says "controlServerLine": "v2" is accepted
+    (VehicleControlServerLine.psm1, control-server#564): agv02 and agv03 today, agv01 once the cutover changes its field.
 
 .PARAMETER ControlServerRepository
     A clean 8005-agv-control-server checkout or worktree. Its scripts/parallel/ParallelInstance.psm1 and
@@ -94,7 +95,7 @@
 [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Change')]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('agv02', 'agv03')]
+    [ValidateSet('agv01', 'agv02', 'agv03')]
     [string] $SshAlias,
 
     [Parameter(Mandatory = $true)]
@@ -119,6 +120,13 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 $SshAlias = $SshAlias.ToLowerInvariant()
+# control-server#564 review M2: the v2 recovery window is for a car on the v2 line, read from its site file's one field.
+Import-Module (Join-Path $PSScriptRoot 'VehicleControlServerLine.psm1') -Force
+$vehicleLine = Read-VehicleControlServerLine -SitePath (Get-VehicleSitePath -SshAlias $SshAlias)
+if ($vehicleLine -cne 'v2') {
+    throw ("VEHICLE_NOT_ON_V2_LINE: $SshAlias's site file says controlServerLine ""$vehicleLine""; the v2 recovery window " +
+        'is for a car on the v2 line. For the MVP use 14-set-recovery-window.ps1. Nothing was changed.')
+}
 if ($VehicleOnly -and -not $Revert) { throw '-VehicleOnly only closes (-Revert); opening needs both ends. Nothing was changed.' }
 $serverAlias = 'factory01'
 $vehicleStaging = 'C:\temp\agv\onboard-staging\v2-recovery-window'

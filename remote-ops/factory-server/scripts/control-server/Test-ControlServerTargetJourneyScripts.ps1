@@ -202,7 +202,13 @@ $at16 = $text16.IndexOf('if ($vehicleLine -cne ''v2'') {')
 Write-Result -Ok ($at16 -gt 0 -and $text16.Contains('$vehicleLine = Read-VehicleControlServerLine -SitePath (Get-VehicleSitePath -SshAlias $SshAlias)') -and
     $at16 -lt $text16.IndexOf('$ServerDatabase = Assert-V2Database $ServerDatabase') -and $text16.Contains('[ValidateSet(''agv01'', ''agv02'', ''agv03'')][string] $SshAlias')) `
     -Name '16-enter-sublot-uia.ps1 refuses a car not on the v2 line before it reads the v2 database' -Detail "at $at16"
-foreach ($file in @('factory-server\scripts\control-server\ControlServerTarget.psm1', 'onboard-hmi\scripts\06-deploy-onboard-hmi.ps1', 'onboard-hmi\scripts\16-enter-sublot-uia.ps1')) {
+$text18 = Get-Content -LiteralPath (Join-Path $root 'onboard-hmi\scripts\18-set-v2-recovery-window.ps1') -Raw
+$at18 = $text18.IndexOf('if ($vehicleLine -cne ''v2'') {')
+Write-Result -Ok ($at18 -gt 0 -and $text18.Contains('$vehicleLine = Read-VehicleControlServerLine -SitePath (Get-VehicleSitePath -SshAlias $SshAlias)') -and
+    $at18 -lt $text18.IndexOf('$repoRoot = (Resolve-Path -LiteralPath $ControlServerRepository).Path') -and $text18.Contains('[ValidateSet(''agv01'', ''agv02'', ''agv03'')]')) `
+    -Name '18-set-v2-recovery-window.ps1 refuses a car not on the v2 line before it reads anything (review M2)' -Detail "at $at18"
+foreach ($file in @('factory-server\scripts\control-server\ControlServerTarget.psm1', 'onboard-hmi\scripts\06-deploy-onboard-hmi.ps1', 'onboard-hmi\scripts\16-enter-sublot-uia.ps1',
+        'onboard-hmi\scripts\18-set-v2-recovery-window.ps1')) {
     $code = Get-Content -LiteralPath (Join-Path $root $file) -Raw
     $lists = [regex]::Matches($code, "MvpVehicleAliases|V2VehicleAliases|v2OnlyAliases|ValidateSet\('agv02', 'agv03'\)")
     Write-Result -Ok ($lists.Count -eq 0) -Name "$(Split-Path -Leaf $file) keeps no list of which car is on which line" -Detail (($lists | ForEach-Object Value) -join ' | ')

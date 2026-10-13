@@ -439,6 +439,24 @@ function Invoke-V2RecoveryWindowServerRun {
     return @($lines) + 'MVP service fingerprint unchanged.'
 }
 
-Export-ModuleMember -Function Get-V2RecoveryWindowNames, Read-V2RecoveryWindowRequest, Get-V2ProofComparison,
+function Get-V2InstalledCutoverArgument {
+    <#
+        control-server#564. The -ProductionCutover argument for asserting the installed definition, as a splat: present
+        when the definition carries productionCutover -- it got there only through an install that carried the switch --
+        absent otherwise. -ModuleKnowsCutover says whether the staged ParallelInstance.psm1 has the switch; a cutover
+        definition with a module from before control-server#564 is refused here with what to do, instead of by that
+        module's whitelist naming agv01 (review S5). Pure.
+    #>
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary] $Definition, [Parameter(Mandatory = $true)][bool] $ModuleKnowsCutover)
+    if (-not $Definition.Contains('productionCutover')) { return @{} }
+    if (-not $ModuleKnowsCutover) {
+        throw ('CHECKOUT_PREDATES_CUTOVER: the installed definition is a production cutover (control-server#564), and the ' +
+            '-ControlServerRepository staged here is older than that ticket; its module would refuse the definition. Use a ' +
+            'checkout that has control-server#564. Nothing was changed.')
+    }
+    return @{ ProductionCutover = $true }
+}
+
+Export-ModuleMember -Function Get-V2InstalledCutoverArgument, Get-V2RecoveryWindowNames, Read-V2RecoveryWindowRequest, Get-V2ProofComparison,
     Invoke-V2RecoveryWindowVehicle, New-V2VehicleActions, Read-V2RegistryMultiString, Write-V2RegistryMultiString,
     Invoke-V2RecoveryWindowServer, New-V2ServerActions, Invoke-V2RecoveryWindowServerRun

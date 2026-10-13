@@ -154,6 +154,77 @@ if ($null -eq $credentialAst) {
         -Name 'the deploy script refuses a missing credential only through Get-FaultRecoveryCredentialRefusal' -Detail "calls $($credentialCalls.Count)"
 }
 
+# control-server#564: the switches handed on to the server's installer (MW1), and the server's report under the cutover (M1).
+Write-Host ''
+Write-Host 'Production cutover in the deploy script (control-server#564)' -ForegroundColor Cyan
+foreach ($name in @('Get-InstallerSwitchArgument', 'Assert-MesIngestSourceReported')) {
+    $found = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    if ($null -eq $found) { Write-Result -Ok $false -Name "$name is defined in the deploy script" -Detail 'not found' } else { . ([scriptblock]::Create($found.Extent.Text)) }
+}
+if (Get-Command Get-InstallerSwitchArgument -ErrorAction SilentlyContinue) {
+    foreach ($case in @(
+            @{ A = $false; P = $false; L = $false; Expect = '' }
+            @{ A = $true; P = $false; L = $false; Expect = ' -AllowRiotCreateDispatch' }
+            @{ A = $false; P = $true; L = $false; Expect = ' -ProductionCutover' }
+            @{ A = $true; P = $true; L = $false; Expect = ' -AllowRiotCreateDispatch -ProductionCutover' }
+            @{ A = $false; P = $false; L = $true; Expect = ' -LeaveProductionCutover' })) {
+        $got = Get-InstallerSwitchArgument -AllowRiotCreateDispatch $case.A -ProductionCutover $case.P -LeaveProductionCutover $case.L
+        Write-Result -Ok ($got -ceq $case.Expect) -Name "installer switches: '$($case.Expect)'" -Detail "got '$got'"
+    }
+    $switchCalls = @($deployAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-InstallerSwitchArgument' }, $true))
+    $scriptText19 = Get-Content -LiteralPath $ScriptPath -Raw
+    Write-Result -Ok ($switchCalls.Count -eq 2 -and @($switchCalls | Where-Object { $_.Extent.Text.Contains('-ProductionCutover $ProductionCutover -LeaveProductionCutover $LeaveProductionCutover') }).Count -eq 2 -and
+            ([regex]::Matches($scriptText19, '\$allow = Get-InstallerSwitchArgument')).Count -eq 2 -and -not $scriptText19.Contains("? ' -ProductionCutover' : '')`n")) `
+        -Name 'the install and the rollback command both take their switches from Get-InstallerSwitchArgument' -Detail "calls $($switchCalls.Count)"
+}
+if (Get-Command Assert-MesIngestSourceReported -ErrorAction SilentlyContinue) {
+    function Write-Step { param([string] $Message) }
+    $six = @('DIE_TO_WIRE_STAGING', 'DIE_TO_OVEN', 'WIRE_TO_GATE', 'WIRE_TO_OPTICAL', 'STAGING_TO_WIRE', 'WIRE_TO_NITROGEN')
+    $definition = @{ mesIngest = @{ source = 'production'; baseUrl = 'http://127.0.0.1:5088' }; journeyRuntime = @{ allowedWorkTypes = $six; allowedDispatchZones = @('WIRE_BONDING') } }
+    $sourceProperty = [pscustomobject]@{ Value = 'production' }; $mesIngestSource = 'production'; $productionSource = $true
+    $cutoverAudit = "MES_INGEST_SOURCE=production baseUrl=http://127.0.0.1:5088 allowedWorkTypes=$($six -join ',') -- PRODUCTION CUTOVER (trial): this instance reads the PRODUCTION MesIngest for all six task types and drives agv01; the MVP must be stopped (control-server#564)"
+    $cutoverEffective = "EFFECTIVE_CONFIGURATION=allowedWorkTypes=$($six -join ',') allowedDispatchZones=WIRE_BONDING mesIngestBaseUrl=http://127.0.0.1:5088"
+    function Get-ReportVerdict([object[]] $Lines) { try { Assert-MesIngestSourceReported -Output $Lines; return 'OK' } catch { return $_.Exception.Message } }
+    $ProductionCutover = $true
+    $v = Get-ReportVerdict @($cutoverAudit, $cutoverEffective)
+    Write-Result -Ok ($v -ceq 'OK') -Name 'server report under -ProductionCutover: the six types and PRODUCTION CUTOVER are accepted' -Detail $v
+    $v = Get-ReportVerdict @(($cutoverAudit -replace ' -- PRODUCTION CUTOVER.*$', ' -- this instance reads the PRODUCTION MesIngest the MVP also reads; it may take STAGING_TO_WIRE only'), $cutoverEffective)
+    Write-Result -Ok ($v.StartsWith('MES_INGEST_SOURCE_MISMATCH: production cutover')) -Name 'server report under -ProductionCutover without the cutover wording (an old installer) is refused' -Detail $v
+    $v = Get-ReportVerdict @($cutoverAudit, $cutoverEffective, 'FAKE_MES_INGEST=x')
+    Write-Result -Ok ($v.StartsWith('MES_INGEST_SOURCE_MISMATCH: production cutover, but the installer also reported')) -Name 'server report under -ProductionCutover with a FAKE_MES_INGEST line is refused' -Detail $v
+    $v = Get-ReportVerdict @($cutoverAudit, ($cutoverEffective -replace 'WIRE_TO_NITROGEN', 'X'))
+    Write-Result -Ok ($v.StartsWith('EFFECTIVE_CONFIGURATION_MISMATCH:')) -Name 'server report under -ProductionCutover with a different bound list is refused' -Detail $v
+    $ProductionCutover = $false
+    $v = Get-ReportVerdict @($cutoverAudit, $cutoverEffective)
+    Write-Result -Ok ($v.StartsWith('MES_INGEST_SOURCE_MISMATCH: production mode')) -Name 'the same six-type report without -ProductionCutover is refused, as before' -Detail $v
+    $definition['journeyRuntime']['allowedWorkTypes'] = @('STAGING_TO_WIRE')
+    $v = Get-ReportVerdict @('MES_INGEST_SOURCE=production baseUrl=http://127.0.0.1:5088 allowedWorkTypes=STAGING_TO_WIRE -- this instance reads ...', 'EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE allowedDispatchZones=WIRE_BONDING mesIngestBaseUrl=http://127.0.0.1:5088')
+    Write-Result -Ok ($v -ceq 'OK') -Name 'the parallel production report without -ProductionCutover is accepted, as before' -Detail $v
+    Remove-Item function:Write-Step
+    Remove-Variable definition, sourceProperty, mesIngestSource, productionSource, ProductionCutover -ErrorAction SilentlyContinue
+}
+
+# 20-set-control-server-parallel-dispatch-gate.ps1, review S5: an old checkout and an installed cutover.
+$gateScript = Join-Path (Split-Path -Parent $ScriptPath) '20-set-control-server-parallel-dispatch-gate.ps1'
+$gateAst = [System.Management.Automation.Language.Parser]::ParseFile($gateScript, [ref]$null, [ref]$null)
+$gateFunction = $gateAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-CheckoutCutoverRefusal' }, $true)
+if ($null -eq $gateFunction) {
+    Write-Result -Ok $false -Name 'Get-CheckoutCutoverRefusal is defined in 20' -Detail 'not found'
+} else {
+    . ([scriptblock]::Create($gateFunction.Extent.Text))
+    foreach ($case in @(
+            @{ K = $true; I = $true; Refused = $false }; @{ K = $true; I = $false; Refused = $false }
+            @{ K = $false; I = $false; Refused = $false }; @{ K = $false; I = $true; Refused = $true })) {
+        $r = Get-CheckoutCutoverRefusal -ModuleKnowsCutover $case.K -InstalledIsCutover $case.I -Repository 'C:\selftest\cs'
+        $ok = $case.Refused ? ($r -is [string] -and $r.StartsWith('CHECKOUT_PREDATES_CUTOVER:') -and $r.EndsWith('Nothing was copied or changed.')) : ($null -eq $r)
+        Write-Result -Ok $ok -Name "20: checkout knows the cutover $($case.K), installed is a cutover $($case.I) -> $($case.Refused ? 'refused' : 'goes ahead')" -Detail "got: $r"
+    }
+    $gateText = Get-Content -LiteralPath $gateScript -Raw
+    $at = $gateText.IndexOf('if ($checkoutRefusal) { throw $checkoutRefusal }')
+    Write-Result -Ok ($at -gt 0 -and $at -lt $gateText.IndexOf('Invoke-Ssh @("New-Item -ItemType Directory -Force -Path ''$gateRoot'' | Out-Null")')) `
+        -Name '20 refuses an old checkout on a cutover instance before anything is staged' -Detail "at $at"
+}
+
 # ------------------------------------------------------------------ fixtures ---
 
 $work = Join-Path ([IO.Path]::GetTempPath()) "cs552-selftest-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -169,6 +240,17 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $clone 'tools') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $clone 'tools\README.md') -Value 'fixture' -Encoding utf8NoBOM
     Set-Content -LiteralPath (Join-Path $clone '.gitignore') -Value 'local/' -Encoding utf8NoBOM
+    # control-server#564 (review MW2): a committed copy of the cutover definition with its record, the way the cutover day
+    # commits one, so that -ProductionCutover can be run end to end below. Only when the revision ships both.
+    $cutoverSource = Join-Path $clone 'scripts\parallel\instance-factory01-v2.cutover-two-zones.json'
+    $cutoverFixture = Join-Path $clone 'scripts\parallel\instance-factory01-v2.cutover-selftest.json'
+    $fixtureKnowsCutover = (Test-Path -LiteralPath $cutoverSource) -and
+        (Get-Content -LiteralPath (Join-Path $clone 'scripts\parallel\ParallelInstance.psm1') -Raw).Contains('function Get-ParallelCutoverMvpRefusal')
+    if ($fixtureKnowsCutover) {
+        $c = Get-Content -LiteralPath $cutoverSource -Raw | ConvertFrom-Json -AsHashtable
+        $c['productionCutover'] = [ordered]@{ approvalRecord = 'selftest: approval written in on the cutover day'; phase = 'trial' }
+        ConvertTo-Json -InputObject $c -Depth 12 | Set-Content -LiteralPath $cutoverFixture -Encoding utf8NoBOM
+    }
     Invoke-Git $clone @('init', '-q') | Out-Null
     Invoke-Git $clone @('-c', 'core.autocrlf=false', 'add', '-A') | Out-Null
     Invoke-Git $clone @('-c', 'user.name=selftest', '-c', 'user.email=selftest@invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'fixture') | Out-Null
@@ -519,6 +601,28 @@ try {
             -Name 'single-car definition: no per-vehicle credential asked for' -Detail (Get-Detail $run)
     } else {
         Write-Host "  SKIP  two-car cases: $ControlServerRef ships no two-car example" -ForegroundColor Yellow
+    }
+
+    # control-server#564 (review MW2): the definition check gets -ProductionCutover. A cutover definition with its record is
+    # accepted with the switch and reaches the dry-run stop; the same command without the switch is refused by the module.
+    if ($fixtureKnowsCutover) {
+        $cutoverKeys = @((Get-Content -LiteralPath $cutoverFixture -Raw | ConvertFrom-Json -AsHashtable)['journeyRuntime']['fleet'] | ForEach-Object { [string] $_['vehicleKey'] })
+        $cutoverSecrets = Join-Path $work 'secrets-cutover.xml'
+        $withCutover = Import-Clixml -LiteralPath $secretPath
+        foreach ($key in $cutoverKeys) { $withCutover["OnboardSafetyCredential:$key"] = & $fake "selftest-safety-$key" }
+        $withCutover | Export-Clixml -LiteralPath $cutoverSecrets
+        $cutoverCommon = $common.Clone(); $cutoverCommon.Remove('FakeMesIngestZip'); $cutoverCommon['SecretPath'] = $cutoverSecrets
+        $run = Invoke-Deploy ($cutoverCommon + @{ PackagePath = $samePackage; InstanceDefinitionPath = $cutoverFixture; ProductionCutover = $true })
+        Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains('WhatIf: stopping before the server is touched')) `
+            -Name 'cutover definition with its record and -ProductionCutover: accepted, stops at the dry run' -Detail (Get-Detail $run)
+        $run = Invoke-Deploy ($cutoverCommon + @{ PackagePath = $samePackage; InstanceDefinitionPath = $cutoverFixture })
+        Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('CUTOVER_RECORD_WITHOUT_SWITCH')) `
+            -Name 'the same definition without -ProductionCutover: refused by the definition check' -Detail (Get-Detail $run)
+        $run = Invoke-Deploy ($cutoverCommon + @{ PackagePath = $samePackage; InstanceDefinitionPath = $cutoverFixture; ProductionCutover = $true; LeaveProductionCutover = $true })
+        Write-Result -Ok ($null -ne $run.Error -and $run.Error.Contains('-LeaveProductionCutover leaves one; pass one')) `
+            -Name '-ProductionCutover with -LeaveProductionCutover: refused before anything' -Detail (Get-Detail $run)
+    } else {
+        Write-Host "  SKIP  cutover end-to-end cases: $ControlServerRef has no cutover switch or no cutover definition" -ForegroundColor Yellow
     }
 
     # 7. Default package: looked up by the clone's commit.
