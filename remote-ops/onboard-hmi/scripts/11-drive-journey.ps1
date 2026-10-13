@@ -69,6 +69,28 @@
     touches IO. -ScanOnly is that split -- submit the sublot from here, and stop
     before reaching for hands that do not exist.
 
+.PARAMETER ServerDatabase
+    -ServerDatabase and -ServerInstallRoot say which ControlServer instance's
+    database is read for the sublot and the open slot, and their defaults are the
+    production MVP service. Give both or neither (workspace#38): one alone is
+    refused with TARGET_PARTIAL, one MVP and one not with TARGET_MIXED_MVP, and
+    -SshAlias must be a vehicle of that instance -- agv01 with the MVP,
+    agv02/agv03 with any other (TARGET_VEHICLE_INSTANCE_MISMATCH). All before
+    anything reaches either machine. Before workspace#38, -SshAlias agv02 alone
+    read the MVP's pending sublot and open slot and drove agv02 with them.
+
+    The read-back is read-only. Run against the MVP it reads the MVP's service
+    registration and appsettings on factory01, as part of the MVP run that
+    needs the user's word anyway; run against a v2 instance it reads that
+    service and that configuration, never the MVP's.
+
+    NOT FILTERED BY VEHICLE. The sublot is the newest unanswered
+    SublotEntryRequested and the slot the newest WAITING_OPERATOR of the whole
+    instance. A v2 instance serves more than one car: run this only while no
+    other vehicle of that instance is at a station, or it may submit another
+    car's sublot (refused by the client) or wait on a slot that never opens on
+    this one (until the timeout).
+
 .PARAMETER Sublot
     Submit this instead of what the server asked for. Only useful for negative
     tests.
@@ -92,6 +114,12 @@
 .EXAMPLE
     # Real IO module: the scan is still automated, the hands are yours.
     ./11-drive-journey.ps1 -ScanOnly
+
+.EXAMPLE
+    # A spare car on a v2 instance: the vehicle and both server paths, or it is refused before anything is read.
+    ./11-drive-journey.ps1 -SshAlias agv02 `
+        -ServerInstallRoot 'C:\Program Files\8005 AGV\ControlServer.V2' `
+        -ServerDatabase 'C:\ProgramData\8005\ControlServer.V2\data\controlserver.db'
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -109,6 +137,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# workspace#38: which instance's data drives which vehicle, decided before anything reaches either machine.
+Import-Module (Join-Path $PSScriptRoot '..\..\factory-server\scripts\control-server\ControlServerTarget.psm1') -Force
+$target = Assert-ControlServerTargetParameters -Bound @($PSBoundParameters.Keys) `
+    -Values ([ordered]@{ ServerDatabase = $ServerDatabase; ServerInstallRoot = $ServerInstallRoot }) `
+    -Kinds ([ordered]@{ ServerDatabase = 'Database'; ServerInstallRoot = 'InstallRoot' })
+$null = Assert-ControlServerVehicleTarget -SshAlias $SshAlias -IsMvp $target.IsMvp
 
 if ($SkipScan -and $ScanOnly) {
     throw '-SkipScan drops the scan and -ScanOnly keeps nothing else, so together they ask for an empty run.'

@@ -2,7 +2,8 @@
 <#
 .SYNOPSIS
     Which ControlServer instance a factory-server script is about to act on, checked before it acts
-    (workspace#35). Imported by Set-JourneyRuntime.ps1 and 13-close-gates-when-idle.ps1.
+    (workspace#35). Imported by Set-JourneyRuntime.ps1 and 13-close-gates-when-idle.ps1, and since workspace#38 by
+    12-reset-journey-state.ps1, Complete-ChargingRun.ps1 and 11-drive-journey.ps1.
 
 .DESCRIPTION
     Both scripts default every instance parameter -- service name, configuration path, health URL, and for 13
@@ -30,6 +31,17 @@
                                         -ServerDatabase is another instance's database under
                                         C:\ProgramData\8005\. A database outside that tree is a rehearsal copy
                                         and is allowed, as 13 has always documented.
+        TARGET_DATABASE_NOT_OWN         (-RequireOwnDatabase: 12, Complete-ChargingRun) -ServerDatabase is not the
+                                        instance's own database at all. Those two stop the service before they
+                                        write, so a copy would stop one instance to write another file.
+        -BaseUrl is optional: without it Health.url is not checked (12 and Complete-ChargingRun take no URL).
+
+      Assert-ControlServerVehicleTarget (no I/O; 11 and 12, which also act on a vehicle)
+        TARGET_VEHICLE_INSTANCE_MISMATCH  -SshAlias is agv01 and the instance is not the MVP, or agv02/agv03 and it
+                                          is the MVP. agv01 runs against the MVP and the two spare cars against
+                                          v2 instances; until the cutover changes that, such a run reads one
+                                          side's data to act on the other side's vehicle. Another alias is not
+                                          judged.
 
     The MVP values are written out here, once. If the MVP ever moves, change them here.
 #>
@@ -44,6 +56,9 @@ $script:MvpTarget = [ordered]@{
     LogDirectory = 'C:\ProgramData\8005\ControlServer\logs'
 }
 $script:InstanceDataTree = 'C:\ProgramData\8005\'
+# SSH aliases (remote-ops/fleet.md) and the side each car runs against today. Change them at the cutover.
+$script:MvpVehicleAliases = @('agv01')
+$script:V2VehicleAliases = @('agv02', 'agv03')
 
 function ConvertTo-ComparablePath {
     param([AllowNull()][string] $Path)
@@ -72,10 +87,10 @@ function Get-UrlPort {
     return $uri.Port
 }
 
-# Whether one instance parameter names the MVP. Kind is ServiceName, InstallRoot, ConfigPath or BaseUrl.
+# Whether one instance parameter names the MVP. Kind is ServiceName, InstallRoot, ConfigPath, BaseUrl or Database.
 function Test-MvpTargetValue {
     param(
-        [Parameter(Mandatory)][ValidateSet('ServiceName', 'InstallRoot', 'ConfigPath', 'BaseUrl')][string] $Kind,
+        [Parameter(Mandatory)][ValidateSet('ServiceName', 'InstallRoot', 'ConfigPath', 'BaseUrl', 'Database')][string] $Kind,
         [AllowNull()][AllowEmptyString()][string] $Value
     )
     switch ($Kind) {
@@ -86,13 +101,15 @@ function Test-MvpTargetValue {
             return (ConvertTo-ComparablePath $directory) -ceq (ConvertTo-ComparablePath $script:MvpTarget.InstallRoot)
         }
         'BaseUrl' { return (Get-UrlPort $Value) -eq $script:MvpTarget.HealthPort }
+        'Database' { return (ConvertTo-ComparableDatabasePath $Value) -ceq (ConvertTo-ComparableDatabasePath $script:MvpTarget.Database) }
     }
 }
 
 <#
     Bound: the caller's $PSBoundParameters keys. Values: every instance parameter of the caller, name -> value
     (defaults included). Kinds: name -> the Test-MvpTargetValue kind of the parameters that say which instance
-    it is; a parameter in Values but not in Kinds (13's -ServerDatabase) only takes part in TARGET_PARTIAL.
+    it is; a parameter in Values but not in Kinds (13's -ServerDatabase, which may name a rehearsal copy) only takes
+    part in TARGET_PARTIAL.
 #>
 function Assert-ControlServerTargetParameters {
     param(
@@ -155,15 +172,18 @@ function Get-ServiceExecutableDirectory {
 <#
     Readback: the parsed JSON of the read-back script. Returns the log directory the configuration names
     (null when it names none) and, for -Database, whether it is a copy rather than the instance's own.
+    -BaseUrl is checked against Health.url only when given: 12 and Complete-ChargingRun work on the database, not on
+    the service's HTTP face, and take no URL.
 #>
 function Assert-ControlServerTargetReadback {
     param(
         [Parameter(Mandatory)] $Readback,
         [Parameter(Mandatory)][string] $ServiceName,
         [Parameter(Mandatory)][string] $ConfigPath,
-        [Parameter(Mandatory)][string] $BaseUrl,
+        [string] $BaseUrl,
         [string] $InstallRoot,
-        [string] $Database
+        [string] $Database,
+        [switch] $RequireOwnDatabase
     )
     $where = "service '$ServiceName', configuration $ConfigPath"
     $tail = 'Nothing was changed.'
@@ -182,9 +202,10 @@ function Assert-ControlServerTargetReadback {
             "$($mismatch -join ' and '). They are not one instance. $tail")
     }
 
-    $healthPort = Get-UrlPort $Readback.healthUrl
+    $checkHealth = $PSBoundParameters.ContainsKey('BaseUrl')
+    $healthPort = $checkHealth ? (Get-UrlPort $Readback.healthUrl) : 0
     if ($null -eq $healthPort) { throw "TARGET_HEALTH_URL_UNKNOWN: $where names no readable Health.url ('$($Readback.healthUrl)'), so -BaseUrl $BaseUrl cannot be checked against it. $tail" }
-    if ($healthPort -ne (Get-UrlPort $BaseUrl)) {
+    if ($checkHealth -and $healthPort -ne (Get-UrlPort $BaseUrl)) {
         throw "TARGET_BASE_URL_MISMATCH: $where binds health on $($Readback.healthUrl), not on -BaseUrl $BaseUrl's port. $tail"
     }
 
@@ -201,6 +222,10 @@ function Assert-ControlServerTargetReadback {
                 throw ("TARGET_DATABASE_OTHER_INSTANCE: -ServerDatabase $Database is under $($script:InstanceDataTree) but is not this " +
                     "instance's database ($own). A rehearsal copy belongs outside that tree. $tail")
             }
+            if ($RequireOwnDatabase) {
+                throw ("TARGET_DATABASE_NOT_OWN: -ServerDatabase $Database is not this instance's database ($own). This " +
+                    "script stops '$ServiceName' before it writes, so it only works on that instance's own file. $tail")
+            }
             $copy = $true
         }
     }
@@ -214,6 +239,21 @@ function Assert-ControlServerTargetReadback {
     }
 }
 
+# Whether the vehicle a run acts on runs against the instance whose data it reads or writes (workspace#38).
+function Assert-ControlServerVehicleTarget {
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $SshAlias, [Parameter(Mandatory)][bool] $IsMvp)
+    $alias = $SshAlias.Trim().ToLowerInvariant()
+    $side = ($alias -in $script:MvpVehicleAliases) ? 'MVP' : (($alias -in $script:V2VehicleAliases) ? 'v2' : $null)
+    if (-not $side) { return [pscustomobject]@{ Judged = $false } }
+    if (($side -eq 'MVP') -ne $IsMvp) {
+        $instance = $IsMvp ? 'the production MVP service (defaulted or given as the MVP''s)' : 'an instance that is not the MVP'
+        throw ("TARGET_VEHICLE_INSTANCE_MISMATCH: -SshAlias $SshAlias runs against the $side side, but the server " +
+            "parameters name $instance. Give the parameters of the instance that vehicle runs against. Nothing was read " +
+            "or changed.")
+    }
+    return [pscustomobject]@{ Judged = $true }
+}
+
 # Where Set-JourneyRuntime.ps1 tails the log after a restart: the directory the target's own configuration names;
 # failing that, the MVP's fixed one for the MVP only, and nothing for any other instance.
 function Resolve-ControlServerLogSource {
@@ -223,5 +263,5 @@ function Resolve-ControlServerLogSource {
     return [pscustomobject]@{ Directory = $directory; Filter = $Facts.LogFilter ?? 'controlserver-*.ndjson' }
 }
 
-Export-ModuleMember -Function Resolve-ControlServerLogSource, Test-MvpTargetValue, Assert-ControlServerTargetParameters,
+Export-ModuleMember -Function Resolve-ControlServerLogSource, Assert-ControlServerVehicleTarget, Test-MvpTargetValue, Assert-ControlServerTargetParameters,
     Get-ControlServerTargetReadbackScript, Get-ServiceExecutableDirectory, Assert-ControlServerTargetReadback, Get-UrlPort
