@@ -272,6 +272,92 @@ function Get-FaultRecoveryCredentialRefusal {
         'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
 }
 
+function Test-EmergencyReleaseOn {
+    <# workspace#49. Whether the definition turns the emergency stop release entries on: only a JSON true; absent is off. #>
+    param([System.Collections.IDictionary] $Definition)
+    $node = $Definition.Contains('emergencyStopRelease') ? $Definition['emergencyStopRelease'] : $null
+    return ($node -is [System.Collections.IDictionary] -and $node.Contains('enabled') -and $node['enabled'] -is [bool] -and $node['enabled'])
+}
+
+function Get-EmergencyReleaseCredentialRefusal {
+    <#
+        workspace#49. $null when deployable; otherwise the refusal: the definition turns the emergency stop release entries on
+        (REQ-0356; the loaded one CP-0011) and the store lacks one or both of their credentials. Both, because without the
+        empty-vehicle one the server refuses to start and without the loaded one its entry answers 503 -- which nobody would
+        notice until a loaded vehicle is stuck. Pure: -Present is the store keys that hold a value.
+    #>
+    param([System.Collections.IDictionary] $Definition, [string[]] $Present, [string] $SecretPath)
+    if (-not (Test-EmergencyReleaseOn -Definition $Definition)) { return $null }
+    $missing = @('EmergencyReleaseCredential', 'EmergencyLoadedReleaseCredential' | Where-Object { @($Present) -notcontains $_ })
+    if ($missing.Count -eq 0) { return $null }
+    return ("EMERGENCY_RELEASE_CREDENTIAL_MISSING: emergencyStopRelease.enabled is true, but $(($missing | ForEach-Object { "'$_'" }) -join ' and ') " +
+        "$($missing.Count -eq 1 ? 'is' : 'are') missing from $SecretPath. Run control-server\Set-ControlServerSecret.ps1 " +
+        '-NewEmergencyReleaseCredential Empty, Loaded (only the missing ones). Nothing was downloaded or copied.')
+}
+
+function Format-EmergencyReleaseSummary {
+    <# workspace#49. The line printed before anything is touched (under -WhatIf too): the switch asked for, and what is sent. #>
+    param([System.Collections.IDictionary] $Definition, [string[]] $Present)
+    $has = { param([string] $Key) (@($Present) -contains $Key) ? 'present' : 'absent' }
+    $empty = & $has 'EmergencyReleaseCredential'
+    $loaded = & $has 'EmergencyLoadedReleaseCredential'
+    $tail = ($empty -ceq 'present' -and $loaded -ceq 'present') ? '(both sent; values not shown)' :
+        (($empty -ceq 'absent' -and $loaded -ceq 'absent') ? '(the server keeps what its service already holds)' : '(sent where present; values not shown)')
+    return "EMERGENCY_STOP_RELEASE_REQUESTED=enabled=$((Test-EmergencyReleaseOn -Definition $Definition) ? 'true' : 'false') credential=$empty loadedCredential=$loaded $tail"
+}
+
+function Assert-EmergencyReleaseReported {
+    <#
+        workspace#49. The installer's EMERGENCY_STOP_RELEASE= line (control-server scripts/parallel, Format-ParallelEmergencyReleaseLine):
+        what the overlay turned on and which of the two credentials the service's Environment holds, read back after the write.
+        On, it must be exactly enabled=true with both set; off, enabled=false. No line from an installer that predates it: refused
+        when the definition carries the section (whether it is on is then unknown), warned otherwise.
+    #>
+    param([object[]] $Output, [System.Collections.IDictionary] $Definition)
+    $lines = @($Output | ForEach-Object { "$_".Trim() } | Where-Object { $_.StartsWith('EMERGENCY_STOP_RELEASE=', [StringComparison]::Ordinal) })
+    $on = Test-EmergencyReleaseOn -Definition $Definition
+    if ($lines.Count -eq 0) {
+        if ($Definition.Contains('emergencyStopRelease')) {
+            throw 'EMERGENCY_STOP_RELEASE_UNREAD: the definition carries emergencyStopRelease, but the installer reported no EMERGENCY_STOP_RELEASE line (a control-server checkout older than workspace#49), so whether the release entries are on is unknown.'
+        }
+        Write-Warning 'The installer reported no EMERGENCY_STOP_RELEASE line (a control-server checkout older than workspace#49); the definition does not turn the release entries on.'
+        return
+    }
+    $line = $lines[-1]
+    $ok = $on ? ($line -ceq 'EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set') :
+        $line.StartsWith('EMERGENCY_STOP_RELEASE=enabled=false ', [StringComparison]::Ordinal)
+    if (-not $ok) {
+        throw ("EMERGENCY_STOP_RELEASE_MISMATCH: the definition says emergencyStopRelease.enabled=$($on ? 'true' : 'false'), the installer reported '$line'. " +
+            'On, both credentials must be in the service''s Environment: without the loaded one its entry answers 503.')
+    }
+    Write-Step "Emergency stop release confirmed by the server: $line"
+}
+
+function Get-EmergencyReleaseProbeVerdict {
+    <#
+        workspace#49. $null when both entries answered as the definition means; otherwise the refusal. Pure. The probe is a POST
+        with an empty JSON body and no Authorization header, so it can never release anything: on, each entry is mounted and
+        has its credential, and answers 401; a 503 is an entry without its credential, a 404 an entry not mounted. Off, both
+        are not mounted: 404. 0 is no answer at all.
+    #>
+    param([bool] $Enabled, [int] $EmptyStatus, [int] $LoadedStatus)
+    $want = $Enabled ? 401 : 404
+    $problems = @()
+    foreach ($entry in @(@{ Name = 'empty-vehicle'; Status = $EmptyStatus }, @{ Name = 'loaded-vehicle'; Status = $LoadedStatus })) {
+        if ($entry.Status -eq $want) { continue }
+        $meaning = switch ($entry.Status) {
+            503 { 'mounted, but its credential is not set in the service' }
+            404 { 'not mounted' }
+            401 { 'mounted' }
+            0 { 'no answer' }
+            default { 'unexpected' }
+        }
+        $problems += "the $($entry.Name) entry answered $($entry.Status) ($meaning), expected $want"
+    }
+    if ($problems.Count -eq 0) { return $null }
+    return "EMERGENCY_RELEASE_PROBE_MISMATCH: emergencyStopRelease.enabled=$($Enabled ? 'true' : 'false'), but $($problems -join '; ')."
+}
+
 function Format-VehicleLines {
     <#
         The vehicle line(s) of the target summary. A definition with a fleet table
@@ -752,6 +838,8 @@ if ($Rollback) {
         $allow = Get-InstallerSwitchArgument -AllowRiotCreateDispatch $AllowRiotCreateDispatch -ProductionCutover $ProductionCutover -LeaveProductionCutover $LeaveProductionCutover
         $rollbackOutput = Invoke-Ssh @("pwsh -NoProfile -File `"$opsRoot\Install-ParallelInstanceLocal.ps1`" -Rollback -InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
         Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
+        # workspace#49: a rollback carries the two release credentials over from the service; the line says whether it did.
+        Assert-EmergencyReleaseReported -Output $rollbackOutput -Definition $definition
         Write-Step 'Rollback complete. The MVP service was not involved.'
         Write-Step "Record admissionPolicyVersion=$AdmissionPolicyVersionOverride in the deployment record: the next install needs a higher one."
         Write-Step 'The onboard half was NOT rolled back. The two ends do not negotiate versions --'
@@ -774,7 +862,7 @@ foreach ($key in @('RiotCallApiKey', 'OnboardCredential')) {
     }
 }
 $plain = @{}
-foreach ($key in @('RiotCallApiKey', 'MesIngestSharedSecret', 'V2FaultRecoveryCredential')) {
+foreach ($key in @('RiotCallApiKey', 'MesIngestSharedSecret', 'V2FaultRecoveryCredential', 'EmergencyReleaseCredential', 'EmergencyLoadedReleaseCredential')) {
     if ($secrets.ContainsKey($key) -and $secrets[$key]) {
         $plain[$key] = [System.Net.NetworkCredential]::new('', $secrets[$key]).Password
     }
@@ -793,6 +881,13 @@ if ($productionSource -and -not $plain.ContainsKey('MesIngestSharedSecret')) {
     throw ("mesIngest.source is 'production', but 'MesIngestSharedSecret' is missing from $SecretPath. " +
         'Run control-server\Set-ControlServerSecret.ps1 to add it. Nothing was downloaded or copied.')
 }
+# workspace#49. The emergency stop release entries' two credentials (Set-ControlServerSecret.ps1 -NewEmergencyReleaseCredential).
+# With the entries on, both are required and refused here, before anything is downloaded; off, they are sent when present, so
+# turning the entries on later needs no new secret on the server. The server makes the same check again.
+$releasePresent = @('EmergencyReleaseCredential', 'EmergencyLoadedReleaseCredential' | Where-Object { $plain.ContainsKey($_) })
+$releaseRefusal = Get-EmergencyReleaseCredentialRefusal -Definition $definition -Present $releasePresent -SecretPath $SecretPath
+if ($releaseRefusal) { throw $releaseRefusal }
+Write-Step (Format-EmergencyReleaseSummary -Definition $definition -Present $releasePresent)
 Write-Step ("Secrets loaded from the DPAPI store (V2FaultRecoveryCredential {0})" -f
     ($plain.ContainsKey('V2FaultRecoveryCredential') ? 'present, will be sent' : 'absent; the Host recovery entry and the foreign order release are off'))
 
@@ -927,6 +1022,14 @@ try {
     if ($plain.ContainsKey('V2FaultRecoveryCredential')) {
         $config['faultRecoveryCredential'] = $plain['V2FaultRecoveryCredential']
     }
+    # workspace#49: each only when there is one, as above; the installer writes them into the service's Environment under
+    # the instance's own names (CONTROL_SERVER_V2_EMERGENCY_RELEASE_CREDENTIAL, ..._LOADED_...).
+    if ($plain.ContainsKey('EmergencyReleaseCredential')) {
+        $config['emergencyReleaseCredential'] = $plain['EmergencyReleaseCredential']
+    }
+    if ($plain.ContainsKey('EmergencyLoadedReleaseCredential')) {
+        $config['emergencyLoadedReleaseCredential'] = $plain['EmergencyLoadedReleaseCredential']
+    }
     # control-server#600: vehicleKey -> value, one per roster row; the installer writes each into the service's Environment.
     if ($safetyCredentials.Count -gt 0) {
         $config['onboardSafetyCredentials'] = $safetyCredentials
@@ -1006,6 +1109,7 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
         "-DeploymentConfigPath `"$remoteConfig`" $fakeArgument" +
         "-InstanceDefinitionPath `"$opsRoot\instance.json`"$allow")
     Assert-MesIngestSourceReported -Output $installOutput
+    Assert-EmergencyReleaseReported -Output $installOutput -Definition $definition
 
     # --------------------------------------------------------------- check ---
 
@@ -1026,6 +1130,26 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
         throw "The parallel instance installed but is not reachable from this machine: $($_.Exception.Message)"
     }
 
+    # workspace#49. The release entries, asked from this machine the way an operator will reach them: a POST with an empty
+    # body and no Authorization header, which no entry can act on. Mounted with its credential, an entry answers 401; without
+    # its credential 503; not mounted 404. Checked now, not when a loaded vehicle is stuck. The loaded entry records this
+    # turned-away request in its administrator audit (UNAUTHORIZED, no vehicle), as it does every refused request.
+    $releaseStatus = [ordered]@{}
+    foreach ($route in @('/api/safety/v1/emergency-stop-releases', '/api/safety/v1/emergency-stop-releases/loaded')) {
+        try {
+            $answer = Invoke-WebRequest -Method Post -Uri "http://${healthBindAddress}:$healthPort$route" -ContentType 'application/json' `
+                -Body '{}' -NoProxy -TimeoutSec 20 -SkipHttpErrorCheck -UseBasicParsing
+            $releaseStatus[$route] = [int] $answer.StatusCode
+        } catch {
+            $releaseStatus[$route] = 0
+        }
+    }
+    $releaseOn = Test-EmergencyReleaseOn -Definition $definition
+    $statuses = @($releaseStatus.Values)
+    Write-Step "Emergency stop release probe (no credential sent): empty-vehicle $($statuses[0]), loaded-vehicle $($statuses[1]); expected $($releaseOn ? '401, 401' : '404, 404')"
+    $probeRefusal = Get-EmergencyReleaseProbeVerdict -Enabled $releaseOn -EmptyStatus $statuses[0] -LoadedStatus $statuses[1]
+    if ($probeRefusal) { throw $probeRefusal }
+
     Write-Step "Deployed. Onboard NDJSON: tcp://${listenAddress}:$onboardPort"
     Write-Step "Vehicle safety: http://${healthBindAddress}:$healthPort/api/onboard/v1/vehicle-safety"
     Write-Step "Package root on the server: $packageRoot"
@@ -1039,7 +1163,8 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
     }
 
 } finally {
-    # deploy-config.json on the server holds the RIoT call API key, the MesIngest shared secret, each roster
+    # deploy-config.json on the server holds the RIoT call API key, the MesIngest shared secret, the two emergency stop release
+    # credentials when the store has them (workspace#49), each roster
     # vehicle's projection credential (control-server#600) and, when the store has it, the v2 fault recovery credential
     # in plain text. The installer removes it on every way out -- once its body has started. This
     # covers the rest: parameter binding or Import-Module failing before that, an ssh session that

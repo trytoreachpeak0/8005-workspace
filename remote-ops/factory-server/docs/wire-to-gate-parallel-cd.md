@@ -634,6 +634,50 @@ control-server 检出复制 `ParallelInstance.psm1`、`ParallelHost.psm1` 到 `<
   或者是共享凭据）或 `SAFETY_PROJECTION_VEHICLE_MISMATCH`（403，两台车的变量写反了），不再只有一个 HTTP 401。单车实例与出厂安装照旧用共享凭据、
   不带车号。凭据值不进任何输出。
 
+### 7.3 急停解除入口与它的两把凭据（workspace#49）
+
+服务端因为自己的原因（例如行驶中门锁没锁，`CP-0011` 三类急停）让车急停之后，**唯一受治理的解除办法是服务端的两个人工确认入口**：
+车上无货走 `POST /api/safety/v1/emergency-stop-releases`，车上有货或说不清走 `.../emergency-stop-releases/loaded`。在 RIoT 上手动
+解锁不算数：v2 实例还在、原因还在时，服务端把它当成外部解除，立即再急停一次（`EMERGENCY_LATCH_RELEASED_EXTERNALLY`）。两个入口挂在
+同一个开关 `EmergencyStopRelease:enabled` 下，默认关；以前实例定义没有这一节、部署链也不送凭据，所以 v2 实例上这两个入口从来没挂出来过。
+
+- **定义**：`"emergencyStopRelease": { "enabled": true }`。可以不写（等于关，旧定义照旧能装）；但 `productionCutover.phase` 是
+  `production` 的定义**必须**写成 `true`，否则定义检查报 `EMERGENCY_STOP_RELEASE_REQUIRED_IN_PRODUCTION`（切换方案第 18a 步出的生产段定义）。
+  试跑段（`phase: "trial"`）的出厂定义没有打开它，理由见 control-server 那边的 PR。定义里不能写变量名：覆盖层固定写本实例自己的
+  `CONTROL_SERVER_V2_EMERGENCY_RELEASE_CREDENTIAL` 与 `CONTROL_SERVER_V2_EMERGENCY_LOADED_RELEASE_CREDENTIAL`，产品默认的变量名是 MVP 的。
+- **生成**：控制端跑 `control-server/Set-ControlServerSecret.ps1 -NewEmergencyReleaseCredential Empty, Loaded`。随机生成两个 256 位凭据，
+  存进同一个 DPAPI 秘密存储，键名 `EmergencyReleaseCredential`（无货）与 `EmergencyLoadedReleaseCredential`（有货）。只打印键名。已有的
+  不覆盖，要换加 `-Rotate`（换完重新跑 `19-deploy`）；生成的值与存储里任何一个已有值相同就拒绝、不存。`-Show` 列出两者有没有。
+- **下发**：定义打开了而存储里缺任何一把，`19-deploy` 在下载之前就拒绝（`EMERGENCY_RELEASE_CREDENTIAL_MISSING`，写明缺哪把）；`-WhatIf`
+  也会打印 `EMERGENCY_STOP_RELEASE_REQUESTED=...` 一行，说明开关和两把凭据在不在。两把都放进 `deploy-config.json`，服务器端安装脚本写进
+  v2 服务自己的 `Environment`（不是机器级环境变量：机器级变量 MVP 服务也看得到）。开关关着时有就照送，以后打开不必再补凭据；两把同值
+  直接拒绝，否则拿着无货凭据的人能解有货的车。回滚不带 `deploy-config.json`，沿用服务里已有的。
+- **回读**：服务器端安装脚本写完后读回服务 `Environment`，打印 `EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set`；
+  `19-deploy` 按定义核对这一行，不符就红（`EMERGENCY_STOP_RELEASE_MISMATCH`）。装完、`health/live` 通过之后，再从控制端向两个入口各发一个
+  **不带凭据、请求体为 `{}`** 的 POST：挂着且有凭据回 401，挂着但没凭据回 503，没挂回 404。打开时两个都要 401，关着时两个都要 404，
+  否则报 `EMERGENCY_RELEASE_PROBE_MISMATCH`。这样「有货入口回 503」在部署时就看得到，不用等到一台有货的车卡住。不带凭据的请求什么都解不了；
+  有货入口会把它当成一次被拒的请求记进管理员审计（`UNAUTHORIZED`、没有车号），每次部署多一条，这是有意的。
+
+**谁在什么地方、用什么调用这两个入口。**现在没有界面：车载屏不能确认解除，看板也没有这个按钮。调用的人是**在控制端（这台笔记本）上
+登录的值班工程师**，用 PowerShell 7 直接 POST 到 v2 实例的健康端口（`http://172.19.205.222:58107`），凭据从 DPAPI 存储里读，**只有存凭据
+的那个 Windows 用户能读出来**。现场人员发现车被服务端急停、原因已消除，就找值班工程师；值班工程师按 control-server 的
+`docs/emergency-stop-field-fallback.md`「路径二」（无货）或「路径三」（有货）逐条核实、再调用。有货入口还要求请求里的 `operatorId`
+在 v2 实例的现场人员角色名单（`fieldOperatorRoles.path`）里有 R-13 角色，否则回 409 `EMERGENCY_CONFIRMER_NOT_AUTHORIZED`。
+
+```powershell
+$store = Import-Clixml "$env:LOCALAPPDATA\AgvOpsSecrets\control-server-deployment.xml"
+# 无货用 EmergencyReleaseCredential + 下面的路由去掉 /loaded；有货用这一把
+$token = [System.Net.NetworkCredential]::new('', $store['EmergencyLoadedReleaseCredential']).Password
+$body = @{ agvId = 'agv02'; operatorId = '工号'; reason = '门锁已更换，现场复核锁闭'; causeCleared = $true; allDoorsClosed = $true; doorLockRepaired = $true } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri 'http://172.19.205.222:58107/api/safety/v1/emergency-stop-releases/loaded' -NoProxy `
+    -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $body
+Remove-Variable token, store
+```
+
+**和 `emergency-stop-field-fallback.md` 的关系**：那份文档讲急停之后该做什么、两个入口各核对什么、每个拒绝码什么意思，是操作说明，以它为准；
+它的示例写的是产品默认（MVP）的端口 `58007` 与变量名。本节只讲 v2 实例上这两个入口怎么部署出来、凭据放在哪、谁能用。那份文档里「不要在
+RIoT 里手动解锁 8005 的急停」在 v2 上同样成立；RIoT 手动解锁只剩下服务端已经停掉、或这台车根本不是被 8005 停下的情况。
+
 ---
 
 ## 8. 三处不显然的隔离细节
@@ -1190,6 +1234,8 @@ ssh factory01 "Get-ScheduledTask -TaskName '8005 AGV ControlServer V2 FakeMesIng
 | 输出里有 `CLEARANCE_EXIT_UNAVAILABLE` | 清桩出口不可用，后面列着原因码。第一阶段（入口关、名单为空）就是这样，**是预期**。不是第一阶段时：`FIELD_OPERATOR_ROSTER_EMPTY` 填名单（每台车的操作员号各一条，必须写 `operatorId`），`STATION_CLEARANCE_ENTRY_NOT_OFFERED`／`CHARGING_RECOVERY_ENTRY_NOT_OFFERED` 看定义里的 `vehicleFaultRecovery.enabled` 与凭据（第 7.1 节） |
 | 安装报 `CLEARANCE_EXIT_BROKEN` | 生效配置里缺了那两节，或入口开着而服务 `Environment` 里没有 `CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL`。后者先跑 `Set-ControlServerSecret.ps1` 录入 `V2FaultRecoveryCredential` 再重装 |
 | 部署一开始就报「'V2FaultRecoveryCredential' is missing」 | 定义里开了恢复入口，但控制端秘密存储里没有这个键（第 7.1 节）。机器还没被碰；用 `Set-ControlServerSecret.ps1` 录入后重跑 |
+| 部署一开始就报 `EMERGENCY_RELEASE_CREDENTIAL_MISSING` | 定义打开了急停解除入口，控制端存储里缺一把或两把凭据（第 7.3 节）。机器还没被碰；跑 `Set-ControlServerSecret.ps1 -NewEmergencyReleaseCredential Empty, Loaded`（只生成缺的那把）后重跑。服务器端报同名错误是 `deploy-config.json` 和服务里都没有（多见于回滚），同样机器还没被动过 |
+| 装完报 `EMERGENCY_STOP_RELEASE_MISMATCH` 或 `EMERGENCY_RELEASE_PROBE_MISMATCH` | 服务已经按新配置起来了，但急停解除入口不是定义说的样子（第 7.3 节）。看报错里哪个入口回了什么：503 是服务 `Environment` 里缺那把凭据，404 是开关没生效。不要手改已装文件，查明后重新部署 |
 | 部署一开始就报「needs one vehicle-safety projection credential per vehicle」 | 定义带车队表，控制端存储里缺那几台车的投影凭据（第 7.2 节）。机器还没被碰；跑 `Set-ControlServerSecret.ps1 -NewVehicleSafetyCredential <别名>` 后重跑，之后逐台重新部署车载端 |
 | 服务器端报 `ONBOARD_SAFETY_CREDENTIAL_MISSING`／`ONBOARD_SAFETY_CREDENTIAL_SHARED` | 车队表里某台车两处都没有投影凭据（多见于回滚或手工运行），或两台车同值、某台等于共享凭据（第 7.2 节）。机器还没被动过 |
 | 车载端一直「出发安全未就绪」，探针报 `vehicle-safety 401` 或 `403` | 401：车上的 `CONTROL_SERVER_ONBOARD_SAFETY_CREDENTIAL` 不是这台车在服务端的那一份（或连的是多车实例却用了 `-SharedSafetyCredential`）。403：地址里的 `vehicleKey` 与凭据的车不符或不在车队表里。重新 `06-deploy` 这台车（第 7.2 节） |

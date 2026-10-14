@@ -208,7 +208,7 @@ if (Get-Command Assert-MesIngestSourceReported -ErrorAction SilentlyContinue) {
 # revision knows; the end-to-end -WhatIf cases further down run the real script.
 Write-Host ''
 Write-Host 'Emergency stop release entries (workspace#49)' -ForegroundColor Cyan
-foreach ($name in @('Get-EmergencyReleaseCredentialRefusal', 'Format-EmergencyReleaseSummary', 'Assert-EmergencyReleaseReported', 'Get-EmergencyReleaseProbeVerdict')) {
+foreach ($name in @('Test-EmergencyReleaseOn', 'Get-EmergencyReleaseCredentialRefusal', 'Format-EmergencyReleaseSummary', 'Assert-EmergencyReleaseReported', 'Get-EmergencyReleaseProbeVerdict')) {
     $found = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if ($null -eq $found) { Write-Result -Ok $false -Name "$name is defined in the deploy script" -Detail 'not found' } else { . ([scriptblock]::Create($found.Extent.Text)) }
 }
