@@ -178,6 +178,30 @@ ssh agv02 '$c = Get-Content -Raw C:\8005\OnboardHmi\appsettings.json | ConvertFr
 2. **逐仓核对**（票面第 5 条，`REQ-0263`）：在真 IO 下逐仓开锁、放物、关门，现场填一份核对记录，`& $f verify --database $db --record <记录.json>` 写进库，
    `& $f status --database $db` 里该车 `slotsMissingVerification` 为空、`ready:true`。**不能拿旧库或试跑库的记录导进来**，那正是票面定义的失败。
    证据进 `evidence/field/<日期>-W3-S0-<车>/`。核对时开锁属于动车类，【问用户·动车】。逐仓核对的具体操作单不在本票范围，C-05 与调度对齐后另写。
+3. **只读核对：本阶段每台车的 IO 读回是真模块**（workspace#51，方案第 20 步之后、任何开闸之前）：
+   `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/20-check-production-io.ps1 -SshAlias <本阶段的车，逗号分隔> -RecordPath <EV>/<阶段>/io-check.json`。
+   它只读每台车 `C:\8005\OnboardHmi\appsettings.json` 的 `ioModule`，要求等于 `config/site-<车>.json` 的 `ioModule.host` 加端口 `502`；
+   每台车一行 `IO_CHECK <车> OK <地址>` 或 `IO_CHECK <车> REFUSED <拒绝码>`，全部 OK 才退出 0。【只读】`agv02`／`agv03` 不需问；含 `agv01` 时【问用户·agv01】（只读探测也算）。
+   **没有这份记录就不开闸**：生产段 `20-set-control-server-parallel-dispatch-gate.ps1 -State Open` 必须带 `-IoCheckRecord <EV>/<阶段>/io-check.json`，
+   记录要在 6 小时内、覆盖已装定义车队里的每一台、每台都 OK，否则以 `IO_CHECK_RECORD_REQUIRED`／`_STALE`／`_INCOMPLETE`／`_FAILED`／`_UNREADABLE` 拒绝，闸门不动。
+   每加一台车（S2、S3）重跑一次，`-SshAlias` 写上本阶段全部车。关闸不受影响。
+   **从 S2 起记录必须覆盖 `agv01`**（它进了已装车队），所以 S2 起每一次核对（含过期重跑）都读 `agv01`，每次都【问用户·agv01】，不能拿上一次的授权续。
+   **核对和开闸在同一台控制端上跑**：记录的 `checkedAt` 与开闸时判断「6 小时内」用的都是本机时钟，换一台时钟不同的机器会把新记录判成过期或未来。
+   **记录过期（超过 6 小时）就重跑同一条命令**：它只读、不需要别的前提，写出的新记录 `checkedAt` 是当下，把新文件传给 `-IoCheckRecord` 就能开闸。
+   S1→S4 分几次开闸、跨过 6 小时是正常的，每次开闸前重跑一次最省事；建议每次写到新文件名（如 `io-check-<阶段>-<时刻>.json`），旧记录留作证据。
+   重跑时某台车变成 `REFUSED`，说明它的配置在两次核对之间被改过，先查清楚再开闸，不要拿旧记录凑。
+
+   **遇到 `SERVER_PHASE_UNREAD`／`SERVER_INSTANCE_PORT_MISMATCH`／`SERVER_PHASE_INVALID` 怎么办**（06、09、开闸都可能报）：这是脚本读不到或读不懂服务端阶段，宁可拒绝。不要绕过，按原文逐项查：
+   - 原文含 `ssh factory01 failed` 或没有 `SERVER_PHASE` 行：控制端到 `factory01` 的 ssh 不通。先 `ssh factory01 hostname` 确认通道，通了再重跑原命令。
+   - 原文是 `there is no ... installed-instance.json`：这台 v2 实例还没经 `19-deploy-control-server-parallel.ps1` 装过（或被卸载了）。先按方案装服务端，再部署车。
+   - 原文是 `could not be read` 或 `not JSON`：只读看一眼 `ssh factory01 "Get-Content -Raw D:\zhengyushao\control-server-v2-ops\installed-instance.json"`，**不要手改这个文件**（它是安装器的记录），坏了就报调度，用 19 号重装。
+   - `SERVER_INSTANCE_PORT_MISMATCH`：装着的实例端口不是这次给的 `-OnboardPort`（或车上 `wireToGate.port`），多半是端口传错，或装的是另一份定义。核对端口，不要改成对得上的数字了事。
+   - `SERVER_PHASE_INVALID`：已装定义的 `phase` 既不是 `trial` 也不是 `production`（或 `productionCutover` 不是一个对象），报调度。
+   - 09 报 `SERVER_PHASE_UNREAD: the vehicle's wireToGate.port reads ...`：车上的 `appsettings.json` 缺 `wireToGate.port` 或不是数字，09 不知道车连哪个服务端。车载端配置不完整，用 `06-deploy-onboard-hmi.ps1` 重新部署（两个端口都传），不要手补这个字段。
+
+   生产段另有两道自动拦截（workspace#51），读的都是 factory01 上 v2 实例的 `installed-instance.json` 里 `productionCutover.phase`（一次只读 ssh，读不到就拒 `SERVER_PHASE_UNREAD`）：
+   `06-deploy-onboard-hmi.ps1` 渲染出的 `ioModule` 是回环、`1502` 或不是站点文件真模块时拒绝（`PRODUCTION_IO_LOOPBACK`／`_SIMULATOR_PORT`／`_NOT_SITE_MODULE`，`-KeepCurrentIo` 也拒）；
+   `09-switch-io-module.ps1 -Simulator` 拒绝。所以生产段车还在模拟器上时，先 `09 -RealModule`（授权、现场有人）再部署，或部署时带 `-UseSiteIo`。试跑段两者照旧放行模拟器。
 
 ## 6. 回滚
 
