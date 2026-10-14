@@ -305,8 +305,8 @@ if (Get-Command Invoke-EmergencyReleaseProbe -ErrorAction SilentlyContinue) {
         try { Invoke-EmergencyReleaseProbe -Definition $Definition -BaseUrl 'http://192.0.2.1:58107'; return 'OK' } catch { return $_.Exception.Message }
     }
     $v = Get-ProbeVerdict (New-ReleaseDefinition $true) 401 401
-    Write-Result -Ok ($v -ceq 'OK' -and ($script:ProbeCalls -join ' | ') -ceq ('POST http://192.0.2.1:58107/api/safety/v1/emergency-stop-releases body={} auth=False noproxy=True | ' +
-            'POST http://192.0.2.1:58107/api/safety/v1/emergency-stop-releases/loaded body={} auth=False noproxy=True')) `
+    Write-Result -Ok ($v -ceq 'OK' -and ($script:ProbeCalls -join ' | ') -ceq ('Post http://192.0.2.1:58107/api/safety/v1/emergency-stop-releases body={} auth=False noproxy=True | ' +
+            'Post http://192.0.2.1:58107/api/safety/v1/emergency-stop-releases/loaded body={} auth=False noproxy=True')) `
         -Name 'release probe: two POSTs with an empty body and no credential, direct (no proxy); 401/401 accepted' -Detail "$v; calls: $($script:ProbeCalls -join ' | ')"
     $v = Get-ProbeVerdict (New-ReleaseDefinition $true) 401 404
     Write-Result -Ok ($v.StartsWith('EMERGENCY_RELEASE_PROBE_MISMATCH:') -and $v.Contains('loaded-vehicle entry answered 404')) `
