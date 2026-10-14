@@ -18,6 +18,8 @@
 .OUTPUTS
     Exit code 0 when every writable repository matches the baseline, 1 otherwise.
     Deviations in read-only repositories never change the exit code.
+    Neither does the protocol version matrix (section 5): it is frozen inside a
+    released protocol, so it is reported until the next protocol release.
 #>
 [CmdletBinding()]
 param(
@@ -146,13 +148,18 @@ foreach ($repo in $Repos.Keys) {
 #    with it. It is the only copy outside a global.json, and it has no .csproj, so the loop above
 #    skips that repository. G1 used to assert it against a literal in g1-validate.mjs instead, so
 #    both went stale together at the 8.0.425 bump (8005-agv-program#36).
+#    Reported, never blocking, since the 8.0.426 bump (2026-10-14, 8005-agv-program#181): the matrix is
+#    a file in manifest/release.json, so changing it changes protocolReleaseManifestSha256, which every
+#    envelope carries -- that is a protocol re-release and a new tag, not a toolchain edit. Sync it in
+#    the next protocol release.
 $matrixRepo = '8005-agv-protocol'
+$matrixAuthority = 'deferred-to-protocol-release'
 $matrixItem = 'compatibility/implementation-version-matrix.json'
 $matrixPath = Join-Path $root $matrixRepo $matrixItem
 if (Test-Path -LiteralPath $matrixPath) {
     $matrixBaseline = (Get-Content -LiteralPath $matrixPath -Raw | ConvertFrom-Json -AsHashtable).sharedDevelopmentBaseline
     if ($matrixBaseline.dotnetSdk -ne $Baseline.Sdk) {
-        Add-Finding $matrixRepo $Repos[$matrixRepo] "$matrixItem dotnetSdk" $matrixBaseline.dotnetSdk $Baseline.Sdk
+        Add-Finding $matrixRepo $matrixAuthority "$matrixItem dotnetSdk" $matrixBaseline.dotnetSdk $Baseline.Sdk
     }
 
     # No file pins the runtime: it is whatever the pinned SDK bundles, so read it from that SDK.
@@ -163,7 +170,7 @@ if (Test-Path -LiteralPath $matrixPath) {
     if ($bundledProps -and (Test-Path -LiteralPath $bundledProps) -and
         (Get-Content -LiteralPath $bundledProps -Raw) -match '<BundledNETCoreAppPackageVersion>([^<]+)<') {
         if ($matrixBaseline.dotnetRuntime -ne $Matches[1]) {
-            Add-Finding $matrixRepo $Repos[$matrixRepo] "$matrixItem dotnetRuntime" $matrixBaseline.dotnetRuntime $Matches[1]
+            Add-Finding $matrixRepo $matrixAuthority "$matrixItem dotnetRuntime" $matrixBaseline.dotnetRuntime $Matches[1]
         }
     }
     else {
