@@ -111,6 +111,18 @@
     first deployment take the site value without either switch, as they always
     did. Excludes -KeepCurrentIo.
 
+.PARAMETER ServerSshAlias
+    workspace#51. The server whose phase decides whether the simulator IO may be
+    rendered: one read-only ssh reads productionCutover.phase from the v2
+    instance's installed-instance.json (ProductionIo.psm1), and checks that the
+    instance recorded there listens on -OnboardPort. In the production phase --
+    and on the MVP pair, which never asks -- ioModule must be the site file's
+    module on port 502: a loopback host, the simulator port 1502 or another
+    module is refused (PRODUCTION_IO_*), -KeepCurrentIo included. A record that
+    cannot be read is refused (SERVER_PHASE_UNREAD), never taken for trial.
+    Trial and a parallel instance without productionCutover keep the simulator
+    as before. Default factory01.
+
 .PARAMETER WhatIf
     Stage, verify and render the configuration locally, then stop before the
     vehicle is touched. The rendered configuration is printed. The read-only
@@ -161,7 +173,9 @@ param(
 
     [switch] $KeepCurrentIo,
 
-    [switch] $UseSiteIo
+    [switch] $UseSiteIo,
+
+    [string] $ServerSshAlias = 'factory01'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -442,6 +456,13 @@ if ($KeepCurrentIo -and $UseSiteIo) {
     throw 'IO_OPTIONS_EXCLUSIVE: -KeepCurrentIo and -UseSiteIo contradict each other; pass one.'
 }
 
+# workspace#51. Before the vehicle is asked anything: is the server it talks to in the production phase? Read from the
+# server (one read-only ssh), not from a switch on this call -- a switch is what gets forgotten. The MVP pair never asks.
+Import-Module (Join-Path $scriptRoot 'ProductionIo.psm1') -Force
+$serverPhase = (Read-ServerCutoverPhase -ServerSshAlias $ServerSshAlias -OnboardPort $OnboardPort).Phase
+Write-Step ("Server phase: {0} ({1})" -f $serverPhase, ($serverPhase -cin @('production', 'mvp') ?
+        'the IO must be the site file''s real module' : 'the simulator IO is allowed'))
+
 # ---------------------------------------------------------------- site values ---
 
 if (-not (Test-Path -LiteralPath $SitePath)) {
@@ -663,6 +684,8 @@ try {
     $config.ioModule.port = $ioTarget.Port
     Write-Step $ioTarget.Line
     if ($ioTarget.Warning) { Write-Warning $ioTarget.Warning }
+    # workspace#51: in the production phase (and on the MVP pair) nothing but the site file's module goes to the vehicle.
+    Assert-ProductionIoTarget -Phase $serverPhase -IoHost ([string] $ioTarget.Host) -IoPort ([int] $ioTarget.Port) -SiteHost ([string] $site.ioModule.host)
 
     # OnboardSettings.IsPlaceholderValue, reproduced exactly. Note that the two
     # sample identities are themselves placeholders: a site file copied from the
