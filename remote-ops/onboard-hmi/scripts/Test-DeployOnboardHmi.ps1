@@ -432,6 +432,15 @@ $alias = [string] $args[0]
 $command = ($args | Select-Object -Skip 1) -join ' '
 # -WhatIf:$false: the deploy script runs under -WhatIf, and that preference reaches this script too.
 Add-Content -LiteralPath $env:WS28_SSH_LOG -Value "$alias | $command" -WhatIf:$false
+# workspace#51: the server alias answers 06's phase probe, run in a fresh pwsh against the fixture record.
+if ($alias -ceq $env:WS51_SERVER_ALIAS) {
+    if ($command -notmatch '-EncodedCommand (\S+)') { "shim: unexpected server command: $command"; exit 255 }
+    $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
+    $rewritten = $decoded.Replace('D:\zhengyushao\control-server-v2-ops\installed-instance.json', $env:WS51_SERVER_RECORD)
+    if ($rewritten -ceq $decoded) { 'shim: the phase probe does not read the v2 installed-instance.json'; exit 255 }
+    & pwsh -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rewritten))) 2>&1
+    exit $LASTEXITCODE
+}
 if ($alias -cne $env:WS28_FAKE_ALIAS) { "shim: unexpected alias $alias"; exit 255 }
 if ($command -match 'Get-Process SQCD\.Agv\.Wpf') { 'STOPPED'; exit 0 }
 # workspace#32 review S1: the non -WhatIf run. The staging directory is local; the placement script the deploy script
@@ -475,12 +484,26 @@ exit 0
     $env:WS28_SSH_LOG = $sshLog
     $env:WS28_FAKE_ALIAS = $fakeAlias
     $env:WS28_VEHICLES = $vehicles
+    # workspace#51: the server whose phase 06 reads. Trial unless a case says otherwise, so the cases above it are unchanged.
+    $serverAlias = 'ws51-server-fake'
+    $env:WS51_SERVER_ALIAS = $serverAlias
+    function New-ServerRecord([string] $Name, [AllowNull()][string] $Phase, [int] $OnboardPort = 58105) {
+        $record = [ordered]@{ instanceId = 'factory01-v2-parallel'; onboardPort = $OnboardPort; journeyRuntime = @{ fleet = @(@{ vehicleKey = $agv02Key }) } }
+        if ($null -ne $Phase) { $record['productionCutover'] = @{ approvalRecord = 'test'; phase = $Phase } }
+        $path = Join-Path $work "server-$Name.json"
+        $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path
+        return $path
+    }
+    $serverTrial = New-ServerRecord 'trial' 'trial'
+    $serverProduction = New-ServerRecord 'production' 'production'
+    $env:WS51_SERVER_RECORD = $serverTrial
     function Invoke-Deploy([string] $IoState, [string[]] $Switches, [string[]] $Ports = @('-OnboardPort', '58105', '-HealthPort', '58107'),
-        [string] $Package = $zip, [string] $Site = $sitePath) {
+        [string] $Package = $zip, [string] $Site = $sitePath, [string] $Server = $serverTrial) {
         $env:WS28_IO_STATE = $IoState
+        $env:WS51_SERVER_RECORD = $Server
         if (Test-Path -LiteralPath $sshLog) { Remove-Item -LiteralPath $sshLog }
         $output = & pwsh -NoProfile -File $source -PackagePath $Package -SshAlias $fakeAlias -SitePath $Site -SecretPath $secretPath `
-            -WhatIf @Ports @Switches *>&1 | Out-String
+            -ServerSshAlias $serverAlias -WhatIf @Ports @Switches *>&1 | Out-String
         $code = $LASTEXITCODE
         # Strip colour codes, and rejoin error messages the console view wrapped at its width (newline, spaces, "| ").
         $output = ($output -replace '\x1b\[[0-9;]*m', '') -replace '\r?\n {2,}\| ?', ' '
@@ -498,7 +521,7 @@ exit 0
     function Test-Refused($d, [string] $Code) { return $d.Code -ne 0 -and $d.Output.Contains("${Code}:") -and $null -eq $d.Config }
 
     $d = Invoke-Deploy 'simulator' @()
-    Write-Result -Ok ((Test-Refused $d 'IO_SIMULATOR_TO_REAL_REFUSED') -and $d.Calls.Count -eq 2 -and $d.Output.Contains('Installed IO on ws28-offline-fake: present 127.0.0.1:1502')) `
+    Write-Result -Ok ((Test-Refused $d 'IO_SIMULATOR_TO_REAL_REFUSED') -and @($d.Calls | Where-Object { $_ -like "$fakeAlias |*" }).Count -eq 2 -and $d.Output.Contains('Installed IO on ws28-offline-fake: present 127.0.0.1:1502')) `
         -Name 'E2E simulator -> site, no switch: the probe reads 127.0.0.1:1502, refused, nothing rendered (2 ssh calls, both the shim)' -Detail "exit $($d.Code), io $(Get-Io $d), calls $($d.Calls.Count)`n$($d.Output)"
     $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo')
     Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq '127.0.0.1:1502' -and $d.Config.ioModule.unitId -eq 255 -and $d.Config.ioModule.doStartAddress -eq 100 -and
@@ -535,6 +558,38 @@ exit 0
     $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo', '-UseSiteIo')
     Write-Result -Ok ($d.Code -ne 0 -and $d.Output.Contains('IO_OPTIONS_EXCLUSIVE') -and $d.Calls.Count -eq 0) `
         -Name 'E2E both switches: refused before any ssh' -Detail "exit $($d.Code), calls $($d.Calls.Count)`n$($d.Output)"
+
+    # workspace#51. In the production phase of the cutover the rendered IO must be the site file's module: a vehicle
+    # kept on the simulator is refused before anything reaches it. Trial keeps the simulator, as before.
+    $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo') -Server $serverProduction
+    Write-Result -Ok ((Test-Refused $d 'PRODUCTION_IO_LOOPBACK') -and $d.Output.Contains('127.0.0.1:1502') -and $d.Output.Contains("${realSite}:502") -and
+        $d.Output.Contains('Server phase: production')) `
+        -Name 'E2E production phase + simulator + -KeepCurrentIo: refused (PRODUCTION_IO_LOOPBACK), nothing rendered' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    Write-Result -Ok (@($d.Calls | Where-Object { $_ -like "$serverAlias |*" }).Count -eq 1) -Name 'E2E production phase: 06 read the phase from the server once' -Detail ($d.Calls -join "`n")
+    $d = Invoke-Deploy 'unknown' @('-KeepCurrentIo') -Server $serverProduction
+    Write-Result -Ok (Test-Refused $d 'PRODUCTION_IO_NOT_SITE_MODULE') -Name 'E2E production phase + unknown IO kept: refused (PRODUCTION_IO_NOT_SITE_MODULE)' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'real' @() -Server $serverProduction
+    Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq "${realSite}:502" -and $d.Output.Contains('Server phase: production')) `
+        -Name 'E2E production phase + real module: renders the site module' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'simulator' @('-UseSiteIo') -Server $serverProduction
+    Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq "${realSite}:502") `
+        -Name 'E2E production phase + simulator + -UseSiteIo: renders the site module (the authorised switch to real IO)' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo')
+    Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq '127.0.0.1:1502' -and $d.Output.Contains('Server phase: trial')) `
+        -Name 'E2E trial phase + simulator + -KeepCurrentIo: renders 127.0.0.1:1502 as before' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo') -Server (New-ServerRecord 'parallel' $null)
+    Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq '127.0.0.1:1502' -and $d.Output.Contains('Server phase: none')) `
+        -Name 'E2E a parallel instance without productionCutover + simulator: renders 127.0.0.1:1502 as before' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo') -Server (Join-Path $work 'no-server-record.json')
+    Write-Result -Ok ((Test-Refused $d 'SERVER_PHASE_UNREAD') -and @($d.Calls | Where-Object { $_ -like "$fakeAlias |*" }).Count -eq 0) `
+        -Name 'E2E no installed record on the server: refused (SERVER_PHASE_UNREAD) before the vehicle is asked anything' -Detail "exit $($d.Code)`n$($d.Output)`n$($d.Calls -join "`n")"
+    $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo') -Server (New-ServerRecord 'otherport' 'trial' -OnboardPort 58205)
+    Write-Result -Ok (Test-Refused $d 'SERVER_INSTANCE_PORT_MISMATCH') -Name 'E2E the installed instance is on another port: refused (SERVER_INSTANCE_PORT_MISMATCH)' -Detail "exit $($d.Code)`n$($d.Output)"
+    $d = Invoke-Deploy 'real' @() -Ports @('-OnboardPort', '58005', '-HealthPort', '58007') -Package $zip -Site $sitePathMvp -Server (Join-Path $work 'no-server-record.json')
+    Write-Result -Ok ($d.Code -eq 0 -and @($d.Calls | Where-Object { $_ -like "$serverAlias |*" }).Count -eq 0 -and $d.Output.Contains('Server phase: mvp')) `
+        -Name 'E2E the MVP pair: counted as production without asking the v2 server; the real module renders' -Detail "exit $($d.Code)`n$($d.Output)`n$($d.Calls -join "`n")"
+    $d = Invoke-Deploy 'simulator' @('-KeepCurrentIo') -Ports @('-OnboardPort', '58005', '-HealthPort', '58007') -Package $zip -Site $sitePathMvp
+    Write-Result -Ok (Test-Refused $d 'PRODUCTION_IO_LOOPBACK') -Name 'E2E the MVP pair + simulator kept: refused (PRODUCTION_IO_LOOPBACK)' -Detail "exit $($d.Code)`n$($d.Output)"
 
     # workspace#32. A refusal on the ports happens before any ssh, so nothing -- no probe, no credential -- goes anywhere.
     function Get-Endpoint($d) { return ($null -eq $d.Config) ? '(none rendered)' : [string] $d.Config.vehicleSafety.endpoint }
@@ -582,8 +637,9 @@ exit 0
         $env:WS32_PLACE_MODE = $Mode
         $env:WS28_IO_STATE = 'real'
         if (Test-Path -LiteralPath $sshLog) { Remove-Item -LiteralPath $sshLog }
+        $env:WS51_SERVER_RECORD = $serverTrial
         $output = & pwsh -NoProfile -File $source -PackagePath $zipV2 -SshAlias $fakeAlias -SitePath $sitePath -SecretPath $secretPath `
-            -OnboardPort 58105 -HealthPort 58107 -StagingRoot (Join-Path $work "staging-$Mode") *>&1 | Out-String
+            -ServerSshAlias $serverAlias -OnboardPort 58105 -HealthPort 58107 -StagingRoot (Join-Path $work "staging-$Mode") *>&1 | Out-String
         $code = $LASTEXITCODE
         $output = ($output -replace '\x1b\[[0-9;]*m', '') -replace '\r?\n {2,}\| ?', ' '
         $calls = @((Test-Path -LiteralPath $sshLog) ? (Get-Content -LiteralPath $sshLog) : @())
@@ -598,7 +654,7 @@ exit 0
         -Name 'E2E a placement that succeeds: 06 exits 0 and hands off with "Staged"' -Detail "exit $($p.Code)`n$($p.Output)"
 } finally {
     $env:PATH = $savedPath
-    Remove-Item Env:WS28_SSH_LOG, Env:WS28_FAKE_ALIAS, Env:WS28_IO_STATE, Env:WS28_VEHICLES, Env:WS32_PLACE_MODE -ErrorAction SilentlyContinue
+    Remove-Item Env:WS28_SSH_LOG, Env:WS28_FAKE_ALIAS, Env:WS28_IO_STATE, Env:WS28_VEHICLES, Env:WS32_PLACE_MODE, Env:WS51_SERVER_ALIAS, Env:WS51_SERVER_RECORD -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
