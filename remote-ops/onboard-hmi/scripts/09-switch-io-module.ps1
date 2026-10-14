@@ -15,8 +15,17 @@
     IoModuleSettings.Validate only rejects placeholder values, and the real
     module address is the line commented out in the repository's appsettings.json.
     This is not a workaround; it is the configuration the simulator was written
-    for. The production guard that rejects loopback applies to wireToGate.host
-    and vehicleSafety.endpoint, not to IO.
+    for. The client's own production guard that rejects loopback applies to
+    wireToGate.host and vehicleSafety.endpoint, not to IO.
+
+    Since workspace#51 this script refuses -Simulator when the server the
+    vehicle talks to is in the production phase of the cutover
+    (PRODUCTION_IO_LOOPBACK): the port in the vehicle's own wireToGate.port
+    says which server, the MVP's 58005 counts as production without asking,
+    and any other is read from the v2 instance's installed-instance.json on
+    -ServerSshAlias (ProductionIo.psm1, one read-only ssh). A record that
+    cannot be read is refused rather than taken for trial. In trial the
+    simulator is allowed as before. -RealModule is never refused by it.
 
     This is a post-deployment change to the file on the vehicle. Since
     workspace#28 a later run of 06-deploy-onboard-hmi.ps1 no longer puts the
@@ -45,7 +54,8 @@ param(
     [string] $SitePath,
     [string] $ConfigPath = 'C:\8005\OnboardHmi\appsettings.json',
     [int] $SimulatorPort = 1502,
-    [int] $RealModulePort = 502
+    [int] $RealModulePort = 502,
+    [string] $ServerSshAlias = 'factory01'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,12 +98,25 @@ $state = Invoke-Onboard @"
 [pscustomobject]@{
     host    = `$c.ioModule.host
     port    = `$c.ioModule.port
+    serverPort = `$c.wireToGate.port
     onboard = [bool](Get-Process 'SQCD.Agv.Wpf' -ErrorAction SilentlyContinue)
 } | ConvertTo-Json -Compress
 "@ | ConvertFrom-Json
 
 Write-Host ''
 Write-Host "Onboard IO target is currently $($state.host):$($state.port)."
+
+# workspace#51: never onto the simulator while the vehicle's server is in production (the MVP's 58005 included).
+if (-not $RealModule) {
+    Import-Module (Join-Path $PSScriptRoot 'ProductionIo.psm1') -Force
+    $serverPort = 0
+    if (-not [int]::TryParse([string] $state.serverPort, [ref]$serverPort) -or $serverPort -le 0) {
+        throw "SERVER_PHASE_UNREAD: the vehicle's wireToGate.port reads '$($state.serverPort)', so which server it talks to is unknown. Refusing rather than guessing."
+    }
+    $serverPhase = (Read-ServerCutoverPhase -ServerSshAlias $ServerSshAlias -OnboardPort $serverPort).Phase
+    Write-Step "Server phase (onboard port $serverPort): $serverPhase"
+    Assert-ProductionIoTarget -Phase $serverPhase -IoHost $targetHost -IoPort $targetPort -SiteHost ([string] $site.ioModule.host)
+}
 
 if ($state.onboard) {
     throw "SQCD.Agv.Wpf is running on $SshAlias. Close it from the vehicle's own desktop session first -- the client reads this file once, at startup."

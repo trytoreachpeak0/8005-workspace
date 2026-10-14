@@ -59,6 +59,14 @@
     Only its opsRoot is used, to find the server-side scripts; the server takes everything else from
     the definition it recorded at install. Default: the repository's scripts/parallel/instance-factory01-v2.json.
 
+.PARAMETER IoCheckRecord
+    workspace#51. Required for -State Open when the installed definition is in the production phase of the cutover
+    (productionCutover.phase "production", read over one read-only ssh before anything is copied): the record that
+    remote-ops/onboard-hmi/scripts/20-check-production-io.ps1 wrote after reading every vehicle's ioModule back. It
+    must be under six hours old, cover every vehicle of the installed fleet and say OK for each; otherwise the gate
+    is not opened (IO_CHECK_RECORD_*). In the trial phase, outside a cutover, and for -State Closed it is not asked
+    for: closing a gate is never held up.
+
 .PARAMETER WhatIf
     The dry run: stages this commit's copy in <opsRoot>\dispatch-gate\<commit> (the same staging a real
     run does), then runs it with -WhatIf, which prints what the journey check says now, and stops. It
@@ -67,7 +75,9 @@
     Staging only adds files under this commit's own directory -- nothing the service, its configuration,
     the MVP or 19-deploy-control-server-parallel.ps1 reads -- and staging the same commit again writes
     the same bytes. So it is not counted as a change for ShouldProcess; what -WhatIf withholds is the
-    gate change and the restart.
+    gate change and the restart. workspace#51: in the production phase -State Open -WhatIf asks for
+    -IoCheckRecord too -- the check runs before staging, read-only, so the dry run shows the refusal the
+    real run would meet.
 
 .EXAMPLE
     pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 -State Closed -ControlServerRepository <checkout> -WhatIf
@@ -80,7 +90,9 @@ param(
 
     [string] $InstanceDefinitionPath,
 
-    [string] $SshAlias = 'factory01'
+    [string] $SshAlias = 'factory01',
+
+    [string] $IoCheckRecord
 )
 
 $ErrorActionPreference = 'Stop'
@@ -161,6 +173,24 @@ if ($contract -lt $script:RequiredCutoverContract) {
     $checkoutRefusal = Get-CheckoutCutoverRefusal -ModuleKnowsCutover $false -InstalledIsCutover (@($probe | ForEach-Object { "$_".Trim() }) -contains 'True') -Repository $repoRoot
     if ($checkoutRefusal) { throw $checkoutRefusal }
 }
+# workspace#51. No gate opens in the production phase until every vehicle of the installed fleet has been read back on
+# its real IO module. Read-only, before anything is copied; closing is never held up.
+if ($State -eq 'Open') {
+    Import-Module (Join-Path $PSScriptRoot '../../onboard-hmi/scripts/ProductionIo.psm1') -Force
+    $installedPhase = Read-ServerCutoverPhase -ServerSshAlias $SshAlias -OnboardPort 0 -RecordPath "$opsRoot\installed-instance.json"
+    Write-Step "Installed phase: $($installedPhase.Phase); fleet: $(@($installedPhase.FleetVehicleKeys) -join ', ')"
+    if ($installedPhase.Phase -ceq 'production') {
+        $record = $null
+        if ($IoCheckRecord) {
+            try { $record = Get-Content -Raw -LiteralPath $IoCheckRecord | ConvertFrom-Json -AsHashtable }
+            catch { $record = @{ kind = "unreadable: $($_.Exception.Message)" } }
+        }
+        $ioRefusal = Get-IoCheckRecordRefusal -Record $record -FleetVehicleKeys @($installedPhase.FleetVehicleKeys) -Now ([DateTimeOffset]::Now)
+        if ($ioRefusal) { throw "$ioRefusal The gate was not changed and nothing was copied." }
+        Write-Step "IO check record ${IoCheckRecord}: every vehicle of the installed fleet is on its real module (checked $($record['checkedAt']))"
+    }
+}
+
 $gateRoot = "$opsRoot\dispatch-gate\$commit"
 $remoteScript = "$gateRoot\$serverScript"
 # The installed definition stays where the installer recorded it, beside 19's unit; the gate script is told where.
