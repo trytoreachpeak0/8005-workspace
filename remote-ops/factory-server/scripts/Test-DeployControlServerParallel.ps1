@@ -204,6 +204,89 @@ if (Get-Command Assert-MesIngestSourceReported -ErrorAction SilentlyContinue) {
     Remove-Variable definition, sourceProperty, mesIngestSource, productionSource, ProductionCutover -ErrorAction SilentlyContinue
 }
 
+# workspace#49: the two emergency stop release credentials. Hand-made definitions, so this holds whatever the fixture's
+# revision knows; the end-to-end -WhatIf cases further down run the real script.
+Write-Host ''
+Write-Host 'Emergency stop release entries (workspace#49)' -ForegroundColor Cyan
+foreach ($name in @('Get-EmergencyReleaseCredentialRefusal', 'Format-EmergencyReleaseSummary', 'Assert-EmergencyReleaseReported', 'Get-EmergencyReleaseProbeVerdict')) {
+    $found = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    if ($null -eq $found) { Write-Result -Ok $false -Name "$name is defined in the deploy script" -Detail 'not found' } else { . ([scriptblock]::Create($found.Extent.Text)) }
+}
+function New-ReleaseDefinition($Enabled) {
+    $d = [ordered]@{ instanceId = 'selftest' }
+    if ($null -ne $Enabled) { $d['emergencyStopRelease'] = @{ enabled = $Enabled } }
+    return $d
+}
+$bothKeys = @('EmergencyReleaseCredential', 'EmergencyLoadedReleaseCredential')
+if (Get-Command Get-EmergencyReleaseCredentialRefusal -ErrorAction SilentlyContinue) {
+    foreach ($case in @(
+            @{ Name = 'on, both in the store'; Enabled = $true; Present = $bothKeys; Missing = @() }
+            @{ Name = 'on, the loaded one missing'; Enabled = $true; Present = @('EmergencyReleaseCredential'); Missing = @('EmergencyLoadedReleaseCredential') }
+            @{ Name = 'on, the empty-vehicle one missing'; Enabled = $true; Present = @('EmergencyLoadedReleaseCredential'); Missing = @('EmergencyReleaseCredential') }
+            @{ Name = 'on, neither'; Enabled = $true; Present = @(); Missing = $bothKeys }
+            @{ Name = 'off, neither'; Enabled = $false; Present = @(); Missing = @() }
+            @{ Name = 'no section (a definition before workspace#49), neither'; Enabled = $null; Present = @(); Missing = @() }
+            @{ Name = 'enabled as the string "true" (the definition check refuses it), neither'; Enabled = 'true'; Present = @(); Missing = @() })) {
+        $r = Get-EmergencyReleaseCredentialRefusal -Definition (New-ReleaseDefinition $case.Enabled) -Present $case.Present -SecretPath 'C:\selftest\secrets.xml'
+        $ok = ($case.Missing.Count -eq 0) ? ($null -eq $r) :
+            ($r -is [string] -and $r.StartsWith('EMERGENCY_RELEASE_CREDENTIAL_MISSING: emergencyStopRelease.enabled is true') -and
+                @($case.Missing | Where-Object { -not $r.Contains("'$_'") }).Count -eq 0 -and
+                @($bothKeys | Where-Object { $case.Missing -notcontains $_ -and $r.Contains("'$_'") }).Count -eq 0 -and
+                $r.Contains('C:\selftest\secrets.xml') -and $r.Contains('-NewEmergencyReleaseCredential') -and $r.EndsWith('Nothing was downloaded or copied.'))
+        Write-Result -Ok $ok -Name "release credential precheck: $($case.Name) -> $($case.Missing.Count -eq 0 ? 'accepted' : 'refused')" -Detail "got: $r"
+    }
+}
+if (Get-Command Format-EmergencyReleaseSummary -ErrorAction SilentlyContinue) {
+    foreach ($case in @(
+            @{ Enabled = $true; Present = $bothKeys; Expect = 'EMERGENCY_STOP_RELEASE_REQUESTED=enabled=true credential=present loadedCredential=present (both sent; values not shown)' }
+            @{ Enabled = $false; Present = @(); Expect = 'EMERGENCY_STOP_RELEASE_REQUESTED=enabled=false credential=absent loadedCredential=absent (the server keeps what its service already holds)' }
+            @{ Enabled = $null; Present = @('EmergencyReleaseCredential'); Expect = 'EMERGENCY_STOP_RELEASE_REQUESTED=enabled=false credential=present loadedCredential=absent (sent where present; values not shown)' })) {
+        $got = Format-EmergencyReleaseSummary -Definition (New-ReleaseDefinition $case.Enabled) -Present $case.Present
+        Write-Result -Ok ($got -ceq $case.Expect) -Name "release summary: $($case.Expect)" -Detail "got '$got'"
+    }
+}
+if (Get-Command Assert-EmergencyReleaseReported -ErrorAction SilentlyContinue) {
+    function Write-Step { param([string] $Message) }
+    function Get-ReleaseReportVerdict($Definition, [object[]] $Lines) {
+        try { $null = Assert-EmergencyReleaseReported -Output $Lines -Definition $Definition 3>$null; return 'OK' } catch { return $_.Exception.Message }
+    }
+    $on = New-ReleaseDefinition $true
+    foreach ($case in @(
+            @{ Name = 'on, the installer read both credentials back'; Definition = $on; Lines = @('x', 'EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set'); Expect = 'OK' }
+            @{ Name = 'on, the loaded credential not in the service (its entry would answer 503)'; Definition = $on; Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=unset'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
+            @{ Name = 'on, but the Host was configured off'; Definition = $on; Lines = @('EMERGENCY_STOP_RELEASE=enabled=false credential=set loadedCredential=set'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
+            @{ Name = 'on, no line at all (an installer older than workspace#49)'; Definition = $on; Lines = @('x'); Expect = 'EMERGENCY_STOP_RELEASE_UNREAD:' }
+            @{ Name = 'off, the line says off'; Definition = (New-ReleaseDefinition $false); Lines = @('EMERGENCY_STOP_RELEASE=enabled=false credential=unset loadedCredential=unset'); Expect = 'OK' }
+            @{ Name = 'off, but the Host was configured on'; Definition = (New-ReleaseDefinition $false); Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
+            @{ Name = 'no section and no line (an older checkout): warned, not refused'; Definition = (New-ReleaseDefinition $null); Lines = @('x'); Expect = 'OK' })) {
+        $v = Get-ReleaseReportVerdict $case.Definition $case.Lines
+        Write-Result -Ok ($v.StartsWith($case.Expect)) -Name "release read-back: $($case.Name)" -Detail $v
+    }
+    Remove-Item function:Write-Step
+}
+if (Get-Command Get-EmergencyReleaseProbeVerdict -ErrorAction SilentlyContinue) {
+    foreach ($case in @(
+            @{ Enabled = $true; Empty = 401; Loaded = 401; Expect = $null }
+            @{ Enabled = $true; Empty = 401; Loaded = 503; Expect = 'loaded-vehicle entry answered 503' }
+            @{ Enabled = $true; Empty = 404; Loaded = 404; Expect = 'empty-vehicle entry answered 404' }
+            @{ Enabled = $true; Empty = 503; Loaded = 401; Expect = 'empty-vehicle entry answered 503' }
+            @{ Enabled = $true; Empty = 0; Loaded = 401; Expect = 'empty-vehicle entry answered 0' }
+            @{ Enabled = $true; Empty = 200; Loaded = 401; Expect = 'empty-vehicle entry answered 200' }
+            @{ Enabled = $false; Empty = 404; Loaded = 404; Expect = $null }
+            @{ Enabled = $false; Empty = 401; Loaded = 404; Expect = 'empty-vehicle entry answered 401' })) {
+        $r = Get-EmergencyReleaseProbeVerdict -Enabled $case.Enabled -EmptyStatus $case.Empty -LoadedStatus $case.Loaded
+        $ok = ($null -eq $case.Expect) ? ($null -eq $r) : ($r -is [string] -and $r.StartsWith('EMERGENCY_RELEASE_PROBE_MISMATCH:') -and $r.Contains($case.Expect))
+        Write-Result -Ok $ok -Name "release probe: enabled=$($case.Enabled), empty $($case.Empty), loaded $($case.Loaded) -> $($null -eq $case.Expect ? 'as expected' : 'refused')" -Detail "got: $r"
+    }
+}
+$deployText49 = Get-Content -LiteralPath $ScriptPath -Raw
+Write-Result -Ok ($deployText49.Contains('$config[''emergencyReleaseCredential''] = $plain[''EmergencyReleaseCredential'']') -and
+        $deployText49.Contains('$config[''emergencyLoadedReleaseCredential''] = $plain[''EmergencyLoadedReleaseCredential'']') -and
+        $deployText49.Contains('Assert-EmergencyReleaseReported -Output $installOutput -Definition $definition') -and
+        $deployText49.Contains('Get-EmergencyReleaseProbeVerdict -Enabled') -and
+        $deployText49.Contains('if ($releaseRefusal) { throw $releaseRefusal }')) `
+    -Name 'the deploy script sends both credentials, checks the installer''s line and probes both entries after the install' -Detail 'pinned text missing'
+
 # 20-set-control-server-parallel-dispatch-gate.ps1, review S5: an old checkout and an installed cutover.
 $gateScript = Join-Path (Split-Path -Parent $ScriptPath) '20-set-control-server-parallel-dispatch-gate.ps1'
 $gateAst = [System.Management.Automation.Language.Parser]::ParseFile($gateScript, [ref]$null, [ref]$null)
@@ -274,6 +357,15 @@ try {
         $c = Get-Content -LiteralPath $cutoverSource -Raw | ConvertFrom-Json -AsHashtable
         $c['productionCutover'] = [ordered]@{ approvalRecord = 'selftest: approval written in on the cutover day'; phase = 'trial' }
         ConvertTo-Json -InputObject $c -Depth 12 | Set-Content -LiteralPath $cutoverFixture -Encoding utf8NoBOM
+    }
+    # workspace#49: a committed copy of the shipped definition with the emergency stop release entries on, when the
+    # revision's module knows the section.
+    $releaseFixture = Join-Path $clone 'scripts\parallel\instance-factory01-v2.release-selftest.json'
+    $fixtureKnowsRelease = (Get-Content -LiteralPath (Join-Path $clone 'scripts\parallel\ParallelInstance.psm1') -Raw).Contains("'emergencyStopRelease' = @('enabled')")
+    if ($fixtureKnowsRelease) {
+        $r = Get-Content -LiteralPath (Join-Path $clone 'scripts\parallel\instance-factory01-v2.json') -Raw | ConvertFrom-Json -AsHashtable
+        $r['emergencyStopRelease'] = [ordered]@{ enabled = $true }
+        ConvertTo-Json -InputObject $r -Depth 12 | Set-Content -LiteralPath $releaseFixture -Encoding utf8NoBOM
     }
     Invoke-Git $clone @('init', '-q') | Out-Null
     Invoke-Git $clone @('-c', 'core.autocrlf=false', 'add', '-A') | Out-Null
@@ -647,6 +739,31 @@ try {
             -Name '-ProductionCutover with -LeaveProductionCutover: refused before anything' -Detail (Get-Detail $run)
     } else {
         Write-Host "  SKIP  cutover end-to-end cases: $ControlServerRef has no cutover switch or no cutover definition" -ForegroundColor Yellow
+    }
+
+    # workspace#49: the emergency stop release entries, end to end under -WhatIf. The store has neither release credential.
+    $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage })
+    Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains('EMERGENCY_STOP_RELEASE_REQUESTED=enabled=false credential=absent loadedCredential=absent')) `
+        -Name 'release: a definition without the section deploys as before, and the summary says the entries are off, under -WhatIf' -Detail (Get-Detail $run)
+    if ($fixtureKnowsRelease) {
+        $run = Invoke-Deploy ($common + @{ PackagePath = $samePackage; InstanceDefinitionPath = $releaseFixture })
+        Write-Result -Ok ($null -ne $run.Error -and $run.Error.StartsWith('EMERGENCY_RELEASE_CREDENTIAL_MISSING:') -and
+                $run.Error.Contains("'EmergencyReleaseCredential'") -and $run.Error.Contains("'EmergencyLoadedReleaseCredential'") -and
+                -not $run.Text.Contains('WhatIf: stopping before the server is touched') -and @($global:GhCalls).Count -eq 0) `
+            -Name 'release on, store without the two credentials: refused before anything is staged, naming both' -Detail (Get-Detail $run)
+        $releaseSecrets = Join-Path $work 'secrets-release.xml'
+        $withRelease = Import-Clixml -LiteralPath $secretPath
+        $withRelease['EmergencyReleaseCredential'] = & $fake 'selftest-release-empty'
+        $withRelease['EmergencyLoadedReleaseCredential'] = & $fake 'selftest-release-loaded'
+        $withRelease | Export-Clixml -LiteralPath $releaseSecrets
+        $released = $common.Clone(); $released['SecretPath'] = $releaseSecrets
+        $run = Invoke-Deploy ($released + @{ PackagePath = $samePackage; InstanceDefinitionPath = $releaseFixture })
+        Write-Result -Ok ($null -eq $run.Error -and $run.Text.Contains('WhatIf: stopping before the server is touched') -and
+                $run.Text.Contains('EMERGENCY_STOP_RELEASE_REQUESTED=enabled=true credential=present loadedCredential=present (both sent; values not shown)') -and
+                -not $run.Text.Contains('selftest-release-')) `
+            -Name 'release on, both credentials in the store: accepted under -WhatIf, the summary says both are sent, no value printed' -Detail (Get-Detail $run)
+    } else {
+        Write-Host "  SKIP  release end-to-end cases: $ControlServerRef's module has no emergencyStopRelease section" -ForegroundColor Yellow
     }
 
     # 7. Default package: looked up by the clone's commit.

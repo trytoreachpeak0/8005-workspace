@@ -190,6 +190,74 @@ try {
 } catch { $err = $_.Exception.Message }
 Write-Result -Ok ($null -eq $err) -Name 'the per-vehicle credential cases ran to the end' -Detail "threw: $err"
 
+# 7. workspace#49: the two emergency stop release credentials (empty-vehicle entry, loaded-vehicle entry). Generated here,
+#    never typed, never imported; a present one is refused unless -Rotate; a generated value equal to anything else in the
+#    store is refused rather than stored -- the two equal would let the empty-vehicle credential release a loaded vehicle.
+Write-Host ''
+Write-Host 'Emergency stop release credentials (workspace#49)' -ForegroundColor Cyan
+$releaseDefinition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Add-EmergencyReleaseSecret' }, $true)
+Write-Result -Ok ($null -ne $releaseDefinition) -Name 'Add-EmergencyReleaseSecret is defined in Set-ControlServerSecret.ps1' -Detail 'missing'
+if ($null -ne $releaseDefinition) { . ([scriptblock]::Create($releaseDefinition.Extent.Text)) }
+$parameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'NewEmergencyReleaseCredential' })
+$validateSet = @($parameter | ForEach-Object { $_.Attributes } | Where-Object { $_.TypeName.Name -ceq 'ValidateSet' } |
+    ForEach-Object { $_.PositionalArguments | ForEach-Object Value })
+Write-Result -Ok ($parameter.Count -eq 1 -and ($validateSet -join ',') -ceq 'Empty,Loaded') `
+    -Name '-NewEmergencyReleaseCredential takes Empty and/or Loaded' -Detail "parameter $($parameter.Count); ValidateSet: $($validateSet -join ',')"
+$rotateSets = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'Rotate' } | ForEach-Object { $_.Attributes } |
+    Where-Object { $_.TypeName.Name -ceq 'Parameter' } | ForEach-Object { $_.NamedArguments } | Where-Object { $_.ArgumentName -ceq 'ParameterSetName' } |
+    ForEach-Object { $_.Argument.Value })
+Write-Result -Ok ($rotateSets -ccontains 'EmergencyRelease' -and $rotateSets -ccontains 'VehicleSafety') `
+    -Name '-Rotate works with -NewEmergencyReleaseCredential as with -NewVehicleSafetyCredential' -Detail "parameter sets: $($rotateSets -join ',')"
+$releaseKeys = @('EmergencyReleaseCredential', 'EmergencyLoadedReleaseCredential')
+Write-Result -Ok (@($releaseKeys | Where-Object { $required -ccontains $_ -or $optional -ccontains $_ -or $imported -ccontains $_ }).Count -eq 0) `
+    -Name 'the two release credentials are never prompted for and never imported' -Detail "required: $($required -join ','); optional: $($optional -join ','); imported: $($imported -join ',')"
+$err = $null
+try {
+    $counter = @{ N = 0 }
+    $fixed = { $counter.N++; & $secure "release-$($counter.N)" }.GetNewClosure()
+    $store = New-MvpStore
+    $store = Add-EmergencyReleaseSecret -Store $store -Which 'Empty' -NewSecret $fixed
+    $store = Add-EmergencyReleaseSecret -Store $store -Which 'Loaded' -NewSecret $fixed
+    Write-Result -Ok ((& $plainOf $store['EmergencyReleaseCredential']) -ceq 'release-1' -and (& $plainOf $store['EmergencyLoadedReleaseCredential']) -ceq 'release-2') `
+        -Name 'Empty and Loaded are generated into EmergencyReleaseCredential and EmergencyLoadedReleaseCredential' -Detail "keys: $(@($store.Keys) -join ',')"
+
+    foreach ($which in @('Empty', 'Loaded')) {
+        $before = & $plainOf $store[($which -ceq 'Empty') ? 'EmergencyReleaseCredential' : 'EmergencyLoadedReleaseCredential']
+        $refused = $null
+        try { $null = Add-EmergencyReleaseSecret -Store $store -Which $which -NewSecret $fixed } catch { $refused = $_.Exception.Message }
+        $after = & $plainOf $store[($which -ceq 'Empty') ? 'EmergencyReleaseCredential' : 'EmergencyLoadedReleaseCredential']
+        Write-Result -Ok ($null -ne $refused -and $refused.StartsWith('EMERGENCY_RELEASE_CREDENTIAL_PRESENT:') -and $refused.Contains('-Rotate') -and
+            $after -ceq $before -and -not $refused.Contains('release-')) `
+            -Name "a present $which credential is not replaced without -Rotate, and the refusal shows no value" -Detail "error: $refused"
+    }
+    $null = Add-EmergencyReleaseSecret -Store $store -Which 'Loaded' -NewSecret $fixed -Rotate
+    Write-Result -Ok ((& $plainOf $store['EmergencyLoadedReleaseCredential']) -cnotin @('release-2', '') -and (& $plainOf $store['EmergencyReleaseCredential']) -ceq 'release-1') `
+        -Name '-Rotate replaces only the one named' -Detail ''
+
+    # A generator that hands back a value already in the store -- the other release credential, the shared onboard
+    # credential, the v2 fault recovery credential, a vehicle's projection credential -- is refused, nothing stored.
+    $store = New-MvpStore
+    $store['V2FaultRecoveryCredential'] = & $secure 'v2-value'
+    $store['OnboardSafetyCredential:BROKERX-x'] = & $secure 'vehicle-value'
+    $store['EmergencyReleaseCredential'] = & $secure 'empty-value'
+    foreach ($case in @(@{ Name = 'the empty-vehicle release credential'; Value = 'empty-value' }, @{ Name = 'the shared onboard credential'; Value = 'value-of-OnboardCredential' },
+            @{ Name = 'the v2 fault recovery credential'; Value = 'v2-value' }, @{ Name = 'a vehicle''s projection credential'; Value = 'vehicle-value' })) {
+        $same = { & $secure $case.Value }.GetNewClosure()
+        $refused = $null
+        try { $null = Add-EmergencyReleaseSecret -Store $store -Which 'Loaded' -NewSecret $same } catch { $refused = $_.Exception.Message }
+        Write-Result -Ok ($null -ne $refused -and $refused.StartsWith('EMERGENCY_RELEASE_CREDENTIAL_NOT_UNIQUE:') -and -not $store.ContainsKey('EmergencyLoadedReleaseCredential') -and
+            -not $refused.Contains($case.Value)) -Name "a generated Loaded value equal to $($case.Name) is refused, not stored" -Detail "error: $refused"
+    }
+} catch { $err = $_.Exception.Message }
+Write-Result -Ok ($null -eq $err) -Name 'the release credential cases ran to the end' -Detail "threw: $err"
+$scriptText = Get-Content -Raw -LiteralPath $source
+Write-Result -Ok ($scriptText.Contains("'EmergencyReleaseCredential'") -and $scriptText.Contains("'EmergencyLoadedReleaseCredential'") -and
+    $scriptText.Contains('Add-EmergencyReleaseSecret -Store $store -Which $which -NewSecret { New-VehicleSafetySecret } -Rotate:$Rotate')) `
+    -Name 'the script generates them with the same 256-bit generator as the projection credentials' -Detail 'pinned text missing'
+$deployText = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\19-deploy-control-server-parallel.ps1')
+Write-Result -Ok ($deployText.Contains("'EmergencyReleaseCredential'") -and $deployText.Contains("'EmergencyLoadedReleaseCredential'")) `
+    -Name '19-deploy-control-server-parallel.ps1 reads both store keys by the same literals' -Detail 'literal not found'
+
 # The two deployment scripts read the same store key; the name is the contract between the three files.
 foreach ($consumer in @('..\19-deploy-control-server-parallel.ps1', '..\..\..\onboard-hmi\scripts\06-deploy-onboard-hmi.ps1')) {
     $text = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $consumer)
