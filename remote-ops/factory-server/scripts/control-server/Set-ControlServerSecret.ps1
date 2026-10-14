@@ -47,6 +47,13 @@
     roster vehicle's to the parallel instance, and 06-deploy writes a vehicle's
     own into CONTROL_SERVER_ONBOARD_SAFETY_CREDENTIAL on that vehicle.
 
+    Since workspace#49 it also holds the v2 instance's two emergency stop release credentials, EmergencyReleaseCredential
+    (the empty-vehicle entry) and EmergencyLoadedReleaseCredential (the loaded-vehicle entry, CP-0011). Those are never
+    typed either: -NewEmergencyReleaseCredential generates them. 19-deploy sends both to the parallel instance, which
+    writes them into its own service Environment as CONTROL_SERVER_V2_EMERGENCY_RELEASE_CREDENTIAL and
+    CONTROL_SERVER_V2_EMERGENCY_LOADED_RELEASE_CREDENTIAL. Who uses them, and how: remote-ops/factory-server/docs/
+    wire-to-gate-parallel-cd.md, the emergency stop release section.
+
 .PARAMETER Import
     Take whatever is already on this machine instead of retyping it:
     CONTROL_SERVER_RIOT_CALL_API_KEY and CONTROL_SERVER_OPERATOR_ID from the
@@ -71,8 +78,14 @@
     one is refused unless -Rotate; a rotated credential needs the server and
     that vehicle deployed again. Prints names only, never a value.
 
+.PARAMETER NewEmergencyReleaseCredential
+    workspace#49. Generate the v2 instance's emergency stop release credentials: Empty (the empty-vehicle entry), Loaded
+    (the loaded-vehicle entry), or both. One that is present is refused unless -Rotate; a generated value equal to any
+    other value in the store is refused and nothing is stored. A new or rotated credential takes effect on the next
+    19-deploy. Prints names only, never a value.
+
 .PARAMETER Rotate
-    With -NewVehicleSafetyCredential: replace a credential that is present.
+    With -NewVehicleSafetyCredential or -NewEmergencyReleaseCredential: replace a credential that is present.
 
 .PARAMETER Show
     List which secrets are present and how long they are. Never prints a value.
@@ -88,6 +101,9 @@
 
 .EXAMPLE
     ./Set-ControlServerSecret.ps1 -NewVehicleSafetyCredential agv02, agv03
+
+.EXAMPLE
+    ./Set-ControlServerSecret.ps1 -NewEmergencyReleaseCredential Empty, Loaded
 #>
 [CmdletBinding(DefaultParameterSetName = 'Set')]
 param(
@@ -105,7 +121,12 @@ param(
     [ValidatePattern('^agv0[123]$')]
     [string[]] $NewVehicleSafetyCredential,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'EmergencyRelease')]
+    [ValidateSet('Empty', 'Loaded', IgnoreCase = $false)]
+    [string[]] $NewEmergencyReleaseCredential,
+
     [Parameter(ParameterSetName = 'VehicleSafety')]
+    [Parameter(ParameterSetName = 'EmergencyRelease')]
     [switch] $Rotate,
 
     [Parameter(ParameterSetName = 'VehicleSafety')]
@@ -240,9 +261,42 @@ function Add-VehicleSafetySecret {
     return $Store
 }
 
+function Add-EmergencyReleaseSecret {
+    <#
+        workspace#49. Puts a new emergency stop release credential into the store and returns the store: -Which Empty is
+        EmergencyReleaseCredential, Loaded is EmergencyLoadedReleaseCredential -- the literals 19-deploy reads. Refuses one
+        that is present unless -Rotate, and a generated value equal to any other value in the store: the two release
+        credentials equal would let the empty-vehicle one release a loaded vehicle, and a value shared with any other
+        secret is one more place it leaks from. Pure apart from -NewSecret, which the self-test replaces. Errors name the
+        key, never a value.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable] $Store,
+        [Parameter(Mandatory = $true)][ValidateSet('Empty', 'Loaded', IgnoreCase = $false)][string] $Which,
+        [Parameter(Mandatory = $true)][scriptblock] $NewSecret,
+        [switch] $Rotate
+    )
+    $key = ($Which -ceq 'Empty') ? 'EmergencyReleaseCredential' : 'EmergencyLoadedReleaseCredential'
+    if ($Store.ContainsKey($key) -and $Store[$key] -and -not $Rotate) {
+        throw "EMERGENCY_RELEASE_CREDENTIAL_PRESENT: $key is already in the store. Pass -Rotate to replace it, then deploy the v2 server again."
+    }
+    $value = & $NewSecret
+    $text = [System.Net.NetworkCredential]::new('', $value).Password
+    foreach ($other in @($Store.Keys)) {
+        if ($other -ceq $key -or -not $Store[$other] -or $Store[$other] -isnot [securestring]) { continue }
+        if ([System.Net.NetworkCredential]::new('', $Store[$other]).Password -ceq $text) {
+            throw "EMERGENCY_RELEASE_CREDENTIAL_NOT_UNIQUE: the value generated for $key equals the one stored as $other. Nothing was stored; run again."
+        }
+    }
+    $Store[$key] = $value
+    return $Store
+}
+
 $required = @('RiotCallApiKey', 'OnboardCredential', 'MesIngestSharedSecret', 'OperatorId')
 $optional = @('V2FaultRecoveryCredential')
 $keys = $required + $optional
+# workspace#49. Generated, never prompted for or imported.
+$releaseKeys = @('EmergencyReleaseCredential', 'EmergencyLoadedReleaseCredential')
 
 $store = @{}
 if (Test-Path -LiteralPath $SecretPath) { $store = Import-Clixml -LiteralPath $SecretPath }
@@ -250,7 +304,8 @@ if (Test-Path -LiteralPath $SecretPath) { $store = Import-Clixml -LiteralPath $S
 if ($Show) {
     # control-server#600: the per-vehicle projection credentials there are, by store key (names a vehicle, not a value).
     $vehicleKeys = @($store.Keys | Where-Object { $_.StartsWith('OnboardSafetyCredential:', [StringComparison]::Ordinal) } | Sort-Object)
-    foreach ($line in Format-SecretPresence -Keys ($keys + $vehicleKeys) -Store $store -Optional $optional) {
+    # workspace#49: shown as optional -- generated with -NewEmergencyReleaseCredential, needed once the definition turns the entries on.
+    foreach ($line in Format-SecretPresence -Keys ($keys + $releaseKeys + $vehicleKeys) -Store $store -Optional ($optional + $releaseKeys)) {
         Write-Host $line -ForegroundColor ($line -match 'MISSING$' ? 'Yellow' : 'Green')
     }
     Write-Host "  store: $SecretPath"
@@ -273,6 +328,19 @@ if ($NewVehicleSafetyCredential) {
     $store | Export-Clixml -LiteralPath $SecretPath -Force
     Write-Host "Stored in $SecretPath (DPAPI-encrypted; readable only by $env:USERNAME on $env:COMPUTERNAME). Values were not shown." -ForegroundColor Green
     Write-Host 'Next: deploy the v2 server (19-deploy-control-server-parallel.ps1), then each vehicle (06-deploy-onboard-hmi.ps1 -SshAlias <agv02|agv03> -OnboardPort 58105 -HealthPort 58107).' -ForegroundColor DarkGray
+    return
+}
+
+if ($NewEmergencyReleaseCredential) {
+    foreach ($which in @($NewEmergencyReleaseCredential | Select-Object -Unique)) {
+        $store = Add-EmergencyReleaseSecret -Store $store -Which $which -NewSecret { New-VehicleSafetySecret } -Rotate:$Rotate
+        Write-Host "  generated $(($which -ceq 'Empty') ? 'EmergencyReleaseCredential' : 'EmergencyLoadedReleaseCredential') ($which)$($Rotate ? ', replacing the old one' : '')" -ForegroundColor Green
+    }
+    $directory = Split-Path -Parent $SecretPath
+    if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $store | Export-Clixml -LiteralPath $SecretPath -Force
+    Write-Host "Stored in $SecretPath (DPAPI-encrypted; readable only by $env:USERNAME on $env:COMPUTERNAME). Values were not shown." -ForegroundColor Green
+    Write-Host 'Next: deploy the v2 server (19-deploy-control-server-parallel.ps1); it sends both to the instance and probes both entries.' -ForegroundColor DarkGray
     return
 }
 
