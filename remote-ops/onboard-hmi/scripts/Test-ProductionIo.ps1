@@ -66,7 +66,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 function New-InstalledRecord([string] $Name, [AllowNull()][string] $Phase, [int] $OnboardPort = 58105, [string[]] $Fleet = @($agv02Key)) {
     $definition = [ordered]@{ instanceId = 'factory01-v2-parallel'; onboardPort = $OnboardPort
         journeyRuntime = @{ fleet = @($Fleet | ForEach-Object { @{ agvId = 'x'; vehicleKey = $_ } }) } }
-    if ($null -ne $Phase) { $definition['productionCutover'] = @{ approvalRecord = 'test'; phase = $Phase } }
+    if (-not [string]::IsNullOrEmpty($Phase)) { $definition['productionCutover'] = @{ approvalRecord = 'test'; phase = $Phase } }
     $path = Join-Path $work "$Name.json"
     $definition | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path
     return $path
@@ -152,10 +152,10 @@ try {
     Write-Result -Ok ("$r".StartsWith('IO_CHECK_RECORD_STALE:')) -Name 'a record dated in the future is refused' -Detail "refusal: $r"
     $r = & $check (& $record @((& $ok 'agv02' $agv02Key))) @($agv02Key, $agv01Key)
     Write-Result -Ok ("$r".StartsWith('IO_CHECK_RECORD_INCOMPLETE:') -and "$r".Contains($agv01Key)) -Name 'a fleet car missing from the record is refused (IO_CHECK_RECORD_INCOMPLETE), naming it' -Detail "refusal: $r"
-    $failed = & $ok 'agv02' $agv02Key; $failed['ok'] = $false; $failed['host'] = '127.0.0.1'; $failed['port'] = 1502; $failed['refusal'] = 'PRODUCTION_IO_LOOPBACK: x'
-    $r = & $check (& $record @($failed))
+    $failedCar = & $ok 'agv02' $agv02Key; $failedCar['ok'] = $false; $failedCar['host'] = '127.0.0.1'; $failedCar['port'] = 1502; $failedCar['refusal'] = 'PRODUCTION_IO_LOOPBACK: x'
+    $r = & $check (& $record @($failedCar))
     Write-Result -Ok ("$r".StartsWith('IO_CHECK_RECORD_FAILED:') -and "$r".Contains('agv02')) -Name 'a record with a car not OK is refused (IO_CHECK_RECORD_FAILED)' -Detail "refusal: $r"
-    $r = & $check (& $record @((& $ok 'agv02' $agv02Key), $failed))
+    $r = & $check (& $record @((& $ok 'agv02' $agv02Key), $failedCar))
     Write-Result -Ok ("$r".StartsWith('IO_CHECK_RECORD_FAILED:')) -Name 'a failed car outside the fleet still refuses the record' -Detail "refusal: $r"
     $r = & $check @{ kind = 'something-else'; checkedAt = $now.ToString('o'); results = @() }
     Write-Result -Ok ("$r".StartsWith('IO_CHECK_RECORD_UNREADABLE:')) -Name 'a record of another kind is refused (IO_CHECK_RECORD_UNREADABLE)' -Detail "refusal: $r"

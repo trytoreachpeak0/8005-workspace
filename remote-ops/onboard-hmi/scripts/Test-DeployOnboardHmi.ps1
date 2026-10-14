@@ -489,7 +489,7 @@ exit 0
     $env:WS51_SERVER_ALIAS = $serverAlias
     function New-ServerRecord([string] $Name, [AllowNull()][string] $Phase, [int] $OnboardPort = 58105) {
         $record = [ordered]@{ instanceId = 'factory01-v2-parallel'; onboardPort = $OnboardPort; journeyRuntime = @{ fleet = @(@{ vehicleKey = $agv02Key }) } }
-        if ($null -ne $Phase) { $record['productionCutover'] = @{ approvalRecord = 'test'; phase = $Phase } }
+        if (-not [string]::IsNullOrEmpty($Phase)) { $record['productionCutover'] = @{ approvalRecord = 'test'; phase = $Phase } }
         $path = Join-Path $work "server-$Name.json"
         $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path
         return $path
@@ -567,7 +567,7 @@ exit 0
         -Name 'E2E production phase + simulator + -KeepCurrentIo: refused (PRODUCTION_IO_LOOPBACK), nothing rendered' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
     Write-Result -Ok (@($d.Calls | Where-Object { $_ -like "$serverAlias |*" }).Count -eq 1) -Name 'E2E production phase: 06 read the phase from the server once' -Detail ($d.Calls -join "`n")
     $d = Invoke-Deploy 'unknown' @('-KeepCurrentIo') -Server $serverProduction
-    Write-Result -Ok (Test-Refused $d 'PRODUCTION_IO_NOT_SITE_MODULE') -Name 'E2E production phase + unknown IO kept: refused (PRODUCTION_IO_NOT_SITE_MODULE)' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
+    Write-Result -Ok (Test-Refused $d 'PRODUCTION_IO_LOOPBACK') -Name 'E2E production phase + unknown IO (localhost.) kept: refused (PRODUCTION_IO_LOOPBACK: localhost. is loopback)' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
     $d = Invoke-Deploy 'real' @() -Server $serverProduction
     Write-Result -Ok ($d.Code -eq 0 -and (Get-Io $d) -ceq "${realSite}:502" -and $d.Output.Contains('Server phase: production')) `
         -Name 'E2E production phase + real module: renders the site module' -Detail "exit $($d.Code), io $(Get-Io $d)`n$($d.Output)"
