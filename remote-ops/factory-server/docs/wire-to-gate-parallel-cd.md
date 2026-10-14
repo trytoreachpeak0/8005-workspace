@@ -652,11 +652,17 @@ control-server 检出复制 `ParallelInstance.psm1`、`ParallelHost.psm1` 到 `<
   也会打印 `EMERGENCY_STOP_RELEASE_REQUESTED=...` 一行，说明开关和两把凭据在不在。两把都放进 `deploy-config.json`，服务器端安装脚本写进
   v2 服务自己的 `Environment`（不是机器级环境变量：机器级变量 MVP 服务也看得到）。开关关着时有就照送，以后打开不必再补凭据；两把同值
   直接拒绝，否则拿着无货凭据的人能解有货的车。回滚不带 `deploy-config.json`，沿用服务里已有的。
-- **回读**：服务器端安装脚本写完后读回服务 `Environment`，打印 `EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set`；
-  `19-deploy` 按定义核对这一行，不符就红（`EMERGENCY_STOP_RELEASE_MISMATCH`）。装完、`health/live` 通过之后，再从控制端向两个入口各发一个
+- **回读**：服务器端安装脚本写完后读回服务 `Environment` 和现场人员角色名单，打印
+  `EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set loadedConfirmers=<数字>`。最后一项是名单里持 R-13 的人数（只给数字，
+  不给名字）：有货入口只认 R-13，而名单文件不存在时安装器建的是空名单。`19-deploy` 按定义核对这一行，不符就红（`EMERGENCY_STOP_RELEASE_MISMATCH`）；
+  入口打开而 R-13 人数为 0 时，生产段定义直接红（`EMERGENCY_RELEASE_NO_LOADED_CONFIRMER`），其他定义只告警。装完（以及回滚完）、
+  再从控制端向两个入口各发一个
   **不带凭据、请求体为 `{}`** 的 POST：挂着且有凭据回 401，挂着但没凭据回 503，没挂回 404。打开时两个都要 401，关着时两个都要 404，
-  否则报 `EMERGENCY_RELEASE_PROBE_MISMATCH`。这样「有货入口回 503」在部署时就看得到，不用等到一台有货的车卡住。不带凭据的请求什么都解不了；
+  否则报 `EMERGENCY_RELEASE_PROBE_MISMATCH`。这样「有货入口回 503」在部署时就看得到，不用等到一台有货的车卡住；回滚到 control-server#539
+  之前的包时有货入口根本不存在（404），也在这里看得到。不带凭据的请求什么都解不了；
   有货入口会把它当成一次被拒的请求记进管理员审计（`UNAUTHORIZED`、没有车号），每次部署多一条，这是有意的。
+- **环境变量层不能盖过它**：服务或机器的环境变量里有 `EmergencyStopRelease__...`（含 `DOTNET_`／`ASPNETCORE_` 前缀）时，安装在改动任何东西之前拒绝
+  （`JOURNEY_RUNTIME_ENVIRONMENT_OVERRIDE`），否则它能把有货入口指到 MVP 的变量名、或在生产段把入口关掉，而覆盖层看不出来。
 
 **谁在什么地方、用什么调用这两个入口。**现在没有界面：车载屏不能确认解除，看板也没有这个按钮。调用的人是**在控制端（这台笔记本）上
 登录的值班工程师**，用 PowerShell 7 直接 POST 到 v2 实例的健康端口（`http://172.19.205.222:58107`），凭据从 DPAPI 存储里读，**只有存凭据
@@ -664,9 +670,22 @@ control-server 检出复制 `ParallelInstance.psm1`、`ParallelHost.psm1` 到 `<
 `docs/emergency-stop-field-fallback.md`「路径二」（无货）或「路径三」（有货）逐条核实、再调用。有货入口还要求请求里的 `operatorId`
 在 v2 实例的现场人员角色名单（`fieldOperatorRoles.path`）里有 R-13 角色，否则回 409 `EMERGENCY_CONFIRMER_NOT_AUTHORIZED`。
 
+车上**无货**（fallback 文档路径二，字段含义以那里为准）：
+
 ```powershell
 $store = Import-Clixml "$env:LOCALAPPDATA\AgvOpsSecrets\control-server-deployment.xml"
-# 无货用 EmergencyReleaseCredential + 下面的路由去掉 /loaded；有货用这一把
+$token = [System.Net.NetworkCredential]::new('', $store['EmergencyReleaseCredential']).Password
+# doorLockRepaired 只有因为行驶中门锁没锁停下的车才需要
+$body = @{ agvId = 'agv02'; operatorId = '工号'; causeCleared = $true; vehicleEmpty = $true; allDoorsClosed = $true; doorLockRepaired = $true; note = '现场说明，可不填' } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri 'http://172.19.205.222:58107/api/safety/v1/emergency-stop-releases' -NoProxy `
+    -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $body
+Remove-Variable token, store
+```
+
+车上**有货或说不清**（fallback 文档路径三；`operatorId` 要在名单里持 R-13）：
+
+```powershell
+$store = Import-Clixml "$env:LOCALAPPDATA\AgvOpsSecrets\control-server-deployment.xml"
 $token = [System.Net.NetworkCredential]::new('', $store['EmergencyLoadedReleaseCredential']).Password
 $body = @{ agvId = 'agv02'; operatorId = '工号'; reason = '门锁已更换，现场复核锁闭'; causeCleared = $true; allDoorsClosed = $true; doorLockRepaired = $true } | ConvertTo-Json
 Invoke-RestMethod -Method Post -Uri 'http://172.19.205.222:58107/api/safety/v1/emergency-stop-releases/loaded' -NoProxy `

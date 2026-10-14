@@ -122,7 +122,7 @@ param(
     [string[]] $NewVehicleSafetyCredential,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'EmergencyRelease')]
-    [ValidateSet('Empty', 'Loaded')]
+    [ValidateSet('Empty', 'Loaded', IgnoreCase = $false)]
     [string[]] $NewEmergencyReleaseCredential,
 
     [Parameter(ParameterSetName = 'VehicleSafety')]
@@ -272,7 +272,7 @@ function Add-EmergencyReleaseSecret {
     #>
     param(
         [Parameter(Mandatory = $true)][hashtable] $Store,
-        [Parameter(Mandatory = $true)][ValidateSet('Empty', 'Loaded')][string] $Which,
+        [Parameter(Mandatory = $true)][ValidateSet('Empty', 'Loaded', IgnoreCase = $false)][string] $Which,
         [Parameter(Mandatory = $true)][scriptblock] $NewSecret,
         [switch] $Rotate
     )

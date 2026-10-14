@@ -298,9 +298,8 @@ function Get-EmergencyReleaseCredentialRefusal {
 function Format-EmergencyReleaseSummary {
     <# workspace#49. The line printed before anything is touched (under -WhatIf too): the switch asked for, and what is sent. #>
     param([System.Collections.IDictionary] $Definition, [string[]] $Present)
-    $has = { param([string] $Key) (@($Present) -contains $Key) ? 'present' : 'absent' }
-    $empty = & $has 'EmergencyReleaseCredential'
-    $loaded = & $has 'EmergencyLoadedReleaseCredential'
+    $empty = (@($Present) -contains 'EmergencyReleaseCredential') ? 'present' : 'absent'
+    $loaded = (@($Present) -contains 'EmergencyLoadedReleaseCredential') ? 'present' : 'absent'
     $tail = ($empty -ceq 'present' -and $loaded -ceq 'present') ? '(both sent; values not shown)' :
         (($empty -ceq 'absent' -and $loaded -ceq 'absent') ? '(the server keeps what its service already holds)' : '(sent where present; values not shown)')
     return "EMERGENCY_STOP_RELEASE_REQUESTED=enabled=$((Test-EmergencyReleaseOn -Definition $Definition) ? 'true' : 'false') credential=$empty loadedCredential=$loaded $tail"
@@ -309,9 +308,14 @@ function Format-EmergencyReleaseSummary {
 function Assert-EmergencyReleaseReported {
     <#
         workspace#49. The installer's EMERGENCY_STOP_RELEASE= line (control-server scripts/parallel, Format-ParallelEmergencyReleaseLine):
-        what the overlay turned on and which of the two credentials the service's Environment holds, read back after the write.
-        On, it must be exactly enabled=true with both set; off, enabled=false. No line from an installer that predates it: refused
-        when the definition carries the section (whether it is on is then unknown), warned otherwise.
+        what the overlay turned on and which of the two credentials the service's Environment holds, read back after the write,
+        and how many named people the roster gives R-13 (loadedConfirmers; review M2). On, it must be enabled=true with both
+        set and a number of confirmers; off, enabled=false. No line from an installer that predates it: refused when the
+        definition carries the section (whether it is on is then unknown), warned otherwise.
+
+        Review M2: the loaded entry accepts R-13 alone, and the installer creates an empty roster where there is none. On with
+        no R-13 holder is refused for a production-phase definition -- a loaded vehicle this server stopped would have no way
+        out, with a green deployment -- and warned otherwise. The install has happened by then; the deployment goes red.
     #>
     param([object[]] $Output, [System.Collections.IDictionary] $Definition)
     $lines = @($Output | ForEach-Object { "$_".Trim() } | Where-Object { $_.StartsWith('EMERGENCY_STOP_RELEASE=', [StringComparison]::Ordinal) })
@@ -324,13 +328,46 @@ function Assert-EmergencyReleaseReported {
         return
     }
     $line = $lines[-1]
-    $ok = $on ? ($line -ceq 'EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set') :
+    $ok = $on ? ($line -cmatch '\AEMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set loadedConfirmers=\d+\z') :
         $line.StartsWith('EMERGENCY_STOP_RELEASE=enabled=false ', [StringComparison]::Ordinal)
     if (-not $ok) {
         throw ("EMERGENCY_STOP_RELEASE_MISMATCH: the definition says emergencyStopRelease.enabled=$($on ? 'true' : 'false'), the installer reported '$line'. " +
             'On, both credentials must be in the service''s Environment: without the loaded one its entry answers 503.')
     }
+    if ($on -and $line.EndsWith(' loadedConfirmers=0', [StringComparison]::Ordinal)) {
+        $phaseNode = $Definition.Contains('productionCutover') ? $Definition['productionCutover'] : $null
+        $message = ('EMERGENCY_RELEASE_NO_LOADED_CONFIRMER: the loaded-vehicle release entry accepts only people the field operator roster ' +
+            'gives R-13, and the roster names none. A loaded vehicle this server stopped would have no governed way out. Name the R-13 ' +
+            'holders in the roster (fieldOperatorRoles.path on the server), then deploy again.')
+        if ($phaseNode -is [System.Collections.IDictionary] -and $phaseNode['phase'] -ceq 'production') { throw $message }
+        Write-Warning $message
+    }
     Write-Step "Emergency stop release confirmed by the server: $line"
+}
+
+function Invoke-EmergencyReleaseProbe {
+    <#
+        workspace#49 (review M3: after a rollback too). The release entries, asked from this machine the way an operator will
+        reach them: a POST with an empty body and no Authorization header, which no entry can act on. Mounted with its
+        credential an entry answers 401, without it 503, not mounted 404 -- checked now, not when a loaded vehicle is stuck. A
+        rollback to a package older than control-server#539 has no loaded entry at all; the installer's line cannot see that,
+        this does. The loaded entry records this turned-away request in its administrator audit (UNAUTHORIZED, no vehicle), as it
+        does every refused request.
+    #>
+    param([System.Collections.IDictionary] $Definition, [string] $BaseUrl)
+    $statuses = foreach ($route in @('/api/safety/v1/emergency-stop-releases', '/api/safety/v1/emergency-stop-releases/loaded')) {
+        try {
+            [int] (Invoke-WebRequest -Method Post -Uri "$BaseUrl$route" -ContentType 'application/json' -Body '{}' `
+                    -NoProxy -TimeoutSec 20 -SkipHttpErrorCheck -UseBasicParsing).StatusCode
+        } catch {
+            0
+        }
+    }
+    $statuses = @($statuses)
+    $on = Test-EmergencyReleaseOn -Definition $Definition
+    Write-Step "Emergency stop release probe (no credential sent): empty-vehicle $($statuses[0]), loaded-vehicle $($statuses[1]); expected $($on ? '401, 401' : '404, 404')"
+    $refusal = Get-EmergencyReleaseProbeVerdict -Enabled $on -EmptyStatus $statuses[0] -LoadedStatus $statuses[1]
+    if ($refusal) { throw $refusal }
 }
 
 function Get-EmergencyReleaseProbeVerdict {
@@ -840,6 +877,8 @@ if ($Rollback) {
         Assert-MesIngestSourceReported -Output $rollbackOutput -Rollback
         # workspace#49: a rollback carries the two release credentials over from the service; the line says whether it did.
         Assert-EmergencyReleaseReported -Output $rollbackOutput -Definition $definition
+        # Review M3: and asks the entries themselves -- the previous package may predate one of them (control-server#539).
+        Invoke-EmergencyReleaseProbe -Definition $definition -BaseUrl "http://${healthBindAddress}:$healthPort"
         Write-Step 'Rollback complete. The MVP service was not involved.'
         Write-Step "Record admissionPolicyVersion=$AdmissionPolicyVersionOverride in the deployment record: the next install needs a higher one."
         Write-Step 'The onboard half was NOT rolled back. The two ends do not negotiate versions --'
@@ -920,9 +959,11 @@ Write-Step ($fleetRows.Count -eq 0 ? 'Vehicle-safety projection: single car, sha
 
 # ------------------------------------------------------------------- package ---
 
+# The GUID (workspace#49 review L1): two runs started in the same second shared one directory, and each one's finally
+# deleted the other's staging.
 # -WhatIf:$false on local staging: SupportsShouldProcess puts the whole script into WhatIf
 # mode, and staging for real is what lets a dry run verify the hash.
-$localStage = Join-Path $env:TEMP "control-server-v2-deploy-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+$localStage = Join-Path $env:TEMP "control-server-v2-deploy-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 New-Item -ItemType Directory -Path $localStage -Force -WhatIf:$false | Out-Null
 
 # Set just before deploy-config.json starts its way to the server; from then on the finally below
@@ -1130,25 +1171,8 @@ foreach (`$d in @('$opsRoot', '$stagingRoot')) {
         throw "The parallel instance installed but is not reachable from this machine: $($_.Exception.Message)"
     }
 
-    # workspace#49. The release entries, asked from this machine the way an operator will reach them: a POST with an empty
-    # body and no Authorization header, which no entry can act on. Mounted with its credential, an entry answers 401; without
-    # its credential 503; not mounted 404. Checked now, not when a loaded vehicle is stuck. The loaded entry records this
-    # turned-away request in its administrator audit (UNAUTHORIZED, no vehicle), as it does every refused request.
-    $releaseStatus = [ordered]@{}
-    foreach ($route in @('/api/safety/v1/emergency-stop-releases', '/api/safety/v1/emergency-stop-releases/loaded')) {
-        try {
-            $answer = Invoke-WebRequest -Method Post -Uri "http://${healthBindAddress}:$healthPort$route" -ContentType 'application/json' `
-                -Body '{}' -NoProxy -TimeoutSec 20 -SkipHttpErrorCheck -UseBasicParsing
-            $releaseStatus[$route] = [int] $answer.StatusCode
-        } catch {
-            $releaseStatus[$route] = 0
-        }
-    }
-    $releaseOn = Test-EmergencyReleaseOn -Definition $definition
-    $statuses = @($releaseStatus.Values)
-    Write-Step "Emergency stop release probe (no credential sent): empty-vehicle $($statuses[0]), loaded-vehicle $($statuses[1]); expected $($releaseOn ? '401, 401' : '404, 404')"
-    $probeRefusal = Get-EmergencyReleaseProbeVerdict -Enabled $releaseOn -EmptyStatus $statuses[0] -LoadedStatus $statuses[1]
-    if ($probeRefusal) { throw $probeRefusal }
+    # workspace#49. Both release entries, from this machine.
+    Invoke-EmergencyReleaseProbe -Definition $definition -BaseUrl "http://${healthBindAddress}:$healthPort"
 
     Write-Step "Deployed. Onboard NDJSON: tcp://${listenAddress}:$onboardPort"
     Write-Step "Vehicle safety: http://${healthBindAddress}:$healthPort/api/onboard/v1/vehicle-safety"

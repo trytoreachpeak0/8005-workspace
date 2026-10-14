@@ -203,6 +203,12 @@ $validateSet = @($parameter | ForEach-Object { $_.Attributes } | Where-Object { 
     ForEach-Object { $_.PositionalArguments | ForEach-Object Value })
 Write-Result -Ok ($parameter.Count -eq 1 -and ($validateSet -join ',') -ceq 'Empty,Loaded') `
     -Name '-NewEmergencyReleaseCredential takes Empty and/or Loaded' -Detail "parameter $($parameter.Count); ValidateSet: $($validateSet -join ',')"
+# Review M1: the key is chosen with -ceq 'Empty', so a ValidateSet that let 'empty' through would generate or rotate the
+# loaded credential instead. Both ValidateSets must be case-sensitive.
+$caseSensitive = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AttributeAst] -and $n.TypeName.Name -ceq 'ValidateSet' -and
+            (@($n.PositionalArguments | ForEach-Object Value) -join ',') -ceq 'Empty,Loaded' }, $true) | Where-Object {
+        @($_.NamedArguments | Where-Object { $_.ArgumentName -ceq 'IgnoreCase' -and $_.Argument.Extent.Text -ceq '$false' }).Count -eq 1 })
+Write-Result -Ok ($caseSensitive.Count -eq 2) -Name 'both Empty/Loaded ValidateSets are case-sensitive (IgnoreCase = $false)' -Detail "case-sensitive: $($caseSensitive.Count) of 2"
 $rotateSets = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'Rotate' } | ForEach-Object { $_.Attributes } |
     Where-Object { $_.TypeName.Name -ceq 'Parameter' } | ForEach-Object { $_.NamedArguments } | Where-Object { $_.ArgumentName -ceq 'ParameterSetName' } |
     ForEach-Object { $_.Argument.Value })
@@ -229,6 +235,13 @@ try {
         Write-Result -Ok ($null -ne $refused -and $refused.StartsWith('EMERGENCY_RELEASE_CREDENTIAL_PRESENT:') -and $refused.Contains('-Rotate') -and
             $after -ceq $before -and -not $refused.Contains('release-')) `
             -Name "a present $which credential is not replaced without -Rotate, and the refusal shows no value" -Detail "error: $refused"
+    }
+    foreach ($wrongCase in @('empty', 'LOADED')) {
+        $refused = $null
+        $before = @($store.Keys | Sort-Object | ForEach-Object { "$_=$(& $plainOf $store[$_])" }) -join ';'
+        try { $null = Add-EmergencyReleaseSecret -Store $store -Which $wrongCase -NewSecret $fixed -Rotate } catch { $refused = $_.Exception.Message }
+        $after = @($store.Keys | Sort-Object | ForEach-Object { "$_=$(& $plainOf $store[$_])" }) -join ';'
+        Write-Result -Ok ($null -ne $refused -and $before -ceq $after) -Name "-Which '$wrongCase' (wrong case) is refused and nothing is generated or rotated" -Detail "error: $refused"
     }
     $null = Add-EmergencyReleaseSecret -Store $store -Which 'Loaded' -NewSecret $fixed -Rotate
     Write-Result -Ok ((& $plainOf $store['EmergencyLoadedReleaseCredential']) -cnotin @('release-2', '') -and (& $plainOf $store['EmergencyReleaseCredential']) -ceq 'release-1') `

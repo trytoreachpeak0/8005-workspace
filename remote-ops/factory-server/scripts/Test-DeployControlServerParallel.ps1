@@ -208,7 +208,7 @@ if (Get-Command Assert-MesIngestSourceReported -ErrorAction SilentlyContinue) {
 # revision knows; the end-to-end -WhatIf cases further down run the real script.
 Write-Host ''
 Write-Host 'Emergency stop release entries (workspace#49)' -ForegroundColor Cyan
-foreach ($name in @('Test-EmergencyReleaseOn', 'Get-EmergencyReleaseCredentialRefusal', 'Format-EmergencyReleaseSummary', 'Assert-EmergencyReleaseReported', 'Get-EmergencyReleaseProbeVerdict')) {
+foreach ($name in @('Test-EmergencyReleaseOn', 'Get-EmergencyReleaseCredentialRefusal', 'Format-EmergencyReleaseSummary', 'Assert-EmergencyReleaseReported', 'Get-EmergencyReleaseProbeVerdict', 'Invoke-EmergencyReleaseProbe')) {
     $found = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if ($null -eq $found) { Write-Result -Ok $false -Name "$name is defined in the deploy script" -Detail 'not found' } else { . ([scriptblock]::Create($found.Extent.Text)) }
 }
@@ -251,14 +251,21 @@ if (Get-Command Assert-EmergencyReleaseReported -ErrorAction SilentlyContinue) {
         try { $null = Assert-EmergencyReleaseReported -Output $Lines -Definition $Definition 3>$null; return 'OK' } catch { return $_.Exception.Message }
     }
     $on = New-ReleaseDefinition $true
+    $productionOn = New-ReleaseDefinition $true; $productionOn['productionCutover'] = @{ approvalRecord = 'x'; phase = 'production' }
+    $trialOn = New-ReleaseDefinition $true; $trialOn['productionCutover'] = @{ approvalRecord = 'x'; phase = 'trial' }
     foreach ($case in @(
-            @{ Name = 'on, the installer read both credentials back'; Definition = $on; Lines = @('x', 'EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set'); Expect = 'OK' }
-            @{ Name = 'on, the loaded credential not in the service (its entry would answer 503)'; Definition = $on; Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=unset'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
-            @{ Name = 'on, but the Host was configured off'; Definition = $on; Lines = @('EMERGENCY_STOP_RELEASE=enabled=false credential=set loadedCredential=set'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
+            @{ Name = 'on, the installer read both credentials back'; Definition = $on; Lines = @('x', 'EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set loadedConfirmers=1'); Expect = 'OK' }
+            @{ Name = 'on, the loaded credential not in the service (its entry would answer 503)'; Definition = $on; Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=unset loadedConfirmers=1'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
+            @{ Name = 'on, but the Host was configured off'; Definition = $on; Lines = @('EMERGENCY_STOP_RELEASE=enabled=false credential=set loadedCredential=set loadedConfirmers=1'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
             @{ Name = 'on, no line at all (an installer older than workspace#49)'; Definition = $on; Lines = @('x'); Expect = 'EMERGENCY_STOP_RELEASE_UNREAD:' }
-            @{ Name = 'off, the line says off'; Definition = (New-ReleaseDefinition $false); Lines = @('EMERGENCY_STOP_RELEASE=enabled=false credential=unset loadedCredential=unset'); Expect = 'OK' }
-            @{ Name = 'off, but the Host was configured on'; Definition = (New-ReleaseDefinition $false); Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
-            @{ Name = 'no section and no line (an older checkout): warned, not refused'; Definition = (New-ReleaseDefinition $null); Lines = @('x'); Expect = 'OK' })) {
+            @{ Name = 'off, the line says off'; Definition = (New-ReleaseDefinition $false); Lines = @('EMERGENCY_STOP_RELEASE=enabled=false credential=unset loadedCredential=unset loadedConfirmers=0'); Expect = 'OK' }
+            @{ Name = 'off, but the Host was configured on'; Definition = (New-ReleaseDefinition $false); Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set loadedConfirmers=1'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' }
+            @{ Name = 'no section and no line (an older checkout): warned, not refused'; Definition = (New-ReleaseDefinition $null); Lines = @('x'); Expect = 'OK' }
+            # Review M2: the loaded entry accepts R-13 alone.
+            @{ Name = 'on, production phase, nobody holds R-13'; Definition = $productionOn; Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set loadedConfirmers=0'); Expect = 'EMERGENCY_RELEASE_NO_LOADED_CONFIRMER:' }
+            @{ Name = 'on, production phase, two R-13 holders'; Definition = $productionOn; Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set loadedConfirmers=2'); Expect = 'OK' }
+            @{ Name = 'on, trial phase, nobody holds R-13: warned, not refused'; Definition = $trialOn; Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set loadedConfirmers=0'); Expect = 'OK' }
+            @{ Name = 'on, the line without a confirmer count (an installer before review M2)'; Definition = $on; Lines = @('EMERGENCY_STOP_RELEASE=enabled=true credential=set loadedCredential=set'); Expect = 'EMERGENCY_STOP_RELEASE_MISMATCH:' })) {
         $v = Get-ReleaseReportVerdict $case.Definition $case.Lines
         Write-Result -Ok ($v.StartsWith($case.Expect)) -Name "release read-back: $($case.Name)" -Detail $v
     }
@@ -279,7 +286,41 @@ if (Get-Command Get-EmergencyReleaseProbeVerdict -ErrorAction SilentlyContinue) 
         Write-Result -Ok $ok -Name "release probe: enabled=$($case.Enabled), empty $($case.Empty), loaded $($case.Loaded) -> $($null -eq $case.Expect ? 'as expected' : 'refused')" -Detail "got: $r"
     }
 }
+# Review M3: the probe itself, with Invoke-WebRequest answered by a double -- what it sends, and that a rollback to a package
+# without the loaded entry (404 there) is refused.
+if (Get-Command Invoke-EmergencyReleaseProbe -ErrorAction SilentlyContinue) {
+    function Write-Step { param([string] $Message) }
+    $script:ProbeCalls = [System.Collections.Generic.List[string]]::new()
+    $script:ProbeAnswers = @{}
+    function Invoke-WebRequest {
+        param([string] $Method, [string] $Uri, [string] $ContentType, [string] $Body, [switch] $NoProxy, [int] $TimeoutSec, [switch] $SkipHttpErrorCheck, [switch] $UseBasicParsing, $Headers)
+        $script:ProbeCalls.Add("$Method $Uri body=$Body auth=$($null -ne $Headers) noproxy=$NoProxy")
+        $status = $script:ProbeAnswers[$Uri.Substring($Uri.IndexOf('/api/'))]
+        if ($status -eq 0) { throw 'no answer' }
+        return [pscustomobject]@{ StatusCode = $status }
+    }
+    function Get-ProbeVerdict($Definition, $Empty, $Loaded) {
+        $script:ProbeCalls.Clear()
+        $script:ProbeAnswers = @{ '/api/safety/v1/emergency-stop-releases' = $Empty; '/api/safety/v1/emergency-stop-releases/loaded' = $Loaded }
+        try { Invoke-EmergencyReleaseProbe -Definition $Definition -BaseUrl 'http://192.0.2.1:58107'; return 'OK' } catch { return $_.Exception.Message }
+    }
+    $v = Get-ProbeVerdict (New-ReleaseDefinition $true) 401 401
+    Write-Result -Ok ($v -ceq 'OK' -and ($script:ProbeCalls -join ' | ') -ceq ('POST http://192.0.2.1:58107/api/safety/v1/emergency-stop-releases body={} auth=False noproxy=True | ' +
+            'POST http://192.0.2.1:58107/api/safety/v1/emergency-stop-releases/loaded body={} auth=False noproxy=True')) `
+        -Name 'release probe: two POSTs with an empty body and no credential, direct (no proxy); 401/401 accepted' -Detail "$v; calls: $($script:ProbeCalls -join ' | ')"
+    $v = Get-ProbeVerdict (New-ReleaseDefinition $true) 401 404
+    Write-Result -Ok ($v.StartsWith('EMERGENCY_RELEASE_PROBE_MISMATCH:') -and $v.Contains('loaded-vehicle entry answered 404')) `
+        -Name 'release probe: the loaded entry absent (a package before control-server#539, after a rollback) is refused' -Detail $v
+    $v = Get-ProbeVerdict (New-ReleaseDefinition $true) 401 0
+    Write-Result -Ok ($v.StartsWith('EMERGENCY_RELEASE_PROBE_MISMATCH:') -and $v.Contains('answered 0')) -Name 'release probe: no answer is refused, not passed' -Detail $v
+    Remove-Item function:Invoke-WebRequest, function:Write-Step
+}
 $deployText49 = Get-Content -LiteralPath $ScriptPath -Raw
+$rollbackStart = $deployText49.IndexOf('if ($Rollback) {')
+$rollbackEnd = $deployText49.IndexOf('# ------------------------------------------------------------------- secrets ---')
+$probeCalls = [regex]::Matches($deployText49, 'Invoke-EmergencyReleaseProbe -Definition \$definition -BaseUrl')
+Write-Result -Ok ($probeCalls.Count -eq 2 -and @($probeCalls | Where-Object { $_.Index -gt $rollbackStart -and $_.Index -lt $rollbackEnd }).Count -eq 1) `
+    -Name 'release probe runs after the install and after a rollback (review M3)' -Detail "calls $($probeCalls.Count); rollback block $rollbackStart..$rollbackEnd"
 Write-Result -Ok ($deployText49.Contains('$config[''emergencyReleaseCredential''] = $plain[''EmergencyReleaseCredential'']') -and
         $deployText49.Contains('$config[''emergencyLoadedReleaseCredential''] = $plain[''EmergencyLoadedReleaseCredential'']') -and
         $deployText49.Contains('Assert-EmergencyReleaseReported -Output $installOutput -Definition $definition') -and
