@@ -28,7 +28,10 @@
       * a package without release-manifest.json at its root (absent, or only in a subdirectory), or
         without components.controlServer.commit: refused;
       * no -RunId/-PackagePath: the release run is looked up by the clone's commit, not "latest", and
-        a lookup that finds none, or one built from another commit, is refused.
+        a lookup that finds none, or one built from another commit, is refused;
+      * after the install or the rollback (control-server#672), the installer's EFFECTIVE_JOURNEY_BINDING= line
+        against the definition sent: any difference refused, no line refused, not-logged refused on an install
+        and warned on -Rollback -- checked on Assert-JourneyBindingReported lifted out by its AST.
     Plus ParseFile with zero errors for the deploy script and for this file: the AST walk below would
     swallow a syntax error that a real run would hit. And the vehicle lines of the target summary: one
     per vehicle for a fleet definition (control-server#571), checked on Format-VehicleLines lifted out
@@ -202,6 +205,71 @@ if (Get-Command Assert-MesIngestSourceReported -ErrorAction SilentlyContinue) {
     Write-Result -Ok ($v -ceq 'OK') -Name 'the parallel production report without -ProductionCutover is accepted, as before' -Detail $v
     Remove-Item function:Write-Step
     Remove-Variable definition, sourceProperty, mesIngestSource, productionSource, ProductionCutover -ErrorAction SilentlyContinue
+}
+
+# control-server#672: after the install and the rollback, the admission policy version and label and the two waits the
+# Host bound (the installer's EFFECTIVE_JOURNEY_BINDING= line, read from its EFFECTIVE_CONFIGURATION event) are compared
+# with the definition 19 sent -- the derived copy under -AdmissionPolicyVersionOverride.
+Write-Host ''
+Write-Host 'Admission policy and waits read back after the install (control-server#672)' -ForegroundColor Cyan
+$bindingAst = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-JourneyBindingReported' }, $true)
+if ($null -eq $bindingAst) {
+    Write-Result -Ok $false -Name 'Assert-JourneyBindingReported is defined in the deploy script' -Detail 'not found'
+} else {
+    . ([scriptblock]::Create($bindingAst.Extent.Text))
+    function Write-Step { param([string] $Message) }
+    $definition = @{ journeyRuntime = @{ admissionPolicyVersion = 6; admissionPolicyDeploymentId = 'MAP-26-WIRE_TO_GATE-20261007'; cargoHoldingTimeout = '00:05:00'; stationDepartureWaitTimeout = '00:05:00' } }
+    $asDefined = 'EFFECTIVE_JOURNEY_BINDING=admissionPolicyVersion=6 admissionPolicyDeploymentId=MAP-26-WIRE_TO_GATE-20261007 cargoHoldingTimeout=00:05:00 stationDepartureWaitTimeout=00:05:00'
+    $other = 'MES_INGEST_SOURCE=fake baseUrl=http://127.0.0.1:58188 allowedWorkTypes=STAGING_TO_WIRE'
+    $effectiveLine = 'EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE allowedDispatchZones=WIRE_BONDING mesIngestBaseUrl=http://127.0.0.1:58188'
+    $productionSource = $false
+    function Get-BindingVerdict([object[]] $Lines, [switch] $Rollback) {
+        $warnings = $null
+        try { Assert-JourneyBindingReported -Output $Lines -Rollback:$Rollback -WarningVariable warnings -WarningAction SilentlyContinue; return ($warnings ? "WARN $warnings" : 'OK') } catch { return $_.Exception.Message }
+    }
+    foreach ($case in @(
+            @{ Name = 'bound as defined: accepted'; Lines = @($other, $asDefined); Expect = 'OK' }
+            @{ Name = 'bound as defined, on -Rollback: accepted'; Lines = @($asDefined); Rollback = $true; Expect = 'OK' }
+            @{ Name = 'version 5 bound where 6 was sent: refused, naming the field'; Lines = @($asDefined -replace 'Version=6 ', 'Version=5 '); Expect = "EFFECTIVE_JOURNEY_BINDING_MISMATCH: admissionPolicyVersion bound '5', the definition says '6'" }
+            @{ Name = 'another deployment label: refused'; Lines = @($asDefined -replace '20261007', '20260827'); Expect = "EFFECTIVE_JOURNEY_BINDING_MISMATCH: admissionPolicyDeploymentId bound 'MAP-26-WIRE_TO_GATE-20260827'" }
+            @{ Name = 'cargo holding 00:30:00 bound (the 2026-10-12 field case): refused'; Lines = @($asDefined -replace 'cargoHoldingTimeout=00:05:00', 'cargoHoldingTimeout=00:30:00'); Expect = "EFFECTIVE_JOURNEY_BINDING_MISMATCH: cargoHoldingTimeout bound '00:30:00', the definition says '00:05:00'" }
+            @{ Name = 'station departure 00:30:00 bound: refused'; Lines = @($asDefined -replace 'stationDepartureWaitTimeout=00:05:00', 'stationDepartureWaitTimeout=00:30:00'); Expect = "EFFECTIVE_JOURNEY_BINDING_MISMATCH: stationDepartureWaitTimeout bound '00:30:00', the definition says '00:05:00'" }
+            @{ Name = 'a mismatch on -Rollback is refused too'; Lines = @($asDefined -replace 'Version=6 ', 'Version=5 '); Rollback = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: admissionPolicyVersion' }
+            @{ Name = 'the last line counts (the Released read-back comes after the Held one)'; Lines = @(($asDefined -replace 'Version=6 ', 'Version=5 '), $asDefined); Expect = 'OK' }
+            @{ Name = 'a line missing one of the four: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=admissionPolicyVersion=6'); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
+            @{ Name = 'a line naming a field twice: refused'; Lines = @("$asDefined admissionPolicyVersion=5"); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
+            @{ Name = 'a line that is not name=value pairs: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=6 MAP-26'); Expect = 'EFFECTIVE_JOURNEY_BINDING_MISMATCH: the installer reported' }
+            @{ Name = 'a field the installer adds later (cs#686) is ignored, the four still compared'; Lines = @("$asDefined slotReadinessGate=enforce"); Expect = 'OK' }
+            @{ Name = 'fields in another order are read by name'; Lines = @('EFFECTIVE_JOURNEY_BINDING=stationDepartureWaitTimeout=00:05:00 cargoHoldingTimeout=00:05:00 admissionPolicyDeploymentId=MAP-26-WIRE_TO_GATE-20261007 admissionPolicyVersion=6'); Expect = 'OK' }
+            @{ Name = 'EFFECTIVE_CONFIGURATION= but no EFFECTIVE_JOURNEY_BINDING line (installer scripts older than control-server#672): refused, naming the checkout, on -Rollback too'; Lines = @($other, $effectiveLine); Rollback = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer reported an EFFECTIVE_CONFIGURATION= line' }
+            # Review S1 (Q5): neither line -- the installer read no event and, in fake mode, only warned. Not the checkout's fault.
+            @{ Name = 'neither result line, fake mode, on -Rollback: warned, not refused'; Lines = @($other); Rollback = $true; Expect = 'WARN EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer read no EFFECTIVE_CONFIGURATION event' }
+            @{ Name = 'neither result line, fake mode, on an install: warned, as for the EFFECTIVE_CONFIGURATION= line'; Lines = @($other); Expect = 'WARN EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer read no EFFECTIVE_CONFIGURATION event' }
+            @{ Name = 'neither result line, production mode, on -Rollback: refused'; Lines = @($other); Rollback = $true; Production = $true; Expect = 'EFFECTIVE_JOURNEY_BINDING_UNREAD: the installer read no EFFECTIVE_CONFIGURATION event' }
+            @{ Name = 'not logged (a package older than control-server#672) on an install: refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=not-logged'); Expect = 'EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED:' }
+            @{ Name = 'not logged on -Rollback: warned, not refused'; Lines = @('EFFECTIVE_JOURNEY_BINDING=not-logged'); Rollback = $true; Expect = 'WARN EFFECTIVE_JOURNEY_BINDING_NOT_LOGGED:' })) {
+        $productionSource = [bool] $case['Production']
+        $v = Get-BindingVerdict $case.Lines -Rollback:([bool] $case['Rollback'])
+        Write-Result -Ok ($case.Expect -ceq 'OK' ? ($v -ceq 'OK') : $v.StartsWith($case.Expect, [StringComparison]::Ordinal)) -Name "journey binding: $($case.Name)" -Detail "got: $v"
+    }
+    $productionSource = $false
+    # A key the definition leaves out: the package's appsettings.json decides, so it is printed, not compared.
+    $definition['journeyRuntime'].Remove('stationDepartureWaitTimeout')
+    $v = Get-BindingVerdict @($asDefined -replace 'stationDepartureWaitTimeout=00:05:00', 'stationDepartureWaitTimeout=00:30:00')
+    Write-Result -Ok ($v -ceq 'OK') -Name 'journey binding: a key the definition leaves out is not compared' -Detail "got: $v"
+    # The version compared is the one sent: under -AdmissionPolicyVersionOverride $definition is the derived copy.
+    $definition['journeyRuntime']['admissionPolicyVersion'] = 7
+    $v = Get-BindingVerdict @($asDefined)
+    Write-Result -Ok ($v.StartsWith("EFFECTIVE_JOURNEY_BINDING_MISMATCH: admissionPolicyVersion bound '6', the definition says '7'", [StringComparison]::Ordinal)) -Name 'journey binding: compared with $definition as it stands (the derived copy after an override)' -Detail "got: $v"
+    Remove-Item function:Write-Step
+    Remove-Variable definition, productionSource, effectiveLine -ErrorAction SilentlyContinue
+    # Both read-backs call it, right after Assert-MesIngestSourceReported, with -Rollback on the rollback only.
+    $scriptText672 = Get-Content -LiteralPath $ScriptPath -Raw
+    $bindingCalls = @($deployAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Assert-JourneyBindingReported' }, $true))
+    Write-Result -Ok ($bindingCalls.Count -eq 2 -and
+            [regex]::IsMatch($scriptText672, 'Assert-MesIngestSourceReported -Output \$rollbackOutput -Rollback\s+Assert-JourneyBindingReported -Output \$rollbackOutput -Rollback') -and
+            [regex]::IsMatch($scriptText672, 'Assert-MesIngestSourceReported -Output \$installOutput\s+Assert-JourneyBindingReported -Output \$installOutput\s')) `
+        -Name 'journey binding: checked after the install and after the rollback' -Detail "calls $($bindingCalls.Count)"
 }
 
 # workspace#49: the two emergency stop release credentials. Hand-made definitions, so this holds whatever the fixture's
