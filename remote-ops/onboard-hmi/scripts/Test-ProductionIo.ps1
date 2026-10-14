@@ -95,6 +95,14 @@ try {
     $bad = Join-Path $work 'unreadable.json'; Set-Content -LiteralPath $bad -Value '{ "productionCutover": '
     $p = Invoke-Probe $bad
     Write-Result -Ok ($null -ne $p.Error -and $p.Error.StartsWith('SERVER_PHASE_UNREAD:')) -Name 'an unreadable record is refused (SERVER_PHASE_UNREAD)' -Detail "error: $($p.Error)"
+    # Review L1: the key is there, its value is not an object -- an unknown phase, never "none".
+    foreach ($shape in @(@{ Name = 'null'; Json = 'null' }, @{ Name = 'a string'; Json = '"production"' }, @{ Name = 'an array'; Json = '[ { "phase": "production" } ]' })) {
+        $shaped = Join-Path $work "shape-$($shape.Name.Replace(' ', '-')).json"
+        Set-Content -LiteralPath $shaped -Value ('{ "onboardPort": 58105, "productionCutover": ' + $shape.Json + ' }')
+        $p = Invoke-Probe $shaped
+        Write-Result -Ok ($null -ne $p.Error -and $p.Error.StartsWith('SERVER_PHASE_INVALID:')) `
+            -Name "productionCutover present as $($shape.Name): refused (SERVER_PHASE_INVALID), not read as none" -Detail "error: $($p.Error); raw: $($p.Raw -join ' | ')"
+    }
     $p = Invoke-Probe (New-InstalledRecord 'odd' 'pilot')
     Write-Result -Ok ($null -ne $p.Error -and $p.Error.StartsWith('SERVER_PHASE_INVALID:')) -Name 'a phase that is neither trial nor production is refused (SERVER_PHASE_INVALID)' -Detail "error: $($p.Error)"
     $p = Invoke-Probe (New-InstalledRecord 'otherport' 'trial' -OnboardPort 58205) -OnboardPort 58105
@@ -175,6 +183,10 @@ $alias = [string] $plain[0]
 $command = ($plain | Select-Object -Skip 1) -join ' '
 Add-Content -LiteralPath $env:WS51_SSH_LOG -Value "$alias | $command" -WhatIf:$false
 if ($alias -ceq $env:WS51_SERVER_ALIAS) {
+    # Review M2: the dispatch gate's own staging and its server-side dry run, answered so a case reaches the end.
+    # -like, not -match: a backslash is literal there.
+    if ($command -like "New-Item -ItemType Directory -Force -Path 'D:\zhengyushao\control-server-v2-ops\dispatch-gate\*' | Out-Null") { exit 0 }
+    if ($command -like 'pwsh -NoProfile -File "D:\zhengyushao\control-server-v2-ops\dispatch-gate\*\Set-ParallelDispatchGateLocal.ps1" * -WhatIf') { 'GATE_DRY_RUN'; exit 0 }
     $text = ($command -match '-EncodedCommand (\S+)') ? [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1])) : $command
     $rewritten = $text.Replace('D:\zhengyushao\control-server-v2-ops\installed-instance.json', $env:WS51_SERVER_RECORD)
     if ($rewritten -ceq $text) { 'shim: the server command does not read the v2 installed-instance.json'; exit 255 }
@@ -297,14 +309,23 @@ Export-ModuleMember -Function *
         -Name 'production, Open, no record: refused (IO_CHECK_RECORD_REQUIRED) before anything is copied' -Detail "exit $($d.Code)`n$($d.Output)"
     $d = Invoke-Script $GateScript (& $gateArgs 'Open' @('-IoCheckRecord', $recordBad))
     Write-Result -Ok ($d.Code -ne 0 -and $d.Output.Contains('IO_CHECK_RECORD_FAILED:')) -Name 'production, Open, a record with a car on the simulator: refused' -Detail "exit $($d.Code)`n$($d.Output)"
+    # Review M2: a case that goes ahead must reach the end -- staged (three scp) and the server-side dry run -- exit 0.
+    $reachedEnd = { param($d) $d.Code -eq 0 -and $d.Output.Contains('GATE_DRY_RUN') -and @($d.Calls | Where-Object { $_ -like 'scp |*' }).Count -eq 3 }
+    $probes = { param($d) @($d.Calls | Where-Object { $_ -like 'ws51-server-fake |*EncodedCommand*' }).Count }
     $d = Invoke-Script $GateScript (& $gateArgs 'Open' @('-IoCheckRecord', $recordOk))
-    Write-Result -Ok (-not $d.Output.Contains('IO_CHECK_RECORD') -and $d.Output.Contains('IO check record')) `
-        -Name 'production, Open, a valid record for the installed fleet: the IO check passes' -Detail "exit $($d.Code)`n$($d.Output)"
+    Write-Result -Ok ((& $reachedEnd $d) -and -not $d.Output.Contains('IO_CHECK_RECORD') -and $d.Output.Contains('IO check record')) `
+        -Name 'production, Open, a valid record for the installed fleet: the IO check passes and the dry run reaches the end' -Detail "exit $($d.Code)`n$($d.Output)`n$($d.Calls -join "`n")"
     $d = Invoke-Script $GateScript (& $gateArgs 'Closed')
-    Write-Result -Ok (-not $d.Output.Contains('IO_CHECK_RECORD')) -Name 'production, Closed: no record asked for' -Detail "exit $($d.Code)`n$($d.Output)"
+    Write-Result -Ok ((& $reachedEnd $d) -and -not $d.Output.Contains('IO_CHECK_RECORD') -and (& $probes $d) -eq 0) `
+        -Name 'production, Closed: no record asked for, no phase probe, the dry run reaches the end' -Detail "exit $($d.Code)`n$($d.Output)`n$($d.Calls -join "`n")"
+    $env:WS51_SERVER_RECORD = Join-Path $work 'gate-no-record.json'
+    $d = Invoke-Script $GateScript (& $gateArgs 'Closed')
+    Write-Result -Ok ((& $reachedEnd $d) -and (& $probes $d) -eq 0) `
+        -Name 'no installed record, Closed: still staged and dry-run, with no phase probe (closing is never held up)' -Detail "exit $($d.Code)`n$($d.Output)`n$($d.Calls -join "`n")"
     $env:WS51_SERVER_RECORD = New-InstalledRecord 'gate-trial' 'trial'
     $d = Invoke-Script $GateScript (& $gateArgs 'Open')
-    Write-Result -Ok (-not $d.Output.Contains('IO_CHECK_RECORD')) -Name 'trial, Open, no record: not asked for' -Detail "exit $($d.Code)`n$($d.Output)"
+    Write-Result -Ok ((& $reachedEnd $d) -and -not $d.Output.Contains('IO_CHECK_RECORD') -and (& $probes $d) -eq 1) `
+        -Name 'trial, Open, no record: not asked for, the dry run reaches the end' -Detail "exit $($d.Code)`n$($d.Output)`n$($d.Calls -join "`n")"
 } finally {
     if ($null -ne (Get-Variable -Name savedPath -ValueOnly -ErrorAction SilentlyContinue)) { $env:PATH = $savedPath }
     Get-ChildItem Env: | Where-Object { $_.Name -like 'WS51_*' } | ForEach-Object { Remove-Item -LiteralPath "Env:$($_.Name)" }

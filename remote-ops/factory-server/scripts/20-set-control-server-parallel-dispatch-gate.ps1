@@ -75,7 +75,9 @@
     Staging only adds files under this commit's own directory -- nothing the service, its configuration,
     the MVP or 19-deploy-control-server-parallel.ps1 reads -- and staging the same commit again writes
     the same bytes. So it is not counted as a change for ShouldProcess; what -WhatIf withholds is the
-    gate change and the restart.
+    gate change and the restart. workspace#51: in the production phase -State Open -WhatIf asks for
+    -IoCheckRecord too -- the check runs before staging, read-only, so the dry run shows the refusal the
+    real run would meet.
 
 .EXAMPLE
     pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 -State Closed -ControlServerRepository <checkout> -WhatIf

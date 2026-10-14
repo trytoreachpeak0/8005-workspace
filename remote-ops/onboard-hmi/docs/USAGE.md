@@ -531,7 +531,7 @@ pwsh -File remote-ops/onboard-hmi/scripts/06-deploy-onboard-hmi.ps1 -SshAlias ag
 
 **生产段不放模拟器 IO 上线**（workspace#51）：`06` 部署前只读 ssh 到 `factory01`（`-ServerSshAlias`，默认 `factory01`），
 读 v2 实例 `installed-instance.json` 的 `productionCutover.phase`，并核对其中 `onboardPort` 就是本次 `-OnboardPort`。
-`phase` 是 `production`、或连的是 MVP 端口（58005/58007）时，渲染出的 `ioModule` 必须是站点文件的真模块加端口 502，
+`phase` 是 `production`、或 `-OnboardPort`（09 是车上 `wireToGate.port`）是 MVP 的 58005 时，渲染出的 `ioModule` 必须是站点文件的真模块加端口 502，
 回环、1502、别的模块都拒绝（`PRODUCTION_IO_*`）；读不到阶段也拒绝（`SERVER_PHASE_UNREAD`），不当作试跑。
 试跑段和没有 `productionCutover` 的并行实例照旧可以留在模拟器上。`09 -Simulator` 同理。
 开闸前的只读核对是 `20-check-production-io.ps1`，见 `cutover-three-car-v3-steps.md` 第 5 节第 3 条。

@@ -428,8 +428,10 @@ try {
 #Requires -Version 7
 # ssh shim for Test-DeployOnboardHmi.ps1. Answers the deploy script's two read-only probes; anything else fails.
 # The IO probe is the deploy script's own, decoded, with its install root pointed at a fixture and run in a fresh pwsh.
-$alias = [string] $args[0]
-$command = ($args | Select-Object -Skip 1) -join ' '
+# workspace#51 review L2: ProductionIo.psm1 calls ssh with -o options before the alias; drop them first.
+$plain = @($args | Where-Object { $_ -notin @('-o', 'BatchMode=yes', 'ConnectTimeout=15') })
+$alias = [string] $plain[0]
+$command = ($plain | Select-Object -Skip 1) -join ' '
 # -WhatIf:$false: the deploy script runs under -WhatIf, and that preference reaches this script too.
 Add-Content -LiteralPath $env:WS28_SSH_LOG -Value "$alias | $command" -WhatIf:$false
 # workspace#51: the server alias answers 06's phase probe, run in a fresh pwsh against the fixture record.

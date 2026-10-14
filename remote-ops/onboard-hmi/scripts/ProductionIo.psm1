@@ -12,8 +12,10 @@
     switch on the deploy call: a switch is exactly the thing that is forgotten. The phases:
         production  productionCutover.phase "production"
         trial       productionCutover.phase "trial" (real MES, simulated slots)
-        none        an installed parallel definition without productionCutover (agv02/agv03 testing)
+        none        an installed definition without the productionCutover key: the parallel instance outside a cutover,
+                    including after -LeaveProductionCutover, which therefore switches this guard off by itself
         mvp         the vehicle talks to the MVP service (58005/58007); it serves customers, so it counts as production
+    A productionCutover key whose value is not an object (null, a string, an array) is an unknown phase, not none.
     A record that is absent, unreadable, of another instance (onboardPort) or of an unknown phase is refused, never
     taken for "not production".
 
@@ -45,10 +47,11 @@ function Get-ServerPhaseProbeCommand {
         "if (-not (Test-Path -LiteralPath `$p -PathType Leaf)) { 'SERVER_PHASE=ABSENT'; exit 0 }"
         'try {'
         '    $d = Get-Content -Raw -LiteralPath $p | ConvertFrom-Json -AsHashtable'
-        "    `$cut = (`$d['productionCutover'] -is [System.Collections.IDictionary]) ? `$d['productionCutover'] : `$null"
+        "    `$hasCut = `$d.Contains('productionCutover'); `$cut = `$d['productionCutover']"
+        "    `$phase = (`$cut -is [System.Collections.IDictionary]) ? `$cut['phase'] : ('(productionCutover is not an object: ' + ((`$null -eq `$cut) ? 'null' : `$cut.GetType().Name) + ')')"
         "    `$journey = (`$d['journeyRuntime'] -is [System.Collections.IDictionary]) ? `$d['journeyRuntime'] : @{}"
         "    `$fleet = @(@(`$journey['fleet']) | Where-Object { `$_ -is [System.Collections.IDictionary] } | ForEach-Object { [string] `$_['vehicleKey'] })"
-        "    'SERVER_PHASE=PRESENT ' + (@{ onboardPort = `$d['onboardPort']; cutover = (`$null -ne `$cut); phase = (`$cut ? `$cut['phase'] : `$null); fleet = `$fleet } | ConvertTo-Json -Compress)"
+        "    'SERVER_PHASE=PRESENT ' + (@{ onboardPort = `$d['onboardPort']; cutover = `$hasCut; phase = (`$hasCut ? `$phase : `$null); fleet = `$fleet } | ConvertTo-Json -Compress)"
         '} catch {'
         "    'SERVER_PHASE=UNREADABLE ' + `$_.Exception.Message"
         '}'
@@ -106,7 +109,7 @@ function Read-ServerCutoverPhase {
     )
     if ($OnboardPort -eq 58005) { return [pscustomobject]@{ Phase = 'mvp'; FleetVehicleKeys = @() } }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-ServerPhaseProbeCommand -RecordPath $RecordPath)))
-    $output = @(& ssh $ServerSshAlias "pwsh -NoProfile -EncodedCommand $encoded" 2>&1 | ForEach-Object { "$_" })
+    $output = @(& ssh -o BatchMode=yes -o ConnectTimeout=15 $ServerSshAlias "pwsh -NoProfile -EncodedCommand $encoded" 2>&1 | ForEach-Object { "$_" })
     if ($LASTEXITCODE -ne 0) {
         throw "SERVER_PHASE_UNREAD: ssh $ServerSshAlias failed (exit $LASTEXITCODE): $(($output | Select-Object -First 3) -join ' | '). Refusing rather than guessing."
     }
