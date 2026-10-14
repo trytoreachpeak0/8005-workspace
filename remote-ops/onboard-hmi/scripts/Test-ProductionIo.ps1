@@ -170,9 +170,9 @@ try {
 #Requires -Version 7
 # ssh shim for Test-ProductionIo.ps1. The server alias answers the phase probe against a fixture record; a vehicle alias
 # answers the IO reads from a fixture configuration. Anything else fails. Every call is logged.
-$alias = [string] $args[0]
-$rest = @($args | Select-Object -Skip 1 | Where-Object { $_ -notin @('-o', 'BatchMode=yes', 'ConnectTimeout=15') })
-$command = $rest -join ' '
+$plain = @($args | Where-Object { $_ -notin @('-o', 'BatchMode=yes', 'ConnectTimeout=15') })
+$alias = [string] $plain[0]
+$command = ($plain | Select-Object -Skip 1) -join ' '
 Add-Content -LiteralPath $env:WS51_SSH_LOG -Value "$alias | $command" -WhatIf:$false
 if ($alias -ceq $env:WS51_SERVER_ALIAS) {
     $text = ($command -match '-EncodedCommand (\S+)') ? [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1])) : $command
