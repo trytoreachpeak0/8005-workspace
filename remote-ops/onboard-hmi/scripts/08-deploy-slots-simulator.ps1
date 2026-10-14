@@ -45,7 +45,7 @@ param(
     [string] $SourceRepository = 'C:\Users\szy\Desktop\8005-workspace\repos\slots-simulator',
     [string] $PublishPath,
     [string] $InstallRoot = 'C:\8005\SlotsSimulator',
-    [string] $SdkVersion = '8.0.425',
+    [string] $SdkVersion = '8.0.426',
     [string] $StagingRoot = 'C:\temp\agv\simulator-staging',
     [switch] $Force
 )
