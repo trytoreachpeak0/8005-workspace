@@ -625,7 +625,7 @@ SQL Server 以 15118 拒绝，现在在输入时就检查。
 
 | 项 | 锁定值 |
 | --- | --- |
-| SDK | 8.0.425，`rollForward: disable` |
+| SDK | 8.0.426，`rollForward: disable` |
 | 运行时目标 | `net8.0`（`8005-mes-ingest` 的 WPF 侧另有 `net8.0-windows`，那是合理的） |
 | 测试栈 | xunit.v3 3.2.2 + Microsoft.NET.Test.Sdk 18.8.1 + xunit.runner.visualstudio 3.1.5 |
 
@@ -732,7 +732,7 @@ own Hyper-V. As of 2026-09-02 there is one guest:
 
 | Alias | Guest | Address | Notes |
 | --- | --- | --- | --- |
-| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, `agvops` local admin, 20 vCPU, 10.5 GB static (8 GB until 2026-10-11), 1920x1080. pwsh 7.6.5, .NET SDK 8.0.425, git 2.55.0.5 |
+| `ssh vm01` | `win11-01` / `DESKTOP-F9HC40O` | `192.168.200.50` | Windows 11 Pro 26200.9168, activated, `agvops` local admin, 20 vCPU, 10.5 GB static (8 GB until 2026-10-11), 1920x1080. pwsh 7.6.5, .NET SDK 8.0.426, git 2.55.0.5 |
 
 Key-only, via `ProxyJump factory01` — the guest sits on the Internal switch
 `AGV-Internal` (`192.168.200.0/24`) with NAT out, so there is no route to it

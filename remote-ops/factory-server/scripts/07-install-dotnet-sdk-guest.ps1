@@ -27,7 +27,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = '8.0.425',
+    [string]$Version = '8.0.426',
     [string]$WorkDir = 'C:\agv-ops\downloads',
     [switch]$KeepInstaller
 )
