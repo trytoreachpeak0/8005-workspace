@@ -178,6 +178,17 @@ ssh agv02 '$c = Get-Content -Raw C:\8005\OnboardHmi\appsettings.json | ConvertFr
 2. **逐仓核对**（票面第 5 条，`REQ-0263`）：在真 IO 下逐仓开锁、放物、关门，现场填一份核对记录，`& $f verify --database $db --record <记录.json>` 写进库，
    `& $f status --database $db` 里该车 `slotsMissingVerification` 为空、`ready:true`。**不能拿旧库或试跑库的记录导进来**，那正是票面定义的失败。
    证据进 `evidence/field/<日期>-W3-S0-<车>/`。核对时开锁属于动车类，【问用户·动车】。逐仓核对的具体操作单不在本票范围，C-05 与调度对齐后另写。
+3. **只读核对：本阶段每台车的 IO 读回是真模块**（workspace#51，方案第 20 步之后、任何开闸之前）：
+   `pwsh -File <WT>/remote-ops/onboard-hmi/scripts/20-check-production-io.ps1 -SshAlias <本阶段的车，逗号分隔> -RecordPath <EV>/<阶段>/io-check.json`。
+   它只读每台车 `C:\8005\OnboardHmi\appsettings.json` 的 `ioModule`，要求等于 `config/site-<车>.json` 的 `ioModule.host` 加端口 `502`；
+   每台车一行 `IO_CHECK <车> OK <地址>` 或 `IO_CHECK <车> REFUSED <拒绝码>`，全部 OK 才退出 0。【只读】`agv02`／`agv03` 不需问；含 `agv01` 时【问用户·agv01】（只读探测也算）。
+   **没有这份记录就不开闸**：生产段 `20-set-control-server-parallel-dispatch-gate.ps1 -State Open` 必须带 `-IoCheckRecord <EV>/<阶段>/io-check.json`，
+   记录要在 6 小时内、覆盖已装定义车队里的每一台、每台都 OK，否则以 `IO_CHECK_RECORD_REQUIRED`／`_STALE`／`_INCOMPLETE`／`_FAILED`／`_UNREADABLE` 拒绝，闸门不动。
+   每加一台车（S2、S3）重跑一次，`-SshAlias` 写上本阶段全部车。关闸不受影响。
+
+   生产段另有两道自动拦截（workspace#51），读的都是 factory01 上 v2 实例的 `installed-instance.json` 里 `productionCutover.phase`（一次只读 ssh，读不到就拒 `SERVER_PHASE_UNREAD`）：
+   `06-deploy-onboard-hmi.ps1` 渲染出的 `ioModule` 是回环、`1502` 或不是站点文件真模块时拒绝（`PRODUCTION_IO_LOOPBACK`／`_SIMULATOR_PORT`／`_NOT_SITE_MODULE`，`-KeepCurrentIo` 也拒）；
+   `09-switch-io-module.ps1 -Simulator` 拒绝。所以生产段车还在模拟器上时，先 `09 -RealModule`（授权、现场有人）再部署，或部署时带 `-UseSiteIo`。试跑段两者照旧放行模拟器。
 
 ## 6. 回滚
 
