@@ -465,6 +465,52 @@ if ($null -eq $gateFunction) {
     $at = $gateText.IndexOf('if ($checkoutRefusal) { throw $checkoutRefusal }')
     Write-Result -Ok ($at -gt 0 -and $at -lt $gateText.IndexOf('Invoke-Ssh @("New-Item -ItemType Directory -Force -Path ''$gateRoot'' | Out-Null")')) `
         -Name '20 refuses an old checkout on a cutover instance before anything is staged' -Detail "at $at"
+    # 8005-workspace#61: -RecoveryJourneyId with -RecoveryVehicleAlias, from the site file, checked before anything is staged.
+    $targetAst = $gateAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-RecoveryJourneyTarget' }, $true)
+    if ($null -eq $targetAst) {
+        Write-Result -Ok $false -Name 'Get-RecoveryJourneyTarget is defined in 20' -Detail 'not found'
+    } else {
+        . ([scriptblock]::Create($targetAst.Extent.Text))
+        $siteDirectory = Join-Path (Split-Path -Parent (Split-Path -Parent $gateScript)) '..\onboard-hmi\config'
+        $siteAgv03 = Get-Content -Raw -LiteralPath (Join-Path $siteDirectory 'site-agv03.json') | ConvertFrom-Json -AsHashtable
+        $journeyId = 'journey:40c5532e-d97d-4b29-a5bd-bf5343ea01dc|g102'
+        $siteAgv01 = Get-Content -Raw -LiteralPath (Join-Path $siteDirectory 'site-agv01.json') | ConvertFrom-Json -AsHashtable
+        $t = @(Get-RecoveryJourneyTarget -JourneyId $journeyId -VehicleAlias agv03 -SiteDirectory $siteDirectory -State Closed)
+        Write-Result -Ok ($t.Count -eq 1 -and $t[0].journeyId -ceq $journeyId -and $t[0].agvId -ceq $siteAgv03['agvId'] -and $t[0].vehicleKey -ceq $siteAgv03['vehicleSafety']['expectedVehicleKey']) `
+            -Name '20 (workspace#61): the recovery journey is matched against site-agv03.json''s agvId and expectedVehicleKey' -Detail ($t | ConvertTo-Json -Compress)
+        foreach ($form in @(@{ Name = 'as arrays'; J = @($journeyId, 'journey:x|g1'); V = @('agv03', 'agv01') },
+                @{ Name = 'as one comma-separated string each (how pwsh -File passes them)'; J = "$journeyId, journey:x|g1"; V = 'agv03,agv01' })) {
+            $t = @(Get-RecoveryJourneyTarget -JourneyId $form.J -VehicleAlias $form.V -SiteDirectory $siteDirectory -State Closed)
+            Write-Result -Ok ($t.Count -eq 2 -and $t[1].journeyId -ceq 'journey:x|g1' -and $t[1].agvId -ceq $siteAgv01['agvId'] -and $t[0].journeyId -ceq $journeyId -and $t[0].agvId -ceq $siteAgv03['agvId']) `
+                -Name "20 (workspace#61): two journeys $($form.Name), each paired by position with its vehicle's site file" -Detail ($t | ConvertTo-Json -Compress)
+        }
+        Write-Result -Ok ($null -eq (Get-RecoveryJourneyTarget -JourneyId '' -VehicleAlias '' -SiteDirectory $siteDirectory -State Open)) -Name '20 (workspace#61): without either, no recovery journey' -Detail ''
+        $siteRoot = Join-Path ([IO.Path]::GetTempPath()) "ws61-site-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Path $siteRoot | Out-Null
+        try {
+            '{ "agvId": "car", "vehicleSafety": {} }' | Set-Content -LiteralPath (Join-Path $siteRoot 'site-agv02.json') -Encoding utf8NoBOM
+            foreach ($case in @(
+                    @{ Name = 'the id without the vehicle'; J = $journeyId; V = ''; D = $siteDirectory; S = 'Closed'; Expect = 'go together' }
+                    @{ Name = 'the vehicle without the id'; J = ''; V = 'agv03'; D = $siteDirectory; S = 'Closed'; Expect = 'go together' }
+                    @{ Name = 'two journeys and one vehicle'; J = @($journeyId, 'journey:x|g1'); V = 'agv03'; D = $siteDirectory; S = 'Closed'; Expect = 'go together' }
+                    @{ Name = 'the same journey twice'; J = @($journeyId, $journeyId); V = @('agv03', 'agv01'); D = $siteDirectory; S = 'Closed'; Expect = 'names a journey twice' }
+                    @{ Name = 'a journey id with a quote'; J = "j-1' OR '1'='1"; V = 'agv03'; D = $siteDirectory; S = 'Closed'; Expect = 'refused' }
+                    @{ Name = 'an unknown vehicle alias'; J = $journeyId; V = 'agv04'; D = $siteDirectory; S = 'Closed'; Expect = 'refused agv04' }
+                    @{ Name = 'with -State Open (opening is not widened)'; J = $journeyId; V = 'agv03'; D = $siteDirectory; S = 'Open'; Expect = 'for -State Closed only' }
+                    @{ Name = 'a site file without expectedVehicleKey'; J = $journeyId; V = 'agv02'; D = $siteRoot; S = 'Closed'; Expect = 'lacks agvId or vehicleSafety.expectedVehicleKey' }
+                    @{ Name = 'no site file'; J = $journeyId; V = 'agv01'; D = $siteRoot; S = 'Closed'; Expect = 'cannot be read' })) {
+                try { $null = Get-RecoveryJourneyTarget -JourneyId $case.J -VehicleAlias $case.V -SiteDirectory $case.D -State $case.S; $thrown = $null } catch { $thrown = $_.Exception.Message }
+                Write-Result -Ok ($thrown -and $thrown.Contains($case.Expect) -and $thrown.EndsWith('Nothing was copied or changed.')) -Name "20 (workspace#61): $($case.Name) is refused" -Detail "thrown: $thrown"
+            }
+        } finally { Remove-Item -LiteralPath $siteRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $stagedAt = $gateText.IndexOf('Invoke-Ssh @("New-Item -ItemType Directory -Force -Path ''$gateRoot'' | Out-Null")')
+    $targetAt = $gateText.IndexOf('$recoveryTarget = @(Get-RecoveryJourneyTarget -JourneyId $RecoveryJourneyId -VehicleAlias $RecoveryVehicleAlias')
+    $stateAt = $gateText.IndexOf("-SiteDirectory (Join-Path `$PSScriptRoot '../../onboard-hmi/config') -State `$State)")
+    $predatesAt = $gateText.IndexOf('throw ("CHECKOUT_PREDATES_RECOVERY_JOURNEY:')
+    $argumentAt = $gateText.IndexOf("`$switch += ' -RecoveryJourney ' + (ConvertTo-ParallelRecoveryJourneyArgument -Journeys `$recoveryTarget)")
+    Write-Result -Ok ($targetAt -gt 0 -and $stateAt -gt $targetAt -and $predatesAt -gt $targetAt -and $stagedAt -gt $predatesAt -and $argumentAt -gt 0) `
+        -Name '20 (workspace#61): reads the target and refuses an old checkout before anything is staged, and passes the journey encoded' -Detail "target $targetAt predates $predatesAt staged $stagedAt argument $argumentAt"
 }
 
 # ------------------------------------------------------------------ fixtures ---
