@@ -245,8 +245,10 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 | `win11-01-onboard-hmi` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-onboard-hmi |
 | `win11-01-control-server-2` | 服务（session 0） | `dotnet8` `cs-test` | 8005-agv-control-server（只跑 `test.yml`） |
 | `win11-01-control-server-desktop` | 交互式（session 1） | `dotnet8` `cs-desktop` | 8005-agv-control-server（只跑 `l2.yml` 的 `real-rig` 作业） |
+| `win11-01-simple` | 服务（session 0） | `simple` | simple（2026-10-17 加，`trytoreachpeak0/simple#20`） |
 
-八个都带 `self-hosted` `Windows` `X64` `win11-01`。注意两个交互式 runner 都**不带**
+九个都带 `self-hosted` `Windows` `X64` `win11-01`。`win11-01-simple` 另外只带 `simple`，不带
+`headless`／`cs-test`／`cs-desktop`／`golden-renderer`，所以不会领 v2 各仓的作业。注意两个交互式 runner 都**不带**
 `headless`，`win11-01-mes-ingest-desktop` 是唯一带 `golden-renderer` 的，
 `win11-01-control-server-desktop` 是唯一带 `cs-desktop` 的——这一条正是标签分工能成立的原因。
 
