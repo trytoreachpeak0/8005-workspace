@@ -672,6 +672,14 @@ pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlia
   同一道检查）；服务 `Environment` 里有 `RiotCreateDispatch__*`；实例库里有没走完（非 `Completed`）的旅程，或库读不出；
   有车连在车载端口上，或连接读不出。旅程那条没有开关；连接那条在现场确认可以接受另一台车断线重连进恢复时，可以加
   `-AllowConnectedVehicles` 降为警告。重启会让连着的车断线进恢复，它们的故障监看也会停，所以默认拒绝。
+- **要开窗的正是那趟卡住的旅程时**（8005-workspace#58，起因是 2026-10-19 agv03 装货结果 UNKNOWN）：车卡在恢复态时，它那趟旅程
+  本身就不是 `Completed`，上一条永远过不去。这时加 `-RecoveryJourneyId <旅程号>`（开窗和 `-Revert` 都可以带）。只有同时满足下面几条，
+  服务端那一步才放行：除这一趟之外所有旅程都是 `Completed`；这一趟在 `-SshAlias` 那台车上（`agvId` 与
+  `vehicleSafety.expectedVehicleKey` 取自 `config/site-<别名>.json`，与库里那一行逐字相等）；它是 `Blocked`，阻塞码是
+  `LOAD_RESULT_REQUIRES_RECOVERY`、`UNLOAD_RESULT_REQUIRES_RECOVERY`，或普通的 `<消息类型>_NOT_RECONCILED`（补偿等结果没对上、
+  还能再开会话）。判据出处写在 `V2RecoveryWindow.psm1` 的 `Test-V2JourneyAwaitsRecovery`。闸门、`RiotCreateDispatch__*`、连着的车、
+  车上客户端要停着，这些检查一条不少。不带这个参数时行为与以前完全一样。它不能与 `-Status`、`-VehicleOnly` 合用。
+  旅程收尾成 `Completed` 之后，带不带它都按空闲实例处理。
 
 **检查之后、写入之前仍可能留下残留**。只读检查和真正写入之间隔着车载端那一步（几十秒到几分钟）。这期间如果有车连上、
 有旅程开始，写入那一步会拒绝，而车那一半已经做完：

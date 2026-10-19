@@ -212,6 +212,128 @@ function Get-V2EntryNames([string[]] $Environment) {
     return (@($Environment | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', ')
 }
 
+function Test-V2JourneyAwaitsRecovery {
+    <#
+        .SYNOPSIS
+            8005-workspace#58. Whether a journey row stands still on a slot operation whose result needs an
+            exception recovery session -- the state the recovery window is opened for. Pure.
+
+        .DESCRIPTION
+            Read from control-server c0389b68: the engine blocks a journey with Block(), which sets Stage
+            Blocked and the block reason (JourneyRuntimeEngine.cs:6128-6133), under
+            LOAD_RESULT_REQUIRES_RECOVERY when the load operation is RecoveryRequired (:1629-1631, and on a
+            restart :5755-5775) and UNLOAD_RESULT_REQUIRES_RECOVERY for the unload (:2055-2057). A session
+            result that did not reconcile keeps it Blocked as <messageType>_NOT_RECONCILED with the demand
+            still RecoveryRequired (OnboardRecoveryCoordinator.cs:2767; BlockedJourneyRelease.cs:157-158),
+            and a new session may be opened on it. A session is accepted only for a demand whose journey is
+            Blocked on that vehicle (OnboardRecoveryCoordinator.cs:2876-2879).
+
+            Not these: the unreleasable *_NOT_RECONCILED_ON_ENDED_DEMAND / *_BEFORE_UPGRADE (no session can
+            be opened for an ended demand, BlockedJourneyRelease.cs:162-177), and every other Blocked reason
+            (a lost session, an area hold, ...): a window does not move those.
+    #>
+    param([AllowNull()][string] $Stage, [AllowNull()][string] $BlockReasonCode)
+    if ($Stage -cne 'Blocked' -or [string]::IsNullOrEmpty($BlockReasonCode)) { return $false }
+    return ($BlockReasonCode -cin @('LOAD_RESULT_REQUIRES_RECOVERY', 'UNLOAD_RESULT_REQUIRES_RECOVERY')) -or
+        ($BlockReasonCode -cmatch '^[A-Za-z]+_NOT_RECONCILED$')
+}
+
+function Read-V2JourneyRuntimeRow {
+    <#
+        .SYNOPSIS
+            8005-workspace#58. One JourneyRuntimes row by JourneyId, read-only, with the block reason that
+            control-server's Get-ParallelJourneyDispatchState does not select. Never throws: @{ Found = $false },
+            @{ Found = $true; JourneyId; Stage; BlockReasonCode; AgvId; VehicleKey } or @{ Error = '...' }.
+
+        .DESCRIPTION
+            Opened as Get-ParallelJourneyDispatchState opens it (control-server scripts/parallel/ParallelHost.psm1):
+            Microsoft.Data.Sqlite from the installed service, Mode=ReadOnly, unpooled. That reader has run in the
+            same process just before, so the assemblies are already loaded. The id is a parameter, never text in
+            the statement.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $DatabasePath,
+        [Parameter(Mandatory = $true)][string] $AssemblyDirectory,
+        [Parameter(Mandatory = $true)][string] $JourneyId
+    )
+    $connection = $null
+    try {
+        if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) { throw "there is no file at $DatabasePath" }
+        foreach ($assembly in @('SQLitePCLRaw.core.dll', 'SQLitePCLRaw.provider.e_sqlite3.dll', 'SQLitePCLRaw.batteries_v2.dll', 'Microsoft.Data.Sqlite.dll')) {
+            $path = Join-Path $AssemblyDirectory $assembly
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$assembly is not in $AssemblyDirectory" }
+            Add-Type -LiteralPath $path -ErrorAction SilentlyContinue
+        }
+        try { [SQLitePCL.Batteries_V2]::Init() } catch { }
+        $connection = [Microsoft.Data.Sqlite.SqliteConnection]::new("Data Source=$DatabasePath;Mode=ReadOnly;Pooling=False")
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        $command.CommandText = 'SELECT JourneyId, Stage, BlockReasonCode, AgvId, VehicleKey FROM JourneyRuntimes WHERE JourneyId = $id'
+        $null = $command.Parameters.AddWithValue('$id', $JourneyId)
+        $reader = $command.ExecuteReader()
+        try {
+            if (-not $reader.Read()) { return @{ Found = $false } }
+            $row = @{ Found = $true }
+            for ($i = 0; $i -lt $reader.FieldCount; $i++) { $row[$reader.GetName($i)] = $reader.IsDBNull($i) ? $null : [string] $reader.GetValue($i) }
+            return $row
+        } finally { $reader.Dispose(); $command.Dispose() }
+    } catch {
+        return @{ Error = $_.Exception.Message }
+    } finally {
+        if ($connection) { $connection.Dispose() }
+    }
+}
+
+function Get-V2RecoveryJourneyRefusal {
+    <#
+        .SYNOPSIS
+            8005-workspace#58. With a named recovery journey, the journey check before a restart: $null when
+            the only journey not Completed is that journey, on that vehicle, awaiting recovery; otherwise the
+            refusal text. Without one, the unchanged JOURNEYS_IN_PROGRESS rule. Pure but for -ReadRow.
+
+        .DESCRIPTION
+            -Open is the rows Get-ParallelJourneyDispatchState returned (not Completed). -RecoveryJourney is the
+            request's recoveryJourney (journeyId, agvId, vehicleKey) or $null. -ReadRow(journeyId) returns
+            Read-V2JourneyRuntimeRow's answer. No journey open passes either way: the instance is idle, which is
+            what a -Revert sees once the session has settled the journey.
+    #>
+    param(
+        [AllowEmptyCollection()][object[]] $Open,
+        [AllowNull()][System.Collections.IDictionary] $RecoveryJourney,
+        [scriptblock] $ReadRow
+    )
+    $open = @($Open)
+    if ($open.Count -eq 0) { return $null }
+    $named = @($open | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
+    if ($null -eq $RecoveryJourney) {
+        return ("JOURNEYS_IN_PROGRESS: $($open.Count) journey(s) not Completed: $named. A restart stops their supervision; " +
+            'finish or settle them first. Nothing was changed.')
+    }
+    $id = [string] $RecoveryJourney['journeyId']
+    $others = @($open | Where-Object { [string] $_['JourneyId'] -cne $id })
+    if ($others.Count -gt 0) {
+        $otherNamed = @($others | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
+        return ("RECOVERY_JOURNEY_NOT_ALONE: the recovery journey is $id, and $($others.Count) other journey(s) are not Completed: " +
+            "$otherNamed. A restart stops their supervision; finish or settle them first. Nothing was changed.")
+    }
+    $row = & $ReadRow $id
+    if ($row -isnot [System.Collections.IDictionary] -or $row.Contains('Error')) {
+        $why = ($row -is [System.Collections.IDictionary]) ? [string] $row['Error'] : 'no answer'
+        return "JOURNEY_STATE_UNREADABLE: the recovery journey $id cannot be read ($why). Nothing was changed."
+    }
+    if (-not $row['Found']) { return "JOURNEY_STATE_UNREADABLE: the recovery journey $id was listed but its row is gone. Nothing was changed." }
+    if ([string] $row['AgvId'] -cne [string] $RecoveryJourney['agvId'] -or [string] $row['VehicleKey'] -cne [string] $RecoveryJourney['vehicleKey']) {
+        return ("RECOVERY_JOURNEY_VEHICLE_MISMATCH: journey $id is on agvId '$($row['AgvId'])' / vehicleKey '$($row['VehicleKey'])', " +
+            "not the target vehicle's '$($RecoveryJourney['agvId'])' / '$($RecoveryJourney['vehicleKey'])'. Nothing was changed.")
+    }
+    if (-not (Test-V2JourneyAwaitsRecovery -Stage ([string] $row['Stage']) -BlockReasonCode ([string] $row['BlockReasonCode']))) {
+        return ("RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY: journey $id is $($row['Stage']) / $($row['BlockReasonCode'] ?? '(no block reason)'), " +
+            'not Blocked on a slot operation result that needs recovery. A restart stops its supervision. Nothing was changed.')
+    }
+    return $null
+}
+
 function Invoke-V2RecoveryWindowServer {
     <#
         .SYNOPSIS
@@ -221,7 +343,8 @@ function Invoke-V2RecoveryWindowServer {
 
         .DESCRIPTION
             Request keys: mode ('status', 'check', 'set', 'remove'), target ('set' or 'remove', for
-            'check'), proof ('set'; 'check' and 'status' optionally), allowConnectedVehicles.
+            'check'), proof ('set'; 'check' and 'status' optionally), allowConnectedVehicles,
+            recoveryJourney (optional, 8005-workspace#58: journeyId, agvId, vehicleKey).
 
             In order; nothing changes before step 5, and every refusal throws:
               1. The MVP service is refused by name.
@@ -233,6 +356,9 @@ function Invoke-V2RecoveryWindowServer {
                  override in the Environment; no established connection on the onboard port, unless
                  allowConnectedVehicles (then a warning); no journey that is not Completed (the
                  instance's SQLite store, read-only; no switch). Unreadable connections or journeys refuse.
+                 With recoveryJourney (8005-workspace#58), and only then, the one journey not Completed may
+                 be that journey, on that vehicle, awaiting recovery (Get-V2RecoveryJourneyRefusal); every
+                 other check above is the same.
                  'check' stops here: CHECK_PASSED.
               5. Write the Environment with every other entry kept in its order, read it back; on a
                  mismatch the original is written back and the run fails.
@@ -242,6 +368,7 @@ function Invoke-V2RecoveryWindowServer {
             ServiceName and the MVP); scriptblocks ReadEnvironment -> string[]; WriteEnvironment([string[]]);
             MergeEntry(environment, name, value) -> string[]; ServiceStatus -> string or $null;
             PreInstallRefusal -> string or $null; JourneyState -> hashtable (Journeys, or Error);
+            JourneyRow(journeyId) -> Read-V2JourneyRuntimeRow's answer (only with recoveryJourney);
             Connections -> string[] of remote addresses (throws when it cannot read); RestartService.
     #>
     [CmdletBinding()]
@@ -258,6 +385,14 @@ function Invoke-V2RecoveryWindowServer {
     $proof = $Request.Contains('proof') ? [string] $Request['proof'] : $null
     if ($target -ceq 'set' -and [string]::IsNullOrEmpty($proof)) { throw 'PROOF_NOT_RECEIVED: setting the entry needs the proof. Nothing was changed.' }
     $allowConnected = [bool] $Request['allowConnectedVehicles']
+    $recoveryJourney = $null
+    if ($Request.Contains('recoveryJourney') -and $null -ne $Request['recoveryJourney']) {
+        $recoveryJourney = $Request['recoveryJourney']
+        if ($recoveryJourney -isnot [System.Collections.IDictionary] -or
+            @('journeyId', 'agvId', 'vehicleKey' | Where-Object { [string]::IsNullOrWhiteSpace([string] $recoveryJourney[$_]) }).Count -gt 0) {
+            throw 'REQUEST_RECOVERY_JOURNEY_MALFORMED: recoveryJourney needs journeyId, agvId and vehicleKey. Nothing was changed.'
+        }
+    }
 
     if ($ServiceName.Trim().TrimEnd('\') -ieq $script:MvpServiceName) { throw 'MVP_SERVICE_REFUSED: this script never changes the MVP service. Nothing was changed.' }
     # The key the actions write is checked too, not only the name passed here: a path pointing at the
@@ -309,10 +444,10 @@ function Invoke-V2RecoveryWindowServer {
         throw "JOURNEY_STATE_UNREADABLE: $why. Nothing was changed."
     }
     $open = @($journeys['Journeys'])
-    if ($open.Count -gt 0) {
-        $named = @($open | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
-        throw ("JOURNEYS_IN_PROGRESS: $($open.Count) journey(s) not Completed: $named. A restart stops their supervision; " +
-            'finish or settle them first. Nothing was changed.')
+    $journeyRefusal = Get-V2RecoveryJourneyRefusal -Open $open -RecoveryJourney $recoveryJourney -ReadRow $Actions.JourneyRow
+    if ($journeyRefusal) { throw $journeyRefusal }
+    if ($recoveryJourney -and $open.Count -gt 0) {
+        $lines.Add("RECOVERY_JOURNEY=$($recoveryJourney['journeyId']) awaits recovery on $($recoveryJourney['agvId']); no other journey open. A restart stops its supervision until the vehicle reconnects.")
     }
     if ($mode -ceq 'check') { $lines.Add('CHECK_PASSED'); return $lines.ToArray() }
 
@@ -405,6 +540,16 @@ function New-V2ServerActions {
             }
             Get-ParallelJourneyDispatchState -DatabasePath $databasePath -AssemblyDirectory $InstallRoot
         }.GetNewClosure()
+        JourneyRow = {
+            param([string] $JourneyId)
+            try {
+                $configuration = ConvertFrom-Json -InputObject (& $readConfiguration) -AsHashtable -Depth 12
+                $databasePath = Resolve-ParallelInstanceDatabasePath -Configuration $configuration -DataRoot $DataRoot -ConfigurationPath $configurationPath
+            } catch {
+                return @{ Error = "the database path cannot be resolved from $configurationPath ($($_.Exception.Message))" }
+            }
+            Read-V2JourneyRuntimeRow -DatabasePath $databasePath -AssemblyDirectory $InstallRoot -JourneyId $JourneyId
+        }.GetNewClosure()
         RestartService = $restart
         IsElevated = { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
         MvpFingerprint = { Get-MvpFingerprint }
@@ -461,4 +606,5 @@ function Get-V2InstalledCutoverArgument {
 
 Export-ModuleMember -Function Get-V2InstalledCutoverArgument, Get-V2RecoveryWindowNames, Read-V2RecoveryWindowRequest, Get-V2ProofComparison,
     Invoke-V2RecoveryWindowVehicle, New-V2VehicleActions, Read-V2RegistryMultiString, Write-V2RegistryMultiString,
-    Invoke-V2RecoveryWindowServer, New-V2ServerActions, Invoke-V2RecoveryWindowServerRun
+    Invoke-V2RecoveryWindowServer, New-V2ServerActions, Invoke-V2RecoveryWindowServerRun,
+    Test-V2JourneyAwaitsRecovery, Read-V2JourneyRuntimeRow, Get-V2RecoveryJourneyRefusal

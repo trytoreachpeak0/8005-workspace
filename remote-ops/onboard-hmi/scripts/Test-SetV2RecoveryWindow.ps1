@@ -310,6 +310,34 @@ exit 0
     $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert')
     Remove-Item -LiteralPath $secret -Force -ErrorAction SilentlyContinue
 
+    # ---- -RecoveryJourneyId (8005-workspace#58) ----
+    $siteAgv03 = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'config\site-agv03.json') | ConvertFrom-Json
+    $serverRequests = { param($run) @($run.Calls | Where-Object { $_.key -like 'factory01:*' } | ForEach-Object { $_.stdin | ConvertFrom-Json -AsHashtable }) }
+    $journeyRefusals = [ordered]@{
+        '-RecoveryJourneyId with -Status'              = @('-SshAlias', 'agv03', '-Status', '-RecoveryJourneyId', 'j-1')
+        '-RecoveryJourneyId with -Revert -VehicleOnly' = @('-SshAlias', 'agv03', '-Revert', '-VehicleOnly', '-RecoveryJourneyId', 'j-1')
+        '-RecoveryJourneyId with a quote in it'        = @('-SshAlias', 'agv03', '-RecoveryJourneyId', "j-1' OR '1'='1")
+    }
+    foreach ($case in $journeyRefusals.GetEnumerator()) {
+        $run = Invoke-Target -Arguments $case.Value
+        Write-Result -Ok ($run.Exit -ne 0 -and $run.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $secret)) -Name "$($case.Key) is refused before ssh or scp is called" -Detail "exit $($run.Exit), $($run.Calls.Count) call(s)`n$($run.Output)"
+    }
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-RecoveryJourneyId', 'journey:40c5532e')
+    Assert-Runs $run 'factory01:server-v2-recovery-window:check > agv03:agv-v2-recovery-window:Open > factory01:server-v2-recovery-window:set' 'open agv03 -RecoveryJourneyId: the same three runs'
+    $named = @(& $serverRequests $run | Where-Object { $_['recoveryJourney'] -and $_['recoveryJourney']['journeyId'] -ceq 'journey:40c5532e' -and
+            $_['recoveryJourney']['agvId'] -ceq $siteAgv03.agvId -and $_['recoveryJourney']['vehicleKey'] -ceq $siteAgv03.vehicleSafety.expectedVehicleKey })
+    Write-Result -Ok ($named.Count -eq 2) -Name "... both server requests name the journey with site-agv03.json's agvId and expectedVehicleKey" -Detail (@(& $serverRequests $run | ForEach-Object { ($_['recoveryJourney'] | ConvertTo-Json -Compress) }) -join ' | ')
+    $vehicleRequests = @($run.Calls | Where-Object { $_.key -like 'agv03:*' } | ForEach-Object { $_.stdin | ConvertFrom-Json -AsHashtable })
+    Write-Result -Ok (@($vehicleRequests | Where-Object { $_.Contains('recoveryJourney') }).Count -eq 0) -Name '... and the vehicle request does not carry it' -Detail ''
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert', '-RecoveryJourneyId', 'journey:40c5532e')
+    Assert-Runs $run 'factory01:server-v2-recovery-window:check > agv03:agv-v2-recovery-window:Close > factory01:server-v2-recovery-window:remove' '-Revert -RecoveryJourneyId: check, vehicle, remove'
+    Write-Result -Ok (@(& $serverRequests $run | Where-Object { $_['recoveryJourney']['journeyId'] -ceq 'journey:40c5532e' }).Count -eq 2 -and -not (Test-Path -LiteralPath $secret)) `
+        -Name '... both server requests name the journey, and the store is deleted' -Detail ''
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03')
+    Write-Result -Ok ($run.Exit -eq 0 -and @(& $serverRequests $run | Where-Object { $_.Contains('recoveryJourney') }).Count -eq 0) -Name 'without -RecoveryJourneyId no server request carries recoveryJourney (unchanged)' -Detail ''
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert')
+    Remove-Item -LiteralPath $secret -Force -ErrorAction SilentlyContinue
+
     # ---- an unreadable store ----
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $secret) | Out-Null
     Set-Content -LiteralPath $secret -Value 'not a clixml file'
@@ -515,7 +543,7 @@ exit 0
         (& $pick 'sqlitepclraw.lib.e_sqlite3' 'runtimes\win-x64\native\e_sqlite3.dll'))
     $haveSqlite = @($sqliteParts | Where-Object { $_ }).Count -eq 5
     if ($haveSqlite) { $sqliteParts | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $serverInstall } }
-    function New-Database([string[]] $Stages) {
+    function New-Database([string[]] $Stages, [hashtable[]] $Journeys = @()) {
         Remove-Item -LiteralPath $databasePath -Force -ErrorAction SilentlyContinue
         foreach ($assembly in 'SQLitePCLRaw.core.dll', 'SQLitePCLRaw.provider.e_sqlite3.dll', 'SQLitePCLRaw.batteries_v2.dll', 'Microsoft.Data.Sqlite.dll') {
             Add-Type -LiteralPath (Join-Path $serverInstall $assembly) -ErrorAction SilentlyContinue
@@ -525,9 +553,11 @@ exit 0
         $writer.Open()
         $command = $writer.CreateCommand()
         $i = 0
-        $rows = @($Stages | ForEach-Object { $i++; "INSERT INTO JourneyRuntimes VALUES ('j-$i', '$_', 'car', 'K', 'p$i', NULL, '2026-10-12 09:00:00+08:00');" }) -join "`n"
+        $rows = @($Stages | ForEach-Object { $i++; "INSERT INTO JourneyRuntimes VALUES ('j-$i', '$_', 'car', 'K', 'p$i', NULL, '2026-10-12 09:00:00+08:00', NULL);" }) -join "`n"
+        $rows += "`n" + (@($Journeys | ForEach-Object {
+                    "INSERT INTO JourneyRuntimes VALUES ('$($_.Id)', '$($_.Stage)', '$($_.AgvId)', '$($_.VehicleKey)', 'p-$($_.Id)', NULL, '2026-10-19 14:37:00+08:00', $($_.Block ? "'$($_.Block)'" : 'NULL'));" }) -join "`n")
         $command.CommandText = @"
-CREATE TABLE JourneyRuntimes (JourneyId TEXT PRIMARY KEY, Stage TEXT, AgvId TEXT, VehicleKey TEXT, PickupUpperId TEXT, GateUpperId TEXT, CreatedAt TEXT);
+CREATE TABLE JourneyRuntimes (JourneyId TEXT PRIMARY KEY, Stage TEXT, AgvId TEXT, VehicleKey TEXT, PickupUpperId TEXT, GateUpperId TEXT, CreatedAt TEXT, BlockReasonCode TEXT);
 CREATE TABLE OrderIntents (MovementLegId TEXT PRIMARY KEY, UpperId TEXT, VehicleKey TEXT, Status TEXT, OrderId TEXT, CreateAttemptCount INTEGER, CreateAttemptId TEXT, DispatchAuditVersion INTEGER, ExperimentalCreateAuthorizationId TEXT, CreatedAt TEXT);
 CREATE TABLE RiotDispatchAuditEvents (AuditEventId TEXT PRIMARY KEY, MovementLegId TEXT, Phase TEXT, Outcome TEXT, AttemptId TEXT, ReturnedOrderId TEXT, ResultPresent INTEGER);
 $rows
@@ -639,6 +669,73 @@ $rows
             Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEYS_IN_PROGRESS' 'a journey not Completed (a real SQLite store)'
             Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ allowConnectedVehicles = $true }) 'JOURNEYS_IN_PROGRESS' 'a journey not Completed, with allowConnectedVehicles'
         }
+        # ---- a named recovery journey (8005-workspace#58), against a real SQLite store ----
+        $target = @{ journeyId = 'j-target'; agvId = 'car3'; vehicleKey = 'K3' }
+        $stuck = @{ Id = 'j-target'; Stage = 'Blocked'; Block = 'LOAD_RESULT_REQUIRES_RECOVERY'; AgvId = 'car3'; VehicleKey = 'K3' }
+        $withTarget = { param([hashtable] $req) $req + @{ recoveryJourney = $target } }
+        foreach ($req in @(@{ mode = 'set'; proof = $testProof }, @{ mode = 'remove' })) {
+            $env0 = ($req.mode -eq 'set') ? $baseEnvironment : $withEntry
+            $want = ($req.mode -eq 'set') ? (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof") -join "`n") : ($baseEnvironment -join "`n")
+            Set-Config
+            New-Database @('Completed', 'Completed') -Journeys @($stuck)
+            $rig = New-ServerRig -Environment $env0
+            $r = Invoke-Server $rig (& $withTarget $req)
+            Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq $want -and ($rig.Events -join ';') -ceq 'write' -and $r.Text -match 'RECOVERY_JOURNEY=j-target awaits recovery on car3') `
+                -Name "server $($req.mode) with recoveryJourney: the target Blocked on LOAD_RESULT_REQUIRES_RECOVERY, the rest Completed -- passes, written" -Detail ($r.All + ' events: ' + ($rig.Events -join ';'))
+            Write-Result -Ok (-not (Test-ServerLeak $r)) -Name "... and server $($req.mode) prints no proof and no other entry value" -Detail ''
+            $rig = New-ServerRig -Environment $env0
+            $r = Invoke-Server $rig @{ mode = 'check'; target = $req.mode; recoveryJourney = $target; proof = $testProof }
+            Write-Result -Ok ($r.Text -match 'CHECK_PASSED' -and $rig.Events.Count -eq 0) -Name "server check ($($req.mode)) with recoveryJourney: passes, writes nothing" -Detail $r.All
+
+            Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEYS_IN_PROGRESS' 'the same stuck journey without recoveryJourney (unchanged)'
+            New-Database @('Completed', 'Dispatched') -Journeys @($stuck)
+            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_NOT_ALONE' 'recoveryJourney with another journey not Completed'
+            New-Database @('Completed') -Journeys @($stuck)
+            Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ recoveryJourney = @{ journeyId = 'j-other'; agvId = 'car3'; vehicleKey = 'K3' } }) 'RECOVERY_JOURNEY_NOT_ALONE' 'recoveryJourney naming another journey than the stuck one'
+            $j = $stuck.Clone(); $j.AgvId = 'car2'; $j.VehicleKey = 'K2'
+            New-Database @('Completed') -Journeys @($j)
+            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_VEHICLE_MISMATCH' 'recoveryJourney whose journey is on another vehicle'
+            $j = $stuck.Clone(); $j.VehicleKey = 'K2'
+            New-Database @('Completed') -Journeys @($j)
+            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_VEHICLE_MISMATCH' 'recoveryJourney whose journey has the right agvId but another vehicleKey'
+            foreach ($state in @(@{ Stage = 'Blocked'; Block = 'ONBOARD_SESSION_LOST' }, @{ Stage = 'Blocked'; Block = 'LoadCompensationResult_NOT_RECONCILED_ON_ENDED_DEMAND' },
+                    @{ Stage = 'AwaitingLoadResult'; Block = 'LOAD_RESULT_REQUIRES_RECOVERY' }, @{ Stage = 'Blocked'; Block = $null })) {
+                $j = $stuck.Clone(); $j.Stage = $state.Stage; $j.Block = $state.Block
+                New-Database @('Completed') -Journeys @($j)
+                Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' "recoveryJourney on a journey $($state.Stage) / $($state.Block ?? 'no reason')"
+            }
+            # The other checks still hold with a named journey.
+            New-Database @('Completed') -Journeys @($stuck)
+            Set-Config -Gate 'true'
+            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'UPGRADE_REFUSED_DISPATCH_OPEN' 'recoveryJourney with the dispatch gate open'
+            Set-Config
+            Assert-Refused (New-ServerRig -Environment ([string[]] ($env0 + 'RiotCreateDispatch__enabled=true'))) (& $withTarget $req) 'DISPATCH_GATE_OVERRIDDEN' 'recoveryJourney with a RiotCreateDispatch__ override'
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $listener.Start()
+            $busyPort = $listener.LocalEndpoint.Port
+            $client = [Net.Sockets.TcpClient]::new(); $client.Connect([Net.IPAddress]::Loopback, $busyPort); $accepted = $listener.AcceptTcpClient()
+            try {
+                Assert-Refused (New-ServerRig -Environment $env0 -Port $busyPort) (& $withTarget $req) 'CONNECTED_VEHICLES: ' 'recoveryJourney with a connected vehicle'
+            } finally { $accepted.Dispose(); $client.Dispose(); $listener.Stop() }
+            Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ recoveryJourney = @{ journeyId = 'j-target' } }) 'REQUEST_RECOVERY_JOURNEY_MALFORMED' 'a recoveryJourney without agvId and vehicleKey'
+        }
+        foreach ($block in 'UNLOAD_RESULT_REQUIRES_RECOVERY', 'LoadCompensationResult_NOT_RECONCILED') {
+            $j = $stuck.Clone(); $j.Block = $block
+            New-Database @('Completed') -Journeys @($j)
+            $rig = New-ServerRig -Environment $baseEnvironment
+            $r = Invoke-Server $rig @{ mode = 'check'; target = 'set'; proof = $testProof; recoveryJourney = $target }
+            Write-Result -Ok ($r.Text -match 'CHECK_PASSED') -Name "server check with recoveryJourney: Blocked / $block also awaits recovery" -Detail $r.All
+        }
+        New-Database @('Completed')
+        $rig = New-ServerRig -Environment $withEntry
+        $r = Invoke-Server $rig @{ mode = 'remove'; recoveryJourney = $target }
+        Write-Result -Ok ($null -eq $r.Error -and ($rig.Events -join ';') -ceq 'write' -and $r.Text -notmatch 'RECOVERY_JOURNEY=') -Name 'server remove with recoveryJourney once the journey is Completed: an idle instance, passes as before' -Detail $r.All
+        $rig = New-ServerRig -Environment $baseEnvironment
+        $rig.Actions.JourneyRow = { param($id) @{ Error = 'disk gone (injected)' } }
+        New-Database @('Completed') -Journeys @($stuck)
+        Assert-Refused $rig (& $withTarget @{ mode = 'set'; proof = $testProof }) 'JOURNEY_STATE_UNREADABLE' 'recoveryJourney whose row cannot be read'
+
+        $row = Read-V2JourneyRuntimeRow -DatabasePath $databasePath -AssemblyDirectory $serverInstall -JourneyId "j-target' OR '1'='1"
+        Write-Result -Ok ($row['Found'] -eq $false) -Name 'the journey row reader takes the id as a parameter, not as SQL' -Detail ($row | ConvertTo-Json -Compress)
         New-Database @('Completed')
 
         $rig = New-ServerRig -Environment $baseEnvironment
