@@ -844,8 +844,10 @@ function Assert-MesIngestSourceReported {
         per mode, that what it reports agrees with what the control host meant to deploy:
           * the MES_INGEST_SOURCE result line names this mode and this baseUrl;
           * 'production': allowedWorkTypes is STAGING_TO_WIRE alone, and no FAKE_MES_INGEST line;
-          * 'production' under -ProductionCutover (control-server#564 review M1): allowedWorkTypes is the definition's list
-            and that list is the six types, the line says PRODUCTION CUTOVER, and no FAKE_MES_INGEST line;
+          * 'production' under -ProductionCutover (control-server#564 review M1): allowedWorkTypes is the definition's list,
+            that list is, as a set, the cutover set the control-server module names (Get-ParallelCutoverWorkType -- seven
+            types since control-server#737; workspace#56: never a list written here), the line says PRODUCTION CUTOVER,
+            and no FAKE_MES_INGEST line; and the list the Host bound is, as a set, the definition's.
           * 'fake', on an install: the FAKE_MES_INGEST line is there (a rollback never printed one).
         A checkout older than #535 prints no MES_INGEST_SOURCE line and is only ever 'fake'.
     #>
@@ -862,11 +864,22 @@ function Assert-MesIngestSourceReported {
     if ($audit.Count -eq 0) {
         throw "MES_INGEST_SOURCE_MISMATCH: the installer reported no line starting '$prefix'. What it did report: $(@($lines | Where-Object { $_ -match 'MES_INGEST' }) -join ' | ')"
     }
-    $cutoverTypes = @('DIE_TO_WIRE_STAGING', 'DIE_TO_OVEN', 'WIRE_TO_GATE', 'WIRE_TO_OPTICAL', 'STAGING_TO_WIRE', 'WIRE_TO_NITROGEN')
     $definedTypes = @($definition['journeyRuntime']['allowedWorkTypes'])
-    $sixDefined = $definedTypes.Count -eq 6 -and (@($definedTypes | Sort-Object -CaseSensitive) -join ',') -ceq (@($cutoverTypes | Sort-Object -CaseSensitive) -join ',')
+    # workspace#56. The set is the module's, from the same -ControlServerRepository as the definition; this script
+    # wrote six types here and refused the seven-type v5 cutover after its installer had passed (control-server#738).
+    $typeSetKey = { param([object[]] $Types) @($Types | ForEach-Object { "$_" } | Sort-Object -CaseSensitive -Unique) -join ',' }
     if ($productionSource -and $ProductionCutover) {
-        if (-not $sixDefined -or -not $audit[-1].Contains("allowedWorkTypes=$($definedTypes -join ',') -- PRODUCTION CUTOVER")) {
+        if (-not (Get-Command Get-ParallelCutoverWorkType -ErrorAction SilentlyContinue)) {
+            throw 'MES_INGEST_SOURCE_MISMATCH: production cutover, but -ControlServerRepository has no Get-ParallelCutoverWorkType, so the cutover task types are unknown.'
+        }
+        $cutoverTypes = @(Get-ParallelCutoverWorkType)
+        # Same count and same set, so each type once (the module's set has no repeats).
+        $definesCutoverSet = $cutoverTypes.Count -gt 0 -and $definedTypes.Count -eq $cutoverTypes.Count -and
+            (& $typeSetKey $definedTypes) -ceq (& $typeSetKey $cutoverTypes)
+        if (-not $definesCutoverSet) {
+            throw "MES_INGEST_SOURCE_MISMATCH: production cutover, but the definition's allowedWorkTypes $($definedTypes -join ',') is not the cutover set $($cutoverTypes -join ',') once each."
+        }
+        if (-not $audit[-1].Contains("allowedWorkTypes=$($definedTypes -join ',') -- PRODUCTION CUTOVER")) {
             throw "MES_INGEST_SOURCE_MISMATCH: production cutover, but the installer reported '$($audit[-1])'."
         }
         if ($fakeLines.Count -gt 0) {
@@ -898,10 +911,18 @@ function Assert-MesIngestSourceReported {
         Write-Warning 'The installer reported no EFFECTIVE_CONFIGURATION line (a package older than control-server#535 does not log it); fake mode, reported, not refused.'
         return
     }
+    # workspace#56. Under the cutover the types the Host bound must be the definition's set, which is the module's cutover
+    # set (checked above). The exact comparison below holds the order too; this one says which types differ.
+    if ($productionSource -and $ProductionCutover) {
+        $boundTypes = @(($effective[-1] -replace '^EFFECTIVE_CONFIGURATION=allowedWorkTypes=(\S*) .*$', '$1') -split ',' | Where-Object { $_ })
+        if ((& $typeSetKey $boundTypes) -cne (& $typeSetKey $definedTypes)) {
+            throw "EFFECTIVE_CONFIGURATION_MISMATCH: production cutover, but the Host bound the task types $($boundTypes -join ','), the definition says $($definedTypes -join ',')."
+        }
+    }
     if ($effective[-1] -cne $expectedEffective) {
         throw "EFFECTIVE_CONFIGURATION_MISMATCH: the Host bound '$($effective[-1])', the definition says '$expectedEffective'."
     }
-    # Under the cutover the definition's own list, compared above, is the six types ($sixDefined).
+    # Under the cutover the definition's own list, compared above, is the module's cutover set ($definesCutoverSet).
     if ($productionSource -and -not $ProductionCutover -and -not $effective[-1].StartsWith('EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE ', [StringComparison]::Ordinal)) {
         throw "EFFECTIVE_CONFIGURATION_MISMATCH: production mode, but the Host bound '$($effective[-1])'."
     }
