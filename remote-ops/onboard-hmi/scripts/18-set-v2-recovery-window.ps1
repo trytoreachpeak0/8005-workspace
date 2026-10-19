@@ -79,6 +79,23 @@
 .PARAMETER AllowConnectedVehicles
     Restart the V2 service even while a vehicle is connected to it, with a warning.
 
+.PARAMETER RecoveryJourneyId
+    8005-workspace#58. The one journey the window is opened for: a journey of this vehicle (-SshAlias; agvId
+    and vehicleSafety.expectedVehicleKey from its site file) that stands Blocked on a slot operation result
+    needing recovery (LOAD_RESULT_REQUIRES_RECOVERY, UNLOAD_RESULT_REQUIRES_RECOVERY or a plain
+    <messageType>_NOT_RECONCILED; Test-V2JourneyAwaitsRecovery in V2RecoveryWindow.psm1). Without it, a
+    restart of the V2 service is refused while any journey is not Completed -- and the journey a vehicle
+    needs the window for is itself not Completed, so the window could never be opened for it.
+    With it, the server restart (open, or -Revert of the last vehicle) passes the journey check only when
+    that journey is the only one not Completed, is on this vehicle, and awaits recovery. Every other check
+    is unchanged: the dispatch gate closed, no RiotCreateDispatch__* override, no connected vehicle (unless
+    -AllowConnectedVehicles), the client on this vehicle stopped. No journey open passes as before.
+    Not with -VehicleOnly, which never restarts the server.
+    Where the vehicle stands does not enter: the judgement reads the journey row only, so a vehicle driven
+    off the station by hand is judged the same. A recovery that releases the journey back to the engine
+    (a multi-demand journey after COMPENSATE_LOAD_ALL_EMPTY) leaves it neither Completed nor awaiting
+    recovery; the -Revert of the last vehicle is then refused, and -Revert -VehicleOnly closes the vehicle.
+
 .PARAMETER VehicleOnly
     With -Revert only: close the window on the vehicle and leave the server entry, recorded in the store
     as a residue. For the end of a field window when the V2 instance is not idle (a vehicle connected, a
@@ -113,6 +130,12 @@ param(
     [Parameter(ParameterSetName = 'Change')]
     [switch] $VehicleOnly,
 
+    [Parameter(ParameterSetName = 'Change')]
+    # The whole JourneyId as the server stores it: journey:<demandId>, and for a multi-demand journey
+    # journey:<demandId>|g<generation> (control-server MultiDemandJourneyPorts.cs:40).
+    [ValidatePattern('^[A-Za-z0-9:._|-]{1,200}$')]
+    [string] $RecoveryJourneyId,
+
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\w2g-v2-recovery-window.xml')
 )
 
@@ -128,6 +151,7 @@ if ($vehicleLine -cne 'v2') {
         'is for a car on the v2 line. For the MVP use 14-set-recovery-window.ps1. Nothing was changed.')
 }
 if ($VehicleOnly -and -not $Revert) { throw '-VehicleOnly only closes (-Revert); opening needs both ends. Nothing was changed.' }
+if ($VehicleOnly -and $RecoveryJourneyId) { throw '-RecoveryJourneyId is for a server restart, and -VehicleOnly never restarts the server. Nothing was changed.' }
 $serverAlias = 'factory01'
 $vehicleStaging = 'C:\temp\agv\onboard-staging\v2-recovery-window'
 $toPosix = { param($p) $p.Replace('\', '/') }
@@ -162,6 +186,16 @@ $installRoot = [string] $site.install.root
 $onboardInstanceId = [string] $site.wireToGate.onboardInstanceId
 if ([string]::IsNullOrWhiteSpace($installRoot) -or $onboardInstanceId -notmatch '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') {
     throw "$sitePath lacks install.root or a wireToGate.onboardInstanceId UUID. Nothing was changed."
+}
+# 8005-workspace#58: the vehicle the named journey must be on, by the same two identities the server records on it.
+$recoveryJourney = $null
+if ($RecoveryJourneyId) {
+    $targetAgvId = [string] $site.agvId
+    $targetVehicleKey = [string] $site.vehicleSafety?.expectedVehicleKey
+    if ([string]::IsNullOrWhiteSpace($targetAgvId) -or [string]::IsNullOrWhiteSpace($targetVehicleKey)) {
+        throw "$sitePath lacks agvId or vehicleSafety.expectedVehicleKey, which -RecoveryJourneyId is matched against. Nothing was changed."
+    }
+    $recoveryJourney = @{ journeyId = $RecoveryJourneyId; agvId = $targetAgvId; vehicleKey = $targetVehicleKey }
 }
 
 function Read-Store {
@@ -225,6 +259,7 @@ $vehicleRequest = { param([string] $State, [string] $Proof)
 $serverRequest = { param([string] $Mode, [string] $Target, [string] $Proof)
     $r = @{ mode = $Mode; allowConnectedVehicles = $AllowConnectedVehicles.IsPresent }
     if ($Target) { $r['target'] = $Target }
+    if ($recoveryJourney -and $Mode -cne 'status') { $r['recoveryJourney'] = $recoveryJourney }
     if ($Proof) { $r['proof'] = $Proof }
     $r
 }
@@ -243,6 +278,9 @@ if (-not $Status) {
             elseif ($serverClose) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF removed after the vehicle (needs the V2 instance idle)' }
             elseif ($last) { 'untouched (-VehicleOnly): its CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF stays, recorded in the store as a residue' }
             else { "untouched: still open on $($others -join ', ')" }))
+    if ($recoveryJourney) {
+        Write-Step "Recovery journey: $RecoveryJourneyId, on $($recoveryJourney.agvId) / $($recoveryJourney.vehicleKey) -- before a restart, the only journey not Completed may be this one, awaiting recovery"
+    }
     Write-Step ("Proof: {0}" -f $(if ($Revert) { 'not needed' } elseif ($store) { 'reused from the store' } else { 'to be generated and stored' }))
 }
 
@@ -327,7 +365,7 @@ if (-not $Revert) {
     Write-Host '  Start the client with 10-start-onboard-stack.ps1 (field authorization), not by a double click:' -ForegroundColor DarkGray
     Write-Host '  a client started from an Explorer that predates the variable does not see it and refuses to start.' -ForegroundColor DarkGray
     Write-Host '  Close the window when it ends:' -ForegroundColor DarkGray
-    Write-Host "    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias $SshAlias -ControlServerRepository <checkout> -Revert" -ForegroundColor DarkGray
+    Write-Host "    pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias $SshAlias -ControlServerRepository <checkout> -Revert$($RecoveryJourneyId ? " -RecoveryJourneyId $RecoveryJourneyId" : '')" -ForegroundColor DarkGray
     Write-Host '  Re-run the open after re-deploying the onboard client, or after a first install of the V2 service.' -ForegroundColor DarkGray
     return
 }
