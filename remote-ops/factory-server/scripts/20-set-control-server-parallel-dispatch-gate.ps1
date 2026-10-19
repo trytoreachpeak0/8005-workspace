@@ -74,9 +74,9 @@
     refused while any journey is not Completed -- and such a journey is not -- while 18's recovery window, 19 and the
     task-type station activation all need the gate closed first. With it, closing lets each named journey through while
     it is on its vehicle, Blocked on a slot operation result that needs recovery (LOAD_RESULT_REQUIRES_RECOVERY,
-    UNLOAD_RESULT_REQUIRES_RECOVERY, <messageType>_NOT_RECONCILED), and its vehicle holds no fault (a vehicle the fault
-    model holds goes through VehicleFaultRecovery first: only the journey loop supervises it, and a restart drops its stop
-    proof). The server-side half judges (Get-ParallelDispatchGateRefusal -RecoveryJourney in the control-server checkout).
+    UNLOAD_RESULT_REQUIRES_RECOVERY, <messageType>_NOT_RECONCILED), and its vehicle holds no fault (a restart would drop
+    the stop proof of a fault that stands; wait until it clears -- the held order resumed -- or for control-server#771).
+    Opening after it: see remote-ops/factory-server/docs/wire-to-gate-parallel-cd.md section 10. The server-side half judges (Get-ParallelDispatchGateRefusal -RecoveryJourney in the control-server checkout).
     Every other journey is judged as without it, and so is every other check. Opening is not widened: control-server#771
     takes the journey to Completed, after which the ordinary -State Open sees it no more. Needs a checkout that has it
     (CHECKOUT_PREDATES_RECOVERY_JOURNEY otherwise, before anything is copied).
@@ -103,7 +103,8 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Closed', 'Open')][string] $State,
+    # Exactly as spelled (8005-workspace#61): 'closed' used to pass here, skip the IO check below and reach the server as an opening.
+    [Parameter(Mandatory = $true)][ValidateSet('Closed', 'Open', IgnoreCase = $false)][string] $State,
 
     [Parameter(Mandatory = $true)][string] $ControlServerRepository,
 
@@ -172,6 +173,7 @@ function Get-RecoveryJourneyTarget {
         throw ("-RecoveryJourneyId takes whole journey ids ([A-Za-z0-9:._|-], at most 200) and -RecoveryVehicleAlias agv01, agv02 or agv03: " +
             "refused $(@($badId + $badAlias) -join ', '). Nothing was copied or changed.")
     }
+    # -State binds only as 'Closed' or 'Open', exactly (review L1).
     if ($State -cne 'Closed') {
         throw '-RecoveryJourneyId is for -State Closed only; opening is not widened (control-server#771 takes the journey to Completed). Nothing was copied or changed.'
     }

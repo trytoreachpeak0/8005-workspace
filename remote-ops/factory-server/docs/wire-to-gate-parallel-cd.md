@@ -924,11 +924,22 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 每一趟都要同时满足这几条才放过：它在点名的车上（库里的 `AgvId`、`VehicleKey` 与 `onboard-hmi/config/site-<别名>.json` 的 `agvId`、
 `vehicleSafety.expectedVehicleKey` 逐字相等）；它是 `Blocked`，阻塞码是 `LOAD_RESULT_REQUIRES_RECOVERY`、`UNLOAD_RESULT_REQUIRES_RECOVERY`
 或普通的 `<消息类型>_NOT_RECONCILED`（与 18 号同一个定义）；它那台车**没有被故障模型按住**（`VehicleFaultStates` 里这台车的 `Level` 是
-`None` 或没有行）。被按住的车（例如急停之后的隔离）只靠旅程那一轮在监看：停稳证明、升级、急停被外部解除后的重触发都在那里推进，而停稳证明的
-采样只在内存里，重启就丢了。所以这种车先经 `VehicleFaultRecovery` 收尾，再关闸。没点名的非 `Completed` 旅程照旧拒，其余检查一条不少。
-不带参数时行为不变。
-**开闸不放宽**：这个参数只能配 `-State Closed`。旅程由 control-server#771 的撤旅程入口收成 `Completed` 之后，普通的 `-State Open` 就不再看它。
+`None` 或没有行）。为什么恢复态的旅程可以放：它是 `Blocked`，引擎每轮对它直接返回，故障监看只在到站阶段那几条路径上调用，所以重启拿不走它的
+任何监看（它那台车此刻不一定在站上）。车辆故障那一条是额外加的一道：故障在效时停稳证明的采样只在内存里，重启就丢。被故障按住的车（例如急停之后的
+隔离）等故障自己解除（被按住的单自动续行，`RESUME_HELD_ORDER`）再关闸，或者联系系统维护人员走 control-server#771 撤旅程。生产实例的
+`vehicleFaultRecovery` 入口是关着的，不能指望它。没点名的非 `Completed` 旅程照旧拒，其余检查一条不少。不带参数时行为不变。点名了却不在途的
+旅程（已经走完，或旅程号写错）不放宽任何东西，拒绝消息和预演里会写「named but not in flight」。
 `-ControlServerRepository` 太旧（没有这项改动）时，在复制任何东西之前就拒（`CHECKOUT_PREDATES_RECOVERY_JOURNEY`）。
+
+**`-State` 只认逐字的 `Closed` 和 `Open`**（8005-workspace#61 起）。此前小写的 `-State closed` 能通过参数检查，到服务器端却被当成开闸，
+而且会跳过开闸前的 IO 核对；现在大小写不对在参数绑定时就失败，什么都不做。
+
+**开闸不放宽**：这个参数只能配 `-State Closed`。所以点名关闸之后，那趟旅程只要还没到 `Completed`，
+`-State Open` 就会照常以 `GATE_OPEN_REFUSED_ORDER_SENT` 拒绝：它前面停靠的单都发出过。尤其要知道一条走不通的路：用 18 号开恢复窗口、
+在车上做补偿清空（`COMPENSATE_LOAD_ALL_EMPTY`）之后，**多需求旅程不会收尾**，它被放回引擎（`AwaitingLoadResult` → 离站），下一段腿因为闸门关着
+建不了单，停在 `CreateDispatchDisabled`，永远到不了 `Completed`，开闸也就一直被拒。出路只有两条：等 control-server#771 的撤旅程入口把它收成
+`Completed`，之后普通的 `-State Open` 就不再看它；或者在 RIoT 上查清这台车没有在跑的单之后，按下面「手工开闸」那一节手工开。手工开闸后
+那趟旅程会立刻为下一站建单、车会出发，这是动车，要用户单独授权、现场有人。
 
 为什么不直接放进 `opsRoot`：`19-deploy-control-server-parallel.ps1` 把安装脚本、卸载脚本和这两个模块当成**一个整体**放在 `opsRoot`
 里。要是 20 号用一个较新的 checkout 把模块覆盖进去，之后再跑 19 号的 `-Uninstall`，就成了旧卸载脚本配新模块；部署时清理秘密文件用的

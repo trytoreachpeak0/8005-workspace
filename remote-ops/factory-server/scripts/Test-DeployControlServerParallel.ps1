@@ -504,6 +504,25 @@ if ($null -eq $gateFunction) {
             }
         } finally { Remove-Item -LiteralPath $siteRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
+    # -State is refused at binding in any other spelling, before ssh or scp is called: run with both stubbed to record calls.
+    $caseRoot = Join-Path ([IO.Path]::GetTempPath()) "ws61-case-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $caseRoot | Out-Null
+    try {
+        $calls = Join-Path $caseRoot 'calls.txt'
+        foreach ($tool in 'ssh', 'scp') {
+            Set-Content -LiteralPath (Join-Path $caseRoot "$tool.cmd") -Value "@echo $tool %*>> `"$calls`"" -Encoding ascii
+        }
+        foreach ($spelling in @('closed', 'CLOSED', 'open')) {
+            $env:PATH = "$caseRoot;$env:PATH"
+            try {
+                $out = & pwsh -NoProfile -NonInteractive -File $gateScript -State $spelling -ControlServerRepository $caseRoot -WhatIf 2>&1
+                $exit = $LASTEXITCODE
+            } finally { $env:PATH = $env:PATH.Substring($caseRoot.Length + 1) }
+            $text = ($out | Out-String)
+            Write-Result -Ok ($exit -ne 0 -and $text -match 'ValidateSet|does not belong to the set' -and -not (Test-Path -LiteralPath $calls)) `
+                -Name "20 (workspace#61): -State $spelling is refused at binding, and no ssh or scp is called" -Detail "exit $exit calls $(Test-Path -LiteralPath $calls)`n$text"
+        }
+    } finally { Remove-Item -LiteralPath $caseRoot -Recurse -Force -ErrorAction SilentlyContinue }
     $stagedAt = $gateText.IndexOf('Invoke-Ssh @("New-Item -ItemType Directory -Force -Path ''$gateRoot'' | Out-Null")')
     $targetAt = $gateText.IndexOf('$recoveryTarget = @(Get-RecoveryJourneyTarget -JourneyId $RecoveryJourneyId -VehicleAlias $RecoveryVehicleAlias')
     $stateAt = $gateText.IndexOf("-SiteDirectory (Join-Path `$PSScriptRoot '../../onboard-hmi/config') -State `$State)")
