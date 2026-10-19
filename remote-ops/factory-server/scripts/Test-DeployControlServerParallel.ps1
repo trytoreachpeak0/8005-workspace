@@ -182,15 +182,40 @@ if (Get-Command Get-InstallerSwitchArgument -ErrorAction SilentlyContinue) {
 }
 if (Get-Command Assert-MesIngestSourceReported -ErrorAction SilentlyContinue) {
     function Write-Step { param([string] $Message) }
+    # workspace#56: the cutover set is the control-server module's (Get-ParallelCutoverWorkType), seven types since
+    # control-server#737. The stub stands in for the module 19 imports from -ControlServerRepository.
     $six = @('DIE_TO_WIRE_STAGING', 'DIE_TO_OVEN', 'WIRE_TO_GATE', 'WIRE_TO_OPTICAL', 'STAGING_TO_WIRE', 'WIRE_TO_NITROGEN')
-    $definition = @{ mesIngest = @{ source = 'production'; baseUrl = 'http://127.0.0.1:5088' }; journeyRuntime = @{ allowedWorkTypes = $six; allowedDispatchZones = @('WIRE_BONDING') } }
+    $seven = $six + 'WIRE_TO_FULL_INSPECTION'
+    $script:moduleCutoverTypes = $seven
+    function Get-ParallelCutoverWorkType { return @($script:moduleCutoverTypes) }
+    $definition = @{ mesIngest = @{ source = 'production'; baseUrl = 'http://127.0.0.1:5088' }; journeyRuntime = @{ allowedWorkTypes = $seven; allowedDispatchZones = @('WIRE_BONDING') } }
     $sourceProperty = [pscustomobject]@{ Value = 'production' }; $mesIngestSource = 'production'; $productionSource = $true
-    $cutoverAudit = "MES_INGEST_SOURCE=production baseUrl=http://127.0.0.1:5088 allowedWorkTypes=$($six -join ',') -- PRODUCTION CUTOVER (trial): this instance reads the PRODUCTION MesIngest for all six task types and drives agv01; the MVP must be stopped (control-server#564)"
-    $cutoverEffective = "EFFECTIVE_CONFIGURATION=allowedWorkTypes=$($six -join ',') allowedDispatchZones=WIRE_BONDING mesIngestBaseUrl=http://127.0.0.1:5088"
+    function New-CutoverAudit([string[]] $Types) { "MES_INGEST_SOURCE=production baseUrl=http://127.0.0.1:5088 allowedWorkTypes=$($Types -join ',') -- PRODUCTION CUTOVER (trial): this instance reads the PRODUCTION MesIngest for all task types and drives agv01; the MVP must be stopped (control-server#564)" }
+    function New-CutoverEffective([string[]] $Types) { "EFFECTIVE_CONFIGURATION=allowedWorkTypes=$($Types -join ',') allowedDispatchZones=WIRE_BONDING mesIngestBaseUrl=http://127.0.0.1:5088" }
+    $cutoverAudit = New-CutoverAudit $seven
+    $cutoverEffective = New-CutoverEffective $seven
     function Get-ReportVerdict([object[]] $Lines) { try { Assert-MesIngestSourceReported -Output $Lines; return 'OK' } catch { return $_.Exception.Message } }
     $ProductionCutover = $true
     $v = Get-ReportVerdict @($cutoverAudit, $cutoverEffective)
-    Write-Result -Ok ($v -ceq 'OK') -Name 'server report under -ProductionCutover: the six types and PRODUCTION CUTOVER are accepted' -Detail $v
+    Write-Result -Ok ($v -ceq 'OK') -Name 'server report under -ProductionCutover: the seven types (v5, WIRE_TO_FULL_INSPECTION) and PRODUCTION CUTOVER are accepted (workspace#56)' -Detail $v
+    $v = Get-ReportVerdict @($cutoverAudit, (New-CutoverEffective $six))
+    Write-Result -Ok ($v.StartsWith('EFFECTIVE_CONFIGURATION_MISMATCH: production cutover, but the Host bound the task types') -and $v.Contains('WIRE_TO_FULL_INSPECTION')) -Name 'server report under -ProductionCutover: the Host bound six where the definition says seven is refused, naming the sets (workspace#56)' -Detail $v
+    $v = Get-ReportVerdict @($cutoverAudit, (New-CutoverEffective ($seven[6..0])))
+    Write-Result -Ok ($v.StartsWith('EFFECTIVE_CONFIGURATION_MISMATCH: the Host bound')) -Name 'server report under -ProductionCutover: the same seven in another order still fails the exact comparison' -Detail $v
+    $definition['journeyRuntime']['allowedWorkTypes'] = $six
+    $v = Get-ReportVerdict @((New-CutoverAudit $six), (New-CutoverEffective $six))
+    Write-Result -Ok ($v.StartsWith("MES_INGEST_SOURCE_MISMATCH: production cutover, but the definition's allowedWorkTypes")) -Name 'server report under -ProductionCutover: a six-type definition against the seven-type module set is refused (workspace#56)' -Detail $v
+    $definition['journeyRuntime']['allowedWorkTypes'] = $seven + 'WIRE_TO_GATE'
+    $v = Get-ReportVerdict @((New-CutoverAudit ($seven + 'WIRE_TO_GATE')), (New-CutoverEffective ($seven + 'WIRE_TO_GATE')))
+    Write-Result -Ok ($v.StartsWith("MES_INGEST_SOURCE_MISMATCH: production cutover, but the definition's allowedWorkTypes")) -Name 'server report under -ProductionCutover: a type named twice is refused' -Detail $v
+    $script:moduleCutoverTypes = $six; $definition['journeyRuntime']['allowedWorkTypes'] = $six
+    $v = Get-ReportVerdict @((New-CutoverAudit $six), (New-CutoverEffective $six))
+    Write-Result -Ok ($v -ceq 'OK') -Name 'server report under -ProductionCutover: the set follows the module (six from a six-type module is accepted), nothing written in 19' -Detail $v
+    $script:moduleCutoverTypes = $seven; $definition['journeyRuntime']['allowedWorkTypes'] = $seven
+    Remove-Item function:Get-ParallelCutoverWorkType
+    $v = Get-ReportVerdict @($cutoverAudit, $cutoverEffective)
+    Write-Result -Ok ($v.StartsWith('MES_INGEST_SOURCE_MISMATCH: production cutover, but -ControlServerRepository has no Get-ParallelCutoverWorkType')) -Name 'server report under -ProductionCutover without the module function is refused' -Detail $v
+    function Get-ParallelCutoverWorkType { return @($script:moduleCutoverTypes) }
     $v = Get-ReportVerdict @(($cutoverAudit -replace ' -- PRODUCTION CUTOVER.*$', ' -- this instance reads the PRODUCTION MesIngest the MVP also reads; it may take STAGING_TO_WIRE only'), $cutoverEffective)
     Write-Result -Ok ($v.StartsWith('MES_INGEST_SOURCE_MISMATCH: production cutover')) -Name 'server report under -ProductionCutover without the cutover wording (an old installer) is refused' -Detail $v
     $v = Get-ReportVerdict @($cutoverAudit, $cutoverEffective, 'FAKE_MES_INGEST=x')
@@ -199,12 +224,13 @@ if (Get-Command Assert-MesIngestSourceReported -ErrorAction SilentlyContinue) {
     Write-Result -Ok ($v.StartsWith('EFFECTIVE_CONFIGURATION_MISMATCH:')) -Name 'server report under -ProductionCutover with a different bound list is refused' -Detail $v
     $ProductionCutover = $false
     $v = Get-ReportVerdict @($cutoverAudit, $cutoverEffective)
-    Write-Result -Ok ($v.StartsWith('MES_INGEST_SOURCE_MISMATCH: production mode')) -Name 'the same six-type report without -ProductionCutover is refused, as before' -Detail $v
+    Write-Result -Ok ($v.StartsWith('MES_INGEST_SOURCE_MISMATCH: production mode')) -Name 'the same seven-type report without -ProductionCutover is refused, as before' -Detail $v
     $definition['journeyRuntime']['allowedWorkTypes'] = @('STAGING_TO_WIRE')
     $v = Get-ReportVerdict @('MES_INGEST_SOURCE=production baseUrl=http://127.0.0.1:5088 allowedWorkTypes=STAGING_TO_WIRE -- this instance reads ...', 'EFFECTIVE_CONFIGURATION=allowedWorkTypes=STAGING_TO_WIRE allowedDispatchZones=WIRE_BONDING mesIngestBaseUrl=http://127.0.0.1:5088')
     Write-Result -Ok ($v -ceq 'OK') -Name 'the parallel production report without -ProductionCutover is accepted, as before' -Detail $v
-    Remove-Item function:Write-Step
-    Remove-Variable definition, sourceProperty, mesIngestSource, productionSource, ProductionCutover -ErrorAction SilentlyContinue
+    Remove-Item function:Write-Step, function:Get-ParallelCutoverWorkType
+    Remove-Variable definition, sourceProperty, mesIngestSource, productionSource, ProductionCutover, six, seven -ErrorAction SilentlyContinue
+    Remove-Variable moduleCutoverTypes -Scope Script -ErrorAction SilentlyContinue
 }
 
 # control-server#672: after the install and the rollback, the admission policy version and label and the two waits the

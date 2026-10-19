@@ -219,7 +219,7 @@ MVP 的身份**，而端口那一项没有「已存在就拒绝」的兜底。�
 所以分流**只靠两边的任务类型不相交**。这一节原来写的理由「一条需求被谁认领了，在另一边看来就是
 不存在」**按代码并不成立**：一条需求被一边拿走后，另一边仍然看得见。这也是为什么 `production`
 模式把任务类型写死在 `ParallelInstance.psm1` 里校验，而不是从定义文件里读——出厂定义的
-`allowedWorkTypes` 含全部六种（包括 `WIRE_TO_GATE`），**只把 `baseUrl` 换成 5088 就会和 MVP 抢同一批料**，
+`allowedWorkTypes` 含全部任务类型（当时六种，v5 起七种，包括 `WIRE_TO_GATE`），**只把 `baseUrl` 换成 5088 就会和 MVP 抢同一批料**，
 而那正是这一模式拒绝的配置。
 
 `production` 模式下部署链的不同之处：
@@ -1341,7 +1341,7 @@ MVP 只停不删）。这里只记部署脚本这一侧的三件事。
 
 **开关。**19 号脚本加 `-ProductionCutover`，传给服务器上的安装器。定义校验只有在命令带这个开关、**并且**定义里写了 `productionCutover.approvalRecord`
 （谁、哪天、在哪里批准了这一次切换）时，才放开两道护栏：车队表里可以有 `agv01`（按登记册四个坐标比对），生产 MesIngest 来源下 `allowedWorkTypes`
-必须恰好是六类。缺一半就拒，拒绝码是 `CUTOVER_SWITCH_WITHOUT_RECORD`、`CUTOVER_RECORD_WITHOUT_SWITCH`。MVP 的服务名、目录、端口、map 25 在开关下照旧拒绝。
+必须恰好等于 control-server 模块 `Get-ParallelCutoverWorkType` 的类型集（v5 起七类，每类一次；19 号收尾核对也从这里读，workspace#56）。缺一半就拒，拒绝码是 `CUTOVER_SWITCH_WITHOUT_RECORD`、`CUTOVER_RECORD_WITHOUT_SWITCH`。MVP 的服务名、目录、端口、map 25 在开关下照旧拒绝。
 
 **安装历史。**服务器上的安装器在动任何东西之前查：
 
