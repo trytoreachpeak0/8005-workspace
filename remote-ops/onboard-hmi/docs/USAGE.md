@@ -679,7 +679,10 @@ pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlia
   `LOAD_RESULT_REQUIRES_RECOVERY`、`UNLOAD_RESULT_REQUIRES_RECOVERY`，或普通的 `<消息类型>_NOT_RECONCILED`（补偿等结果没对上、
   还能再开会话）。判据出处写在 `V2RecoveryWindow.psm1` 的 `Test-V2JourneyAwaitsRecovery`。闸门、`RiotCreateDispatch__*`、连着的车、
   车上客户端要停着，这些检查一条不少。不带这个参数时行为与以前完全一样。它不能与 `-Status`、`-VehicleOnly` 合用。
-  旅程收尾成 `Completed` 之后，带不带它都按空闲实例处理。
+  旅程收尾成 `Completed` 之后，带不带它都按空闲实例处理。旅程号要写库里完整的 `JourneyId`（多需求旅程形如
+  `journey:<需求号>|g<代>`），不能用简写。判据只读旅程那一行，与车此刻停在哪里无关：车被人工开离原站，判断结果一样。
+  多需求旅程在补偿清空之后会被放回引擎（等装货结果、再离站），既不是 `Completed` 也不在恢复态，这时关最后一台车的
+  `-Revert` 会被拒，按上一条用 `-Revert -VehicleOnly` 先关车上，服务端那一条等实例空闲时再删。
 
 **检查之后、写入之前仍可能留下残留**。只读检查和真正写入之间隔着车载端那一步（几十秒到几分钟）。这期间如果有车连上、
 有旅程开始，写入那一步会拒绝，而车那一半已经做完：

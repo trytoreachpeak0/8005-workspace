@@ -91,6 +91,10 @@
     is unchanged: the dispatch gate closed, no RiotCreateDispatch__* override, no connected vehicle (unless
     -AllowConnectedVehicles), the client on this vehicle stopped. No journey open passes as before.
     Not with -VehicleOnly, which never restarts the server.
+    Where the vehicle stands does not enter: the judgement reads the journey row only, so a vehicle driven
+    off the station by hand is judged the same. A recovery that releases the journey back to the engine
+    (a multi-demand journey after COMPENSATE_LOAD_ALL_EMPTY) leaves it neither Completed nor awaiting
+    recovery; the -Revert of the last vehicle is then refused, and -Revert -VehicleOnly closes the vehicle.
 
 .PARAMETER VehicleOnly
     With -Revert only: close the window on the vehicle and leave the server entry, recorded in the store
@@ -127,7 +131,9 @@ param(
     [switch] $VehicleOnly,
 
     [Parameter(ParameterSetName = 'Change')]
-    [ValidatePattern('^[A-Za-z0-9:._-]{1,200}$')]
+    # The whole JourneyId as the server stores it: journey:<demandId>, and for a multi-demand journey
+    # journey:<demandId>|g<generation> (control-server MultiDemandJourneyPorts.cs:40).
+    [ValidatePattern('^[A-Za-z0-9:._|-]{1,200}$')]
     [string] $RecoveryJourneyId,
 
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\w2g-v2-recovery-window.xml')

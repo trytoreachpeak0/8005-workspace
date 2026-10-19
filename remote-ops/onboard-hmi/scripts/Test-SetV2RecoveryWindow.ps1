@@ -322,16 +322,16 @@ exit 0
         $run = Invoke-Target -Arguments $case.Value
         Write-Result -Ok ($run.Exit -ne 0 -and $run.Calls.Count -eq 0 -and -not (Test-Path -LiteralPath $secret)) -Name "$($case.Key) is refused before ssh or scp is called" -Detail "exit $($run.Exit), $($run.Calls.Count) call(s)`n$($run.Output)"
     }
-    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-RecoveryJourneyId', 'journey:40c5532e')
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-RecoveryJourneyId', 'journey:40c5532e-d97d-4b29-a5bd-bf5343ea01dc|g102')
     Assert-Runs $run 'factory01:server-v2-recovery-window:check > agv03:agv-v2-recovery-window:Open > factory01:server-v2-recovery-window:set' 'open agv03 -RecoveryJourneyId: the same three runs'
-    $named = @(& $serverRequests $run | Where-Object { $_['recoveryJourney'] -and $_['recoveryJourney']['journeyId'] -ceq 'journey:40c5532e' -and
+    $named = @(& $serverRequests $run | Where-Object { $_['recoveryJourney'] -and $_['recoveryJourney']['journeyId'] -ceq 'journey:40c5532e-d97d-4b29-a5bd-bf5343ea01dc|g102' -and
             $_['recoveryJourney']['agvId'] -ceq $siteAgv03.agvId -and $_['recoveryJourney']['vehicleKey'] -ceq $siteAgv03.vehicleSafety.expectedVehicleKey })
     Write-Result -Ok ($named.Count -eq 2) -Name "... both server requests name the journey with site-agv03.json's agvId and expectedVehicleKey" -Detail (@(& $serverRequests $run | ForEach-Object { ($_['recoveryJourney'] | ConvertTo-Json -Compress) }) -join ' | ')
     $vehicleRequests = @($run.Calls | Where-Object { $_.key -like 'agv03:*' } | ForEach-Object { $_.stdin | ConvertFrom-Json -AsHashtable })
     Write-Result -Ok (@($vehicleRequests | Where-Object { $_.Contains('recoveryJourney') }).Count -eq 0) -Name '... and the vehicle request does not carry it' -Detail ''
-    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert', '-RecoveryJourneyId', 'journey:40c5532e')
+    $run = Invoke-Target -Arguments @('-SshAlias', 'agv03', '-Revert', '-RecoveryJourneyId', 'journey:40c5532e-d97d-4b29-a5bd-bf5343ea01dc|g102')
     Assert-Runs $run 'factory01:server-v2-recovery-window:check > agv03:agv-v2-recovery-window:Close > factory01:server-v2-recovery-window:remove' '-Revert -RecoveryJourneyId: check, vehicle, remove'
-    Write-Result -Ok (@(& $serverRequests $run | Where-Object { $_['recoveryJourney']['journeyId'] -ceq 'journey:40c5532e' }).Count -eq 2 -and -not (Test-Path -LiteralPath $secret)) `
+    Write-Result -Ok (@(& $serverRequests $run | Where-Object { $_['recoveryJourney']['journeyId'] -ceq 'journey:40c5532e-d97d-4b29-a5bd-bf5343ea01dc|g102' }).Count -eq 2 -and -not (Test-Path -LiteralPath $secret)) `
         -Name '... both server requests name the journey, and the store is deleted' -Detail ''
     $run = Invoke-Target -Arguments @('-SshAlias', 'agv03')
     Write-Result -Ok ($run.Exit -eq 0 -and @(& $serverRequests $run | Where-Object { $_.Contains('recoveryJourney') }).Count -eq 0) -Name 'without -RecoveryJourneyId no server request carries recoveryJourney (unchanged)' -Detail ''
@@ -734,6 +734,12 @@ $rows
         New-Database @('Completed') -Journeys @($stuck)
         Assert-Refused $rig (& $withTarget @{ mode = 'set'; proof = $testProof }) 'JOURNEY_STATE_UNREADABLE' 'recoveryJourney whose row cannot be read'
 
+        # After COMPENSATE_LOAD_ALL_EMPTY on a multi-demand journey the engine takes it back (AwaitingLoadResult, then the
+        # departure): not awaiting recovery, so a -Revert naming it is refused like any journey in progress.
+        $j = $stuck.Clone(); $j.Stage = 'AwaitingLoadResult'; $j.Block = $null
+        New-Database @('Completed') -Journeys @($j)
+        Assert-Refused (New-ServerRig -Environment $withEntry) @{ mode = 'remove'; recoveryJourney = $target } 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' 'recoveryJourney released back to the engine after the recovery (close: -VehicleOnly)'
+        New-Database @('Completed') -Journeys @($stuck)
         $row = Read-V2JourneyRuntimeRow -DatabasePath $databasePath -AssemblyDirectory $serverInstall -JourneyId "j-target' OR '1'='1"
         Write-Result -Ok ($row['Found'] -eq $false) -Name 'the journey row reader takes the id as a parameter, not as SQL' -Detail ($row | ConvertTo-Json -Compress)
         New-Database @('Completed')
