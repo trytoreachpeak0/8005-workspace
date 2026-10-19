@@ -63,7 +63,18 @@
     onboard stack is started -- hence the startup task rather than a resync the
     operator is expected to remember.
 
-    Four steps:
+    A SUB-SECOND OFFSET STRANDS THE CAR TOO, and a resync does not fix it
+    (workspace#55). agv02 lost power on 2026-10-18 and came back 0.77 s slow.
+    The onboard tolerance is vehicleSafety.clockSkewToleranceMs = 500, so every
+    projection looked stale and the car sat in DEPARTURE_SAFETY_NOT_READY for 83
+    minutes with RIoT healthy and nothing on the screen. w32tm /resync did not
+    help: MaxAllowedPhaseOffset is 1 second on these machines (read on agv02 and
+    agv03 2026-10-19), so anything under a second is slewed, not stepped, and
+    the slew had not closed the gap 83 minutes later. Set-Date -Adjust 0.7655 s
+    did, and the car went Ready within seconds -- while the onboard client was
+    already running, which is what makes a correction shortly after boot enough.
+
+    Five steps:
 
       1. Point w32time at the factory server (the image points it at RIoT).
       2. Lift MaxPos/MaxNegPhaseCorrection to 0xFFFFFFFF and shorten
@@ -71,11 +82,14 @@
       3. Resync. With the limits lifted this is what actually moves the clock,
          however far off it is. Set-Date is only a fallback now, used when a
          reference time was passed and the resync still left the clock wrong.
-      4. Register a startup task that resyncs before anyone starts the onboard
-         stack, so the next power loss costs nobody a trip.
+      4. Measure the offset against the server and step a sub-second one out
+         with Set-Date -Adjust (Invoke-SubSecondCorrection).
+      5. Install a copy of this script under Program Files and register a
+         startup task that runs steps 3 and 4 (-AtStartup) before anyone
+         starts the onboard stack, so the next power loss costs nobody a trip.
 
     Re-running this on a machine whose clock is already correct is the point,
-    not a waste: steps 2 and 4 are what survive the next power loss.
+    not a waste: steps 2 and 5 are what survive the next power loss.
 
 .PARAMETER ReferenceTime
     The correct current time, passed in by the control host. Optional since
@@ -86,12 +100,32 @@
 .PARAMETER TimeServer
     Host to sync from. The factory server, which the vehicles already reach for
     ControlServer.
+
+.PARAMETER AtStartup
+    What the startup task runs: resync, then measure and step out a sub-second
+    offset (steps 3 and 4), logging to the installed copy's directory. Exit 0
+    only when the offset was measured and is within the threshold.
+
+.PARAMETER SelfTest
+    Offline self-test (07-fix-clock.selftest.ps1): the offset decision, the
+    startup loop and the registry writes, with stand-ins for w32tm, Set-Date
+    and the clock, against a temporary HKCU key. Needs no elevation and
+    touches neither the clock nor w32time.
 #>
-[CmdletBinding(SupportsShouldProcess = $true)]
+[CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Fix')]
 param(
+    [Parameter(ParameterSetName = 'Fix')]
     [datetime] $ReferenceTime,
 
-    [string] $TimeServer = '172.19.205.222'
+    [Parameter(ParameterSetName = 'Fix')]
+    [Parameter(ParameterSetName = 'AtStartup')]
+    [string] $TimeServer = '172.19.205.222',
+
+    [Parameter(Mandatory, ParameterSetName = 'AtStartup')]
+    [switch] $AtStartup,
+
+    [Parameter(Mandatory, ParameterSetName = 'SelfTest')]
+    [switch] $SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,21 +135,69 @@ $configKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config'
 $ntpClientKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient'
 $startupTaskName = 'W2G-ClockResyncAtStartup'
 
+# Program Files, not ProgramData: a SYSTEM task must not run a file from a
+# directory a standard user can write to.
+$installDirectory = Join-Path $env:ProgramFiles 'W2G-Clock'
+
+# Above this the startup task steps the clock. The onboard tolerance is 500 ms
+# (vehicleSafety.clockSkewToleranceMs); 200 ms leaves room for the measurement
+# error of one NTP exchange over the CPE link. Exactly 0.2 s is left alone.
+$subSecondThresholdSeconds = 0.2
+
+# At or above this the offset is not a sub-second one: it belongs to the resync
+# (which steps it, with the limits lifted) and to the -ReferenceTime fallback,
+# as before. The same 5 seconds the fallback has always used.
+$coarseOffsetSeconds = 5
+
+$script:StepLog = $null
+$script:ClockTouched = $false
+
 function Write-Step {
     param([string] $Message)
-    Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message)
+    $line = "[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message
+    Write-Host $line
+    if ($script:StepLog) { Add-Content -LiteralPath $script:StepLog -Value ("{0:yyyy-MM-dd} {1}" -f (Get-Date), $line) -Encoding utf8NoBOM }
 }
 
+# Takes any integer and prints its low 32 bits, so -1 (Int32), 4294967295
+# (UInt32 or Int64) and 0xFFFFFFFF all print 0xFFFFFFFF.
 function Format-Dword {
-    param([int] $Value)
-    return '0x{0:X8}' -f $Value
+    param([long] $Value)
+    return '0x{0:X8}' -f ($Value -band 0xFFFFFFFFL)
+}
+
+# What a registry value is, read without any conversion: its kind and its raw
+# value as RegistryKey hands it back, or $null when it is not there.
+function Get-RegistryValueRaw {
+    param([string] $Path, [string] $Name)
+
+    $key = Get-Item -LiteralPath $Path
+    if ($key.GetValueNames() -notcontains $Name) { return $null }
+    return [pscustomobject]@{
+        Kind  = $key.GetValueKind($Name)
+        Value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    }
+}
+
+function Format-RegistryValue {
+    param($Raw)
+    if ($null -eq $Raw) { return '<unset>' }
+    if ($Raw.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord) { return Format-Dword $Raw.Value }
+    return 'REG_{0} {1}' -f $Raw.Kind.ToString().ToUpperInvariant(), $Raw.Value
 }
 
 # PowerShell parses 0xFFFFFFFF as the Int32 -1, and that is the only way to get
 # those 32 bits into a DWORD from here: passing 4294967295 fails binding with
-# "greater than the maximum allowed range of 2147483647". The registry holds the
-# same bits either way, but a later read comes back as -1 -- do not "fix" a
+# "greater than the maximum allowed range of 2147483647". Do not "fix" a
 # comparison against -1 by widening it to 4294967295.
+#
+# Reading the old value back is where workspace#54 came from. Get-ItemProperty
+# under pwsh 7.6 returns a DWORD with the top bit set as UInt32 4294967295 (not
+# the Int32 -1 that RegistryKey.GetValue gives), so the [int] cast that stood
+# here threw "Cannot convert value "4294967295" to type "System.Int32"" on every
+# car where a previous run had already lifted the limit -- before anything was
+# written and before the resync, so the clock was left as it was. Read it raw
+# and compare bits, never through [int].
 function Set-W32TimeDword {
     param(
         [string] $Path,
@@ -125,33 +207,152 @@ function Set-W32TimeDword {
 
     if (-not (Test-Path -Path $Path)) { throw "Missing registry key: $Path" }
 
-    $item = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
-    $current = if ($item -and ($item.PSObject.Properties.Name -contains $Name)) { [int] $item.$Name } else { $null }
+    $current = Get-RegistryValueRaw -Path $Path -Name $Name
 
     Set-ItemProperty -Path $Path -Name $Name -Type DWord -Value $Value
-    Write-Step ("{0} = {1} (was {2})" -f $Name, (Format-Dword $Value), ($null -eq $current ? '<unset>' : (Format-Dword $current)))
+
+    $after = Get-RegistryValueRaw -Path $Path -Name $Name
+    if ($null -eq $after -or $after.Kind -ne [Microsoft.Win32.RegistryValueKind]::DWord -or (Format-Dword $after.Value) -ne (Format-Dword $Value)) {
+        throw ("{0} reads back as {1} after writing {2}" -f $Name, (Format-RegistryValue $after), (Format-Dword $Value))
+    }
+    Write-Step ("{0} = {1} (was {2})" -f $Name, (Format-Dword $Value), (Format-RegistryValue $current))
 }
 
-# Offset against the server as w32time itself sees it, in seconds, positive when
-# this machine is ahead. Independent of any reference time the caller passed --
-# which is the point, because after this change the caller need not pass one.
-# Best effort: returns $null when the output cannot be parsed, and the caller
-# reports "unknown" rather than pretending the machine is fine.
-function Get-ServerOffsetSeconds {
-    param([string] $Server)
+# The offset in w32tm /stripchart /dataonly output, in seconds, positive when
+# this machine is ahead; $null when no sample parses (the server did not
+# answer). The median of the samples, so one slow round trip does not decide.
+function ConvertFrom-StripchartOutput {
+    param([string[]] $Lines)
 
-    $output = w32tm /stripchart /computer:$Server /samples:2 /dataonly 2>&1
-    $hits = [regex]::Matches(($output -join "`n"), '(?m),\s*([-+]?\d+(?:[.,]\d+)?)s\s*$')
-    if ($hits.Count -eq 0) {
-        Write-Step ("stripchart gave nothing parseable: {0}" -f (($output -join ' ').Trim()))
-        return $null
-    }
+    $hits = [regex]::Matches(($Lines -join "`n"), '(?m),\s*([-+]?\d+(?:[.,]\d+)?)s\s*$')
+    if ($hits.Count -eq 0) { return $null }
 
     # stripchart reports the offset of the PEER relative to us, so a machine
     # running fast shows a large negative number. Flip it so "how far ahead is
     # this machine" reads the way it is named.
-    $value = $hits[$hits.Count - 1].Groups[1].Value -replace ',', '.'
-    return -1 * [double]::Parse($value, [cultureinfo]::InvariantCulture)
+    $samples = @($hits | ForEach-Object { -1 * [double]::Parse(($_.Groups[1].Value -replace ',', '.'), [cultureinfo]::InvariantCulture) } | Sort-Object)
+    return $samples[[int][Math]::Floor(($samples.Count - 1) / 2)]
+}
+
+# Offset against the server as w32time itself sees it. Independent of any
+# reference time the caller passed -- which is the point, because the caller
+# need not pass one. Best effort: returns $null when the output cannot be
+# parsed, and the caller reports "unknown" rather than pretending the machine
+# is fine.
+function Get-ServerOffsetSeconds {
+    param([string] $Server)
+
+    $output = @(w32tm /stripchart /computer:$Server /samples:3 /dataonly 2>&1 | ForEach-Object { "$_" })
+    $offset = ConvertFrom-StripchartOutput -Lines $output
+    if ($null -eq $offset) {
+        Write-Step ("stripchart gave nothing parseable: {0}" -f (($output -join ' ').Trim()))
+    }
+    return $offset
+}
+
+# What to do about one measured offset (seconds, positive = this machine ahead).
+# Pure, so the self-test covers every branch:
+#   Unknown  nothing measured: do nothing, and do not call it success;
+#   None     within the threshold (exactly 0.2 s included);
+#   Adjust   over the threshold and under the coarse limit: step by -offset;
+#   Coarse   5 s or more: not this function's business (resync / fallback).
+function Get-ClockCorrection {
+    param(
+        [Nullable[double]] $OffsetSeconds,
+        [double] $ThresholdSeconds = $subSecondThresholdSeconds,
+        [double] $CoarseSeconds = $coarseOffsetSeconds
+    )
+
+    if ($null -eq $OffsetSeconds) { return [pscustomobject]@{ Action = 'Unknown'; AdjustSeconds = 0.0 } }
+    $size = [Math]::Abs($OffsetSeconds)
+    if ($size -le $ThresholdSeconds) { return [pscustomobject]@{ Action = 'None'; AdjustSeconds = 0.0 } }
+    if ($size -ge $CoarseSeconds) { return [pscustomobject]@{ Action = 'Coarse'; AdjustSeconds = 0.0 } }
+    return [pscustomobject]@{ Action = 'Adjust'; AdjustSeconds = -1 * $OffsetSeconds }
+}
+
+# Step 4. MaxAllowedPhaseOffset (1 s here) makes w32time slew anything smaller,
+# and a slew left agv02 0.77 s slow for 83 minutes (workspace#55), so measure
+# and step it ourselves. -Measure returns the offset or $null; -Adjust takes a
+# TimeSpan to add to the clock. Outcomes:
+#   IN_RANGE   measured, within the threshold, nothing done        (success)
+#   ADJUSTED   stepped, and a fresh measurement is within it        (success)
+#   UNMEASURED no measurement                                       (failure)
+#   COARSE     5 s or more, left to the resync and the fallback      (failure)
+#   NOT_CONFIRMED stepped, but the re-measurement failed or is still over it
+function Invoke-SubSecondCorrection {
+    param(
+        [Parameter(Mandatory)][scriptblock] $Measure,
+        [Parameter(Mandatory)][scriptblock] $Adjust
+    )
+
+    $before = & $Measure
+    $decision = Get-ClockCorrection -OffsetSeconds $before
+    $result = [pscustomobject]@{ Outcome = $null; Before = $before; After = $before; AdjustSeconds = 0.0 }
+
+    switch ($decision.Action) {
+        'Unknown' {
+            Write-Step 'Offset could not be measured; the clock was not stepped.'
+            $result.Outcome = 'UNMEASURED'
+        }
+        'None' {
+            Write-Step ("Offset {0:+0.000;-0.000} s is within {1} s; nothing to step." -f $before, $subSecondThresholdSeconds)
+            $result.Outcome = 'IN_RANGE'
+        }
+        'Coarse' {
+            Write-Step ("Offset {0:+0.000;-0.000} s is {1} s or more; not stepping it here (resync / -ReferenceTime fallback)." -f $before, $coarseOffsetSeconds)
+            $result.Outcome = 'COARSE'
+        }
+        'Adjust' {
+            $script:ClockTouched = $true
+            $result.AdjustSeconds = $decision.AdjustSeconds
+            & $Adjust ([TimeSpan]::FromSeconds($decision.AdjustSeconds))
+            $after = & $Measure
+            $result.After = $after
+            $confirmed = $null -ne $after -and [Math]::Abs($after) -le $subSecondThresholdSeconds
+            $result.Outcome = $confirmed ? 'ADJUSTED' : 'NOT_CONFIRMED'
+            Write-Step ("Offset {0:+0.000;-0.000} s stepped by {1:+0.000;-0.000} s; now {2}." -f $before, $decision.AdjustSeconds, ($null -eq $after ? 'unmeasured' : ('{0:+0.000;-0.000} s' -f $after)))
+        }
+    }
+    return $result
+}
+
+function Test-ClockCorrectionSucceeded {
+    param($Result)
+    return $Result.Outcome -in 'IN_RANGE', 'ADJUSTED'
+}
+
+# What the startup task does: resync (for the big offsets, which w32time steps
+# with the limits lifted), then step out a sub-second one. Retries the whole
+# round because at startup the CPE link is often not up yet for the first try.
+# Returns the last correction result; the caller turns it into the exit code.
+function Invoke-StartupClockCheck {
+    param(
+        [Parameter(Mandatory)][scriptblock] $Resync,
+        [Parameter(Mandatory)][scriptblock] $Measure,
+        [Parameter(Mandatory)][scriptblock] $Adjust,
+        [scriptblock] $Sleep = { Start-Sleep -Seconds 30 },
+        [int] $Rounds = 10
+    )
+
+    $result = $null
+    foreach ($round in 1..$Rounds) {
+        $synced = & $Resync
+        Write-Step ("Startup round {0}: resync {1}" -f $round, ($synced ? 'succeeded' : 'failed'))
+        $result = Invoke-SubSecondCorrection -Measure $Measure -Adjust $Adjust
+        if (Test-ClockCorrectionSucceeded $result) { return $result }
+        if ($round -lt $Rounds) { & $Sleep }
+    }
+    return $result
+}
+
+# The operator-facing line when the script stops on an error: whether the clock
+# was moved before it did. Nothing before the resync moves the clock.
+function Get-FailureNotice {
+    param([bool] $ClockTouched)
+    if ($ClockTouched) {
+        return 'FAILED after the clock may have been moved. Read the offset (w32tm /stripchart) before starting the onboard stack.'
+    }
+    return 'FAILED before anything moved the clock: THE CLOCK WAS NOT CHANGED (时钟未改). Fix the error and run this again.'
 }
 
 # Resync retries because the first attempt right after a service restart or a
@@ -166,6 +367,9 @@ function Get-ServerOffsetSeconds {
 function Invoke-Resync {
     param([int] $Attempts = 5)
 
+    # A successful resync can step the clock, so from here on a failure can no
+    # longer promise the operator that the clock is untouched.
+    $script:ClockTouched = $true
     foreach ($attempt in 1..$Attempts) {
         $resync = w32tm /resync /force 2>&1
         if ($LASTEXITCODE -eq 0) {
@@ -178,31 +382,69 @@ function Invoke-Resync {
     return $false
 }
 
+# The startup task runs an installed copy of this script with -AtStartup, so
+# what runs at boot is the code the self-test covers, not a one-line loop kept
+# in step by hand. It used to be exactly that loop -- resync only -- which is
+# why a sub-second offset survived every boot (workspace#55).
+function New-StartupTaskArguments {
+    param([string] $ScriptPath, [string] $Server)
+    return '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -AtStartup -TimeServer {1}' -f $ScriptPath, $Server
+}
+
+# -AllowStartIfOnBatteries is load-bearing here and not boilerplate: these
+# machines ride on the vehicle and Windows sees a battery, so without it the
+# task would skip exactly the boots this is for.
+function New-StartupTaskSettings {
+    return New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+}
+
+function Install-StartupCopy {
+    param([string] $Source, [string] $Directory)
+
+    New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+    $target = Join-Path $Directory (Split-Path -Leaf $Source)
+    Copy-Item -LiteralPath $Source -Destination $target -Force
+    Write-Step ("Installed {0}" -f $target)
+    return $target
+}
+
 # The task exists so the correction happens before the onboard stack is started,
-# not after an operator remembers. SYSTEM because w32time needs it; the retry
-# loop because at startup the CPE link is often not up yet for the first try.
+# not after an operator remembers. SYSTEM because w32time and Set-Date need it.
 function Register-StartupResyncTask {
-    param([string] $TaskName)
+    param([string] $TaskName, [string] $ScriptPath, [string] $Server)
 
     $pwsh = (Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue)?.Source
     if (-not $pwsh) { throw 'pwsh was not found on this machine; the startup task would never run.' }
 
-    $loop = 'foreach ($i in 1..10) { & w32tm.exe /resync /force *>$null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 30 }; exit 1'
-    $action = New-ScheduledTaskAction -Execute $pwsh -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{0}"' -f $loop)
+    $action = New-ScheduledTaskAction -Execute $pwsh -Argument (New-StartupTaskArguments -ScriptPath $ScriptPath -Server $Server)
 
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $trigger.Delay = 'PT30S'
 
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
-    # -AllowStartIfOnBatteries is load-bearing here and not boilerplate: these
-    # machines ride on the vehicle and Windows sees a battery, so without it the
-    # task would skip exactly the boots this is for.
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
-
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Resync the clock from the factory server at startup (workspace#5).' -Force | Out-Null
-    Write-Step ("Startup task '{0}' registered, running {1}" -f $TaskName, $pwsh)
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings (New-StartupTaskSettings) -Description 'Resync the clock from the factory server at startup and step out a sub-second offset (workspace#5, workspace#55).' -Force | Out-Null
+    Write-Step ("Startup task '{0}' registered, running {1} -File {2} -AtStartup" -f $TaskName, $pwsh, $ScriptPath)
 }
+
+function Invoke-SelfTest {
+    $failures = [System.Collections.Generic.List[string]]::new()
+    function Check([string] $Name, [scriptblock] $Body) {
+        try { & $Body; "PASS $Name" } catch { $failures.Add($Name); "FAIL $Name -- $($_.Exception.Message)" }
+    }
+    $work = "HKCU:\Software\8005-clock-selftest-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    New-Item -Path $work -Force | Out-Null
+    try {
+        . (Join-Path $PSScriptRoot '07-fix-clock.selftest.ps1')
+    }
+    finally {
+        Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    "SELFTEST $(if ($failures.Count -eq 0) { 'PASS' } else { "FAIL ($($failures -join '; '))" }) ($($failures.Count) failed)"
+    if ($failures.Count -ne 0) { exit 1 }
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'SelfTest') { Invoke-SelfTest; return }
 
 # The elevation check is skipped under -WhatIf so a dry run can be read from any
 # shell. Every call that actually changes something sits behind the
@@ -212,6 +454,20 @@ if (-not $WhatIfPreference) {
     if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'This script must run elevated.'
     }
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'AtStartup') {
+    $script:StepLog = Join-Path $PSScriptRoot 'startup.log'
+    if ((Test-Path -LiteralPath $script:StepLog) -and (Get-Item -LiteralPath $script:StepLog).Length -gt 1MB) {
+        Move-Item -LiteralPath $script:StepLog -Destination "$($script:StepLog).1" -Force
+    }
+    Write-Step ("Startup clock check against {0}" -f $TimeServer)
+    $result = Invoke-StartupClockCheck `
+        -Resync { Invoke-Resync -Attempts 1 } `
+        -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
+        -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
+    Write-Step ("Startup clock check: {0}" -f $result.Outcome)
+    exit ((Test-ClockCorrectionSucceeded $result) ? 0 : 1)
 }
 
 $hasReference = $PSBoundParameters.ContainsKey('ReferenceTime')
@@ -233,62 +489,92 @@ else {
 # screen right now. A car whose clock currently looks fine is precisely the one
 # that has not been inoculated yet. Running this again on a healthy machine
 # costs one NTP packet (workspace#5).
-if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Lift the w32time correction limits, sync from $TimeServer, and register '$startupTaskName'")) {
+if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Lift the w32time correction limits, sync from $TimeServer, step out a sub-second offset, and register '$startupTaskName'")) {
     Write-Step 'WhatIf: nothing above was changed.'
     return
 }
 
-# Step 1: a reachable source. 0x9 is "client mode, use as fallback" -- the flag
-# the previous (unreachable) entry also used, and its 0x1 half is what makes
-# SpecialPollInterval below the interval that applies.
-$null = w32tm /config /manualpeerlist:"${TimeServer},0x9" /syncfromflags:manual /update 2>&1
+try {
+    # Step 1: a reachable source. 0x9 is "client mode, use as fallback" -- the flag
+    # the previous (unreachable) entry also used, and its 0x1 half is what makes
+    # SpecialPollInterval below the interval that applies.
+    $null = w32tm /config /manualpeerlist:"${TimeServer},0x9" /syncfromflags:manual /update 2>&1
 
-# Step 2: the limits. Without these the machine measures a 137-day offset,
-# decides the measurement cannot be trusted, and stays wrong -- which is the
-# whole of workspace#5. MaxAllowedPhaseOffset is deliberately left alone: it
-# only decides step vs. slew, and its default already steps an offset this big.
-Set-W32TimeDword -Path $configKey -Name 'MaxPosPhaseCorrection' -Value 0xFFFFFFFF
-Set-W32TimeDword -Path $configKey -Name 'MaxNegPhaseCorrection' -Value 0xFFFFFFFF
+    # Step 2: the limits. Without these the machine measures a 137-day offset,
+    # decides the measurement cannot be trusted, and stays wrong -- which is the
+    # whole of workspace#5.
+    #
+    # MaxAllowedPhaseOffset is deliberately left alone, and since workspace#55
+    # that is a choice with a cost, not a free one. It decides step vs. slew for
+    # EVERY sync, the hourly poll included: its default (1 s on these machines)
+    # steps an offset as big as workspace#5's, and slews anything under a second.
+    # Lowering it would also step sub-second offsets, but it would do so at any
+    # poll, mid-drive, with the onboard client stamping and comparing times --
+    # a backward step there is what a slew exists to avoid. What it fails to do
+    # is close a sub-second gap promptly (0.77 s stayed for 83 minutes on agv02
+    # 2026-10-18). That one case is handled by step 4 instead, once, shortly
+    # after boot, bounded to under 5 seconds and measured against the server.
+    Set-W32TimeDword -Path $configKey -Name 'MaxPosPhaseCorrection' -Value 0xFFFFFFFF
+    Set-W32TimeDword -Path $configKey -Name 'MaxNegPhaseCorrection' -Value 0xFFFFFFFF
 
-# 32768 seconds (9 hours) shipped with the image. An hour bounds how long a
-# machine that drifts between polls stays wrong, and one NTP packet an hour
-# costs the factory server nothing.
-Set-W32TimeDword -Path $ntpClientKey -Name 'SpecialPollInterval' -Value 3600
+    # 32768 seconds (9 hours) shipped with the image. An hour bounds how long a
+    # machine that drifts between polls stays wrong, and one NTP packet an hour
+    # costs the factory server nothing.
+    Set-W32TimeDword -Path $ntpClientKey -Name 'SpecialPollInterval' -Value 3600
 
-$null = w32tm /config /update 2>&1
-Set-Service w32time -StartupType Automatic
-Restart-Service w32time
-Start-Sleep -Seconds 3
+    $null = w32tm /config /update 2>&1
+    Set-Service w32time -StartupType Automatic
+    # w32time may sync as it comes back up, so a failure past here may follow a
+    # moved clock.
+    $script:ClockTouched = $true
+    Restart-Service w32time
+    Start-Sleep -Seconds 3
 
-# Step 3: this is now the step that moves the clock, however far off it is.
-$synced = Invoke-Resync
-Write-Step ("Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
-
-$offset = Get-ServerOffsetSeconds -Server $TimeServer
-if ($null -ne $offset) {
-    Write-Step ("Offset vs {0}: {1:N3} seconds" -f $TimeServer, $offset)
-}
-
-# The fallback. It is the old step 1, demoted: it only runs when the resync left
-# the clock wrong AND the caller supplied a time to jump to.
-$stillWrong = ($null -ne $offset -and [Math]::Abs($offset) -ge 5) -or (-not $synced -and $null -eq $offset)
-if ($stillWrong -and $hasReference) {
-    Write-Step 'Resync did not bring the clock in; falling back to the manual coarse jump.'
-    Set-Date -Date $ReferenceTime | Out-Null
-    Write-Step ("Clock set by hand. Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+    # Step 3: this is now the step that moves the clock, however far off it is.
     $synced = Invoke-Resync
-    $offset = Get-ServerOffsetSeconds -Server $TimeServer
-}
-elseif ($stillWrong) {
-    Write-Warning "The clock is still wrong and no -ReferenceTime was passed. Re-run with one, and check that 16-enable-ntp-server.ps1 has been run on the factory server."
-}
+    Write-Step ("Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
 
-if (-not $synced) {
-    Write-Warning 'w32tm /resync never succeeded. Nothing is holding this clock -- do not start the onboard stack until it is.'
-}
+    # Step 4: what the resync leaves under a second, it slews; step it out.
+    $correction = Invoke-SubSecondCorrection `
+        -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
+        -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
+    $offset = $correction.After
+    if ($null -ne $offset) {
+        Write-Step ("Offset vs {0}: {1:N3} seconds" -f $TimeServer, $offset)
+    }
 
-# Step 4: make the next power loss a non-event.
-Register-StartupResyncTask -TaskName $startupTaskName
+    # The fallback. It is the old step 1, demoted: it only runs when the resync left
+    # the clock wrong AND the caller supplied a time to jump to.
+    $stillWrong = ($null -ne $offset -and [Math]::Abs($offset) -ge $coarseOffsetSeconds) -or (-not $synced -and $null -eq $offset)
+    if ($stillWrong -and $hasReference) {
+        Write-Step 'Resync did not bring the clock in; falling back to the manual coarse jump.'
+        Set-Date -Date $ReferenceTime | Out-Null
+        Write-Step ("Clock set by hand. Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+        $synced = Invoke-Resync
+        $correction = Invoke-SubSecondCorrection `
+            -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
+            -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
+    }
+    elseif ($stillWrong) {
+        Write-Warning "The clock is still wrong and no -ReferenceTime was passed. Re-run with one, and check that 16-enable-ntp-server.ps1 has been run on the factory server."
+    }
+
+    if (-not (Test-ClockCorrectionSucceeded $correction)) {
+        Write-Warning ("The offset against {0} is not confirmed within {1} s ({2}). The onboard tolerance is 0.5 s -- do not start the onboard stack until it is." -f $TimeServer, $subSecondThresholdSeconds, $correction.Outcome)
+    }
+
+    if (-not $synced) {
+        Write-Warning 'w32tm /resync never succeeded. Nothing is holding this clock -- do not start the onboard stack until it is.'
+    }
+
+    # Step 5: make the next power loss a non-event.
+    $installed = Install-StartupCopy -Source $PSCommandPath -Directory $installDirectory
+    Register-StartupResyncTask -TaskName $startupTaskName -ScriptPath $installed -Server $TimeServer
+}
+catch {
+    Write-Host (Get-FailureNotice -ClockTouched $script:ClockTouched)
+    throw
+}
 
 $source = w32tm /query /source 2>&1
 Write-Step ("Source now: {0}" -f ($source -join ' '))
