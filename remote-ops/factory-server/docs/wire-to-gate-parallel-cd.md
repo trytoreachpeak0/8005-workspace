@@ -911,6 +911,36 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 服务器端脚本会因为没有 `installed-instance.json` 而拒绝，但 `dispatch-gate\<commit>` 这个目录已经建好、留在那里，没有任何东西用它，
 在意的话手工删掉即可。
 
+**有一趟旅程卡在恢复态、关不了闸时**（8005-workspace#61，起因是 2026-10-19 agv03 装货结果 UNKNOWN）：关闸要求所有旅程都是 `Completed`，
+而卡住的那趟不是；18 号开恢复窗口、19 号升级、全检站激活又都要求闸先关上，于是互相卡死。这时关闸加 `-RecoveryJourneyId <完整旅程号>`
+和 `-RecoveryVehicleAlias <agv0N>`（旅程号含 `|`，要加引号）。有几趟就各写几个，用逗号隔开，按位置一一对应：
+
+```bash
+pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 `
+  -State Closed -ControlServerRepository <含 workspace#61 的干净 checkout> `
+  -RecoveryJourneyId "journey:40c5532e-d97d-4b29-a5bd-bf5343ea01dc|g102" -RecoveryVehicleAlias agv03 -WhatIf
+```
+
+每一趟都要同时满足这几条才放过：它在点名的车上（库里的 `AgvId`、`VehicleKey` 与 `onboard-hmi/config/site-<别名>.json` 的 `agvId`、
+`vehicleSafety.expectedVehicleKey` 逐字相等）；它是 `Blocked`，阻塞码是 `LOAD_RESULT_REQUIRES_RECOVERY`、`UNLOAD_RESULT_REQUIRES_RECOVERY`
+或普通的 `<消息类型>_NOT_RECONCILED`（与 18 号同一个定义）；它那台车**没有被故障模型按住**（`VehicleFaultStates` 里这台车的 `Level` 是
+`None` 或没有行）。为什么恢复态的旅程可以放：它是 `Blocked`，引擎每轮对它直接返回，故障监看只在到站阶段那几条路径上调用，所以重启拿不走它的
+任何监看（它那台车此刻不一定在站上）。车辆故障那一条是额外加的一道：故障在效时停稳证明的采样只在内存里，重启就丢。被故障按住的车（例如急停之后的
+隔离）等故障自己解除（被按住的单自动续行，`RESUME_HELD_ORDER`）再关闸，或者联系系统维护人员走 control-server#771 撤旅程。生产实例的
+`vehicleFaultRecovery` 入口是关着的，不能指望它。没点名的非 `Completed` 旅程照旧拒，其余检查一条不少。不带参数时行为不变。点名了却不在途的
+旅程（已经走完，或旅程号写错）不放宽任何东西，拒绝消息和预演里会写「named but not in flight」。
+`-ControlServerRepository` 太旧（没有这项改动）时，在复制任何东西之前就拒（`CHECKOUT_PREDATES_RECOVERY_JOURNEY`）。
+
+**`-State` 只认逐字的 `Closed` 和 `Open`**（8005-workspace#61 起）。此前小写的 `-State closed` 能通过参数检查，到服务器端却被当成开闸，
+而且会跳过开闸前的 IO 核对；现在大小写不对在参数绑定时就失败，什么都不做。
+
+**开闸不放宽**：这个参数只能配 `-State Closed`。所以点名关闸之后，那趟旅程只要还没到 `Completed`，
+`-State Open` 就会照常以 `GATE_OPEN_REFUSED_ORDER_SENT` 拒绝：它前面停靠的单都发出过。尤其要知道一条走不通的路：用 18 号开恢复窗口、
+在车上做补偿清空（`COMPENSATE_LOAD_ALL_EMPTY`）之后，**多需求旅程不会收尾**，它被放回引擎（`AwaitingLoadResult` → 离站），下一段腿因为闸门关着
+建不了单，停在 `CreateDispatchDisabled`，永远到不了 `Completed`，开闸也就一直被拒。出路只有两条：等 control-server#771 的撤旅程入口把它收成
+`Completed`，之后普通的 `-State Open` 就不再看它；或者在 RIoT 上查清这台车没有在跑的单之后，按下面「手工开闸」那一节手工开。手工开闸后
+那趟旅程会立刻为下一站建单、车会出发，这是动车，要用户单独授权、现场有人。
+
 为什么不直接放进 `opsRoot`：`19-deploy-control-server-parallel.ps1` 把安装脚本、卸载脚本和这两个模块当成**一个整体**放在 `opsRoot`
 里。要是 20 号用一个较新的 checkout 把模块覆盖进去，之后再跑 19 号的 `-Uninstall`，就成了旧卸载脚本配新模块；部署时清理秘密文件用的
 也是服务器上那份模块。放进单独的子目录，20 号就永远不会改动 19 号部署的东西，19 号也不用为闸门做任何改动。代价是每用一个新 commit

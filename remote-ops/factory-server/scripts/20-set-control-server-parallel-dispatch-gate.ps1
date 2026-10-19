@@ -67,6 +67,25 @@
     is not opened (IO_CHECK_RECORD_*). In the trial phase, outside a cutover, and for -State Closed it is not asked
     for: closing a gate is never held up.
 
+.PARAMETER RecoveryJourneyId
+    8005-workspace#61, with -RecoveryVehicleAlias and -State Closed only. The whole JourneyId
+    (journey:<demandId>|g<generation>, quoted for the '|') of each journey a vehicle stuck on a slot operation result is
+    recovered from; several, comma-separated, each paired by position with -RecoveryVehicleAlias. Without it, closing is
+    refused while any journey is not Completed -- and such a journey is not -- while 18's recovery window, 19 and the
+    task-type station activation all need the gate closed first. With it, closing lets each named journey through while
+    it is on its vehicle, Blocked on a slot operation result that needs recovery (LOAD_RESULT_REQUIRES_RECOVERY,
+    UNLOAD_RESULT_REQUIRES_RECOVERY, <messageType>_NOT_RECONCILED), and its vehicle holds no fault (a restart would drop
+    the stop proof of a fault that stands; wait until it clears -- the held order resumed -- or for control-server#771).
+    Opening after it: see remote-ops/factory-server/docs/wire-to-gate-parallel-cd.md section 10. The server-side half judges (Get-ParallelDispatchGateRefusal -RecoveryJourney in the control-server checkout).
+    Every other journey is judged as without it, and so is every other check. Opening is not widened: control-server#771
+    takes the journey to Completed, after which the ordinary -State Open sees it no more. Needs a checkout that has it
+    (CHECKOUT_PREDATES_RECOVERY_JOURNEY otherwise, before anything is copied).
+
+.PARAMETER RecoveryVehicleAlias
+    With -RecoveryJourneyId, one per journey, in the same order: the vehicle that journey must be on (agv01, agv02, agv03). Its agvId and
+    vehicleSafety.expectedVehicleKey are read from remote-ops/onboard-hmi/config/site-<alias>.json and must equal the
+    journey row's AgvId and VehicleKey.
+
 .PARAMETER WhatIf
     The dry run: stages this commit's copy in <opsRoot>\dispatch-gate\<commit> (the same staging a real
     run does), then runs it with -WhatIf, which prints what the journey check says now, and stops. It
@@ -84,7 +103,8 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Closed', 'Open')][string] $State,
+    # Exactly as spelled (8005-workspace#61): 'closed' used to pass here, skip the IO check below and reach the server as an opening.
+    [Parameter(Mandatory = $true)][ValidateSet('Closed', 'Open', IgnoreCase = $false)][string] $State,
 
     [Parameter(Mandatory = $true)][string] $ControlServerRepository,
 
@@ -92,7 +112,13 @@ param(
 
     [string] $SshAlias = 'factory01',
 
-    [string] $IoCheckRecord
+    [string] $IoCheckRecord,
+
+    # The whole JourneyId as the server stores it (control-server MultiDemandJourneyPorts.cs). Checked, and split on commas,
+    # in Get-RecoveryJourneyTarget: under pwsh -File, "a,b" arrives as one string, not as an array.
+    [string[]] $RecoveryJourneyId,
+
+    [string[]] $RecoveryVehicleAlias
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,6 +155,48 @@ function Get-InstalledCutoverProbeCommand {
     return "if (Test-Path -LiteralPath '$quoted') { (Get-Content -Raw -LiteralPath '$quoted').Contains([string][char]34 + 'productionCutover' + [char]34) } else { 'False' }"
 }
 
+function Get-RecoveryJourneyTarget {
+    <#
+        8005-workspace#61. The journeys the server-side half is to judge on their own, as @{ journeyId; agvId; vehicleKey;
+        alias } entries written to the pipeline one by one (collect them with @(...)), none without -RecoveryJourneyId. agvId and vehicleKey come from each
+        vehicle's site file, the same two identities the server records on the journey row. Throws before anything is
+        copied. Pure but for reading the site files.
+    #>
+    param([string[]] $JourneyId, [string[]] $VehicleAlias, [string] $SiteDirectory, [string] $State)
+    # pwsh -File passes "a,b" as one string; a call from pwsh passes an array. Both end up as one list here.
+    $ids = @($JourneyId | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $aliases = @($VehicleAlias | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($ids.Count -eq 0 -and $aliases.Count -eq 0) { return }
+    $badId = @($ids | Where-Object { $_ -cnotmatch '^[A-Za-z0-9:._|-]{1,200}$' })
+    $badAlias = @($aliases | Where-Object { $_ -cnotin @('agv01', 'agv02', 'agv03') })
+    if ($badId.Count -gt 0 -or $badAlias.Count -gt 0) {
+        throw ("-RecoveryJourneyId takes whole journey ids ([A-Za-z0-9:._|-], at most 200) and -RecoveryVehicleAlias agv01, agv02 or agv03: " +
+            "refused $(@($badId + $badAlias) -join ', '). Nothing was copied or changed.")
+    }
+    # -State binds only as 'Closed' or 'Open', exactly (review L1).
+    if ($State -cne 'Closed') {
+        throw '-RecoveryJourneyId is for -State Closed only; opening is not widened (control-server#771 takes the journey to Completed). Nothing was copied or changed.'
+    }
+    if ($ids.Count -ne $aliases.Count) {
+        throw ("-RecoveryJourneyId and -RecoveryVehicleAlias go together, one vehicle per journey in the same order: $($ids.Count) journey(s), " +
+            "$($aliases.Count) vehicle(s). Nothing was copied or changed.")
+    }
+    if (@($ids | Sort-Object -Unique -CaseSensitive).Count -ne $ids.Count) { throw '-RecoveryJourneyId names a journey twice. Nothing was copied or changed.' }
+    $targets = for ($i = 0; $i -lt $ids.Count; $i++) {
+        $sitePath = Join-Path $SiteDirectory "site-$($aliases[$i]).json"
+        try { $site = Get-Content -Raw -LiteralPath $sitePath | ConvertFrom-Json -AsHashtable }
+        catch { throw "$sitePath cannot be read ($($_.Exception.Message)). Nothing was copied or changed." }
+        $agvId = [string] $site['agvId']
+        $safety = $site['vehicleSafety']
+        $vehicleKey = $safety -is [System.Collections.IDictionary] ? [string] $safety['expectedVehicleKey'] : ''
+        if ([string]::IsNullOrWhiteSpace($agvId) -or [string]::IsNullOrWhiteSpace($vehicleKey)) {
+            throw "$sitePath lacks agvId or vehicleSafety.expectedVehicleKey, which the recovery journey is matched against. Nothing was copied or changed."
+        }
+        @{ journeyId = $ids[$i]; agvId = $agvId; vehicleKey = $vehicleKey; alias = $aliases[$i] }
+    }
+    return $targets
+}
+
 # The cutover contract this script was written for (control-server#564 review round 2, L3): a checkout must carry at least
 # this version of Get-ParallelCutoverContractVersion to act on an installed cutover. Revision 1 of #677 already had
 # Test-ParallelProductionCutoverDefinition, but not the MVP checks.
@@ -142,6 +210,8 @@ function Invoke-Ssh {
     return $output
 }
 
+$recoveryTarget = @(Get-RecoveryJourneyTarget -JourneyId $RecoveryJourneyId -VehicleAlias $RecoveryVehicleAlias `
+    -SiteDirectory (Join-Path $PSScriptRoot '../../onboard-hmi/config') -State $State)
 $repoRoot = (Resolve-Path -LiteralPath $ControlServerRepository).Path
 $parallelScripts = Join-Path $repoRoot 'scripts\parallel'
 $serverScript = 'Set-ParallelDispatchGateLocal.ps1'
@@ -155,6 +225,11 @@ if ($dirty) { throw "$repoRoot has uncommitted changes; commit or discard them f
 $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw "Cannot read the HEAD commit of $repoRoot ('$commit')." }
 Import-Module (Join-Path $parallelScripts 'ParallelInstance.psm1') -Force
+# 8005-workspace#61: an older checkout's server-side script has no -RecoveryJourney and would refuse the argument.
+if ($recoveryTarget.Count -gt 0 -and -not (Get-Command ConvertTo-ParallelRecoveryJourneyArgument -ErrorAction SilentlyContinue)) {
+    throw ("CHECKOUT_PREDATES_RECOVERY_JOURNEY: $repoRoot has no ConvertTo-ParallelRecoveryJourneyArgument, so its server-side " +
+        'script does not know -RecoveryJourney (8005-workspace#61). Use a checkout that has it. Nothing was copied or changed.')
+}
 
 if (-not $InstanceDefinitionPath) {
     $InstanceDefinitionPath = Join-Path $parallelScripts 'instance-factory01-v2.json'
@@ -195,9 +270,16 @@ $gateRoot = "$opsRoot\dispatch-gate\$commit"
 $remoteScript = "$gateRoot\$serverScript"
 # The installed definition stays where the installer recorded it, beside 19's unit; the gate script is told where.
 $switch = "-State $State -InstanceDefinitionPath `"$opsRoot\installed-instance.json`""
+if ($recoveryTarget.Count -gt 0) {
+    # Base64: the id carries '|' and the agvId is Chinese, and neither may be re-quoted or re-encoded through ssh.
+    $switch += ' -RecoveryJourney ' + (ConvertTo-ParallelRecoveryJourneyArgument -Journeys $recoveryTarget)
+}
 
 Write-Step "Target: $SshAlias  v2 parallel instance, server-side script $remoteScript (control-server $commit)"
 Write-Step "Requested: RiotCreateDispatch.enabled=$($State -eq 'Open' ? 'true' : 'false') (the server resolves the V2 service and file from installed-instance.json)"
+foreach ($target in $recoveryTarget) {
+    Write-Step "Recovery journey: $($target.journeyId) on $($target.alias) ($($target.agvId) / $($target.vehicleKey)) -- judged on its own by the server-side half"
+}
 
 # Staged on both paths, the dry run included (see .PARAMETER WhatIf): only this commit's own directory is
 # written, and nothing the instance, the MVP or 19's unit in opsRoot reads.
