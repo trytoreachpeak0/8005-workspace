@@ -87,6 +87,10 @@
       5. Install a copy of this script under Program Files and register a
          startup task that runs steps 3 and 4 (-AtStartup) before anyone
          starts the onboard stack, so the next power loss costs nobody a trip.
+         It runs right after step 2, so a failure in steps 3 and 4 does not
+         cost the car its startup task.
+
+    Exit 2 when the offset could not be confirmed within the threshold.
 
     Re-running this on a machine whose clock is already correct is the point,
     not a waste: steps 2 and 5 are what survive the next power loss.
@@ -322,16 +326,31 @@ function Test-ClockCorrectionSucceeded {
 }
 
 # What the startup task does: resync (for the big offsets, which w32time steps
-# with the limits lifted), then step out a sub-second one. Retries the whole
-# round because at startup the CPE link is often not up yet for the first try.
-# Returns the last correction result; the caller turns it into the exit code.
+# with the limits lifted), then step out a sub-second one, round after round
+# until a round measures the clock within the threshold WITHOUT having to step
+# it. Returns the last correction result; the caller exits 0 only on IN_RANGE.
+#
+# It keeps trying for hours, not minutes (review S1 of workspace#55). It used
+# to give up after 10 rounds, about 5 minutes. After a plant-wide power cut the
+# factory server reboots as well and its NTP answers late, and a task that has
+# already given up leaves the car stranded exactly as on 10-18. 480 rounds at
+# 30 s is about 4 hours; one NTP packet per round costs nothing. It stays a
+# startup task rather than also running every hour: a sub-second step is a
+# discontinuity, and after the first good round w32time's own slew is what
+# should hold the clock.
+#
+# After a step it waits $Settle and measures again in the next round, because
+# a measurement right after Set-Date cannot show whether w32time's pending
+# slew then pulls the clock off again (review S2). Stepping again in that
+# round is allowed; the log shows it.
 function Invoke-StartupClockCheck {
     param(
         [Parameter(Mandatory)][scriptblock] $Resync,
         [Parameter(Mandatory)][scriptblock] $Measure,
         [Parameter(Mandatory)][scriptblock] $Adjust,
         [scriptblock] $Sleep = { Start-Sleep -Seconds 30 },
-        [int] $Rounds = 10
+        [scriptblock] $Settle = { Start-Sleep -Seconds 90 },
+        [int] $Rounds = 480
     )
 
     $result = $null
@@ -339,8 +358,8 @@ function Invoke-StartupClockCheck {
         $synced = & $Resync
         Write-Step ("Startup round {0}: resync {1}" -f $round, ($synced ? 'succeeded' : 'failed'))
         $result = Invoke-SubSecondCorrection -Measure $Measure -Adjust $Adjust
-        if (Test-ClockCorrectionSucceeded $result) { return $result }
-        if ($round -lt $Rounds) { & $Sleep }
+        if ($result.Outcome -eq 'IN_RANGE') { return $result }
+        if ($round -lt $Rounds) { & ($result.Outcome -eq 'ADJUSTED' ? $Settle : $Sleep) }
     }
     return $result
 }
@@ -395,7 +414,7 @@ function New-StartupTaskArguments {
 # machines ride on the vehicle and Windows sees a battery, so without it the
 # task would skip exactly the boots this is for.
 function New-StartupTaskSettings {
-    return New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+    return New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 5)
 }
 
 function Install-StartupCopy {
@@ -403,6 +422,12 @@ function Install-StartupCopy {
 
     New-Item -ItemType Directory -Force -Path $Directory | Out-Null
     $target = Join-Path $Directory (Split-Path -Leaf $Source)
+    # Re-running the installed copy itself is legitimate, and Copy-Item onto
+    # the same path throws "Cannot overwrite the item ... with itself".
+    if ([System.IO.Path]::GetFullPath($Source) -ieq [System.IO.Path]::GetFullPath($target)) {
+        Write-Step ("Running from the installed copy {0}; nothing to copy" -f $target)
+        return $target
+    }
     Copy-Item -LiteralPath $Source -Destination $target -Force
     Write-Step ("Installed {0}" -f $target)
     return $target
@@ -467,7 +492,8 @@ if ($PSCmdlet.ParameterSetName -eq 'AtStartup') {
         -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
         -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
     Write-Step ("Startup clock check: {0}" -f $result.Outcome)
-    exit ((Test-ClockCorrectionSucceeded $result) ? 0 : 1)
+    # Only a round that measured the clock in range without stepping it counts.
+    exit (($result.Outcome -eq 'IN_RANGE') ? 0 : 1)
 }
 
 $hasReference = $PSBoundParameters.ContainsKey('ReferenceTime')
@@ -523,6 +549,14 @@ try {
     Set-W32TimeDword -Path $ntpClientKey -Name 'SpecialPollInterval' -Value 3600
 
     $null = w32tm /config /update 2>&1
+
+    # Step 5: make the next power loss a non-event. It runs here, before steps 3
+    # and 4, on purpose (review S5 of workspace#55): those talk to the server and
+    # can fail, and a failure there must not also cost the car its startup task,
+    # which is what fixes the clock at the next boot without anyone present.
+    $installed = Install-StartupCopy -Source $PSCommandPath -Directory $installDirectory
+    Register-StartupResyncTask -TaskName $startupTaskName -ScriptPath $installed -Server $TimeServer
+
     Set-Service w32time -StartupType Automatic
     # w32time may sync as it comes back up, so a failure past here may follow a
     # moved clock.
@@ -566,10 +600,6 @@ try {
     if (-not $synced) {
         Write-Warning 'w32tm /resync never succeeded. Nothing is holding this clock -- do not start the onboard stack until it is.'
     }
-
-    # Step 5: make the next power loss a non-event.
-    $installed = Install-StartupCopy -Source $PSCommandPath -Directory $installDirectory
-    Register-StartupResyncTask -TaskName $startupTaskName -ScriptPath $installed -Server $TimeServer
 }
 catch {
     Write-Host (Get-FailureNotice -ClockTouched $script:ClockTouched)
@@ -584,3 +614,7 @@ if ($source -match 'Free-running|本地 CMOS|Local CMOS') {
     Write-Warning "Still free-running: $TimeServer did not answer. The clock may be correct now but nothing is holding it there."
     Write-Warning "Check that 16-enable-ntp-server.ps1 has been run on the factory server."
 }
+
+# Exit 2 when the offset was not confirmed within the threshold, so a caller
+# driving this over SSH does not read a clock it was warned about as fixed.
+if (-not (Test-ClockCorrectionSucceeded $correction)) { exit 2 }

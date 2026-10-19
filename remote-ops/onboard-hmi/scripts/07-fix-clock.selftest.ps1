@@ -167,27 +167,51 @@ foreach ($case in @(
 # --- ws#55: the startup task ----------------------------------------------------------------------------------
 
 function Invoke-StandinStartup($Clock, [scriptblock] $Resync, [int] $Rounds = 10) {
-    $sleeps = [System.Collections.Generic.List[int]]::new()
-    $r = Invoke-StartupClockCheck -Resync $Resync -Measure $Clock.Measure -Adjust $Clock.Adjust -Sleep { $sleeps.Add(1) }.GetNewClosure() -Rounds $Rounds 6>$null
-    return [pscustomobject]@{ Result = $r; Sleeps = $sleeps.Count }
+    $waits = [System.Collections.Generic.List[string]]::new()
+    $r = Invoke-StartupClockCheck -Resync $Resync -Measure $Clock.Measure -Adjust $Clock.Adjust -Sleep { $waits.Add('sleep') }.GetNewClosure() -Settle { $waits.Add('settle') }.GetNewClosure() -Rounds $Rounds 6>$null
+    return [pscustomobject]@{ Result = $r; Sleeps = @($waits | Where-Object { $_ -eq 'sleep' }).Count; Settles = @($waits | Where-Object { $_ -eq 'settle' }).Count }
 }
 
-Check 'startup, 10-18 agv02: resync succeeds and leaves 0.77 s, the task steps it out in round 1' {
+Check 'startup, 10-18 agv02: resync leaves 0.77 s, round 1 steps it, round 2 after the settle wait confirms it' {
     $clock = New-StandinClock -0.7677
     $s = Invoke-StandinStartup $clock { $true }
-    if ($s.Result.Outcome -ne 'ADJUSTED' -or $clock.Adjusts.Count -ne 1 -or $s.Sleeps -ne 0) { throw "$($s.Result.Outcome), $($clock.Adjusts.Count) adjust(s), $($s.Sleeps) sleep(s)" }
+    if ($s.Result.Outcome -ne 'IN_RANGE' -or $clock.Adjusts.Count -ne 1 -or $s.Settles -ne 1 -or $s.Sleeps -ne 0) { throw "$($s.Result.Outcome), $($clock.Adjusts.Count) adjust(s), $($s.Settles) settle(s), $($s.Sleeps) sleep(s)" }
 }
-Check 'startup: link down for two rounds, then 0.77 s slow -- stepped in round 3' {
+Check 'startup: w32time pulls the clock off again after the step -- the next round sees it and steps again' {
+    $clock = New-StandinClock -0.77
+    $pulled = [ref] $false
+    $s = Invoke-StandinStartup $clock { if ($clock.Adjusts.Count -eq 1 -and -not $pulled.Value) { $clock.Offset -= 0.6; $pulled.Value = $true }; $true }.GetNewClosure()
+    if ($s.Result.Outcome -ne 'IN_RANGE' -or $clock.Adjusts.Count -ne 2 -or [Math]::Abs($clock.Adjusts[1] - 0.6) -gt 1e-6) { throw "$($s.Result.Outcome), adjusts $($clock.Adjusts -join ', ')" }
+}
+Check 'startup: link down for two rounds, then 0.77 s slow -- stepped in round 3, confirmed in round 4' {
     $clock = New-StandinClock -0.77
     $clock.Reachable = $false
     $round = [ref] 0
     $s = Invoke-StandinStartup $clock { $round.Value++; if ($round.Value -ge 3) { $clock.Reachable = $true }; $clock.Reachable }.GetNewClosure()
-    if ($s.Result.Outcome -ne 'ADJUSTED' -or $s.Sleeps -ne 2 -or $clock.Adjusts.Count -ne 1) { throw "$($s.Result.Outcome), $($s.Sleeps) sleep(s), $($clock.Adjusts.Count) adjust(s)" }
+    if ($s.Result.Outcome -ne 'IN_RANGE' -or $s.Sleeps -ne 2 -or $s.Settles -ne 1 -or $clock.Adjusts.Count -ne 1) { throw "$($s.Result.Outcome), $($s.Sleeps) sleep(s), $($s.Settles) settle(s), $($clock.Adjusts.Count) adjust(s)" }
 }
 Check 'startup: never measured -- UNMEASURED after every round, nothing stepped, exit would be 1' {
     $clock = New-StandinClock $null
     $s = Invoke-StandinStartup $clock { $false } -Rounds 4
     if ($s.Result.Outcome -ne 'UNMEASURED' -or $s.Sleeps -ne 3 -or $clock.Adjusts.Count -ne 0 -or (Test-ClockCorrectionSucceeded $s.Result)) { throw "$($s.Result.Outcome), $($s.Sleeps) sleep(s)" }
+}
+Check 'startup: the factory server answering only after 2 hours (plant-wide power cut) is still caught with the default rounds' {
+    $clock = New-StandinClock -0.77
+    $clock.Reachable = $false
+    $round = [ref] 0
+    $resync = { $round.Value++; if ($round.Value -gt 240) { $clock.Reachable = $true }; $clock.Reachable }.GetNewClosure()
+    $r = Invoke-StartupClockCheck -Resync $resync -Measure $clock.Measure -Adjust $clock.Adjust -Sleep {} -Settle {} 6>$null
+    if ($r.Outcome -ne 'IN_RANGE' -or $clock.Adjusts.Count -ne 1) { throw "$($r.Outcome) after $($round.Value) rounds" }
+}
+Check 'startup: the task time limit outlasts the default rounds at 30 s, and they cover at least 3 hours' {
+    $fn = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-StartupClockCheck' }, $true)
+    $param = @($fn.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Rounds' })[0]
+    $sleep = @($fn.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Sleep' })[0].DefaultValue.Extent.Text
+    if ($sleep -notmatch 'Start-Sleep -Seconds 30\b') { throw "sleep default: $sleep" }
+    $roundsTime = [TimeSpan]::FromSeconds([int] $param.DefaultValue.Extent.Text * 30)
+    $limit = [System.Xml.XmlConvert]::ToTimeSpan((New-StartupTaskSettings).ExecutionTimeLimit)
+    if ($roundsTime -lt [TimeSpan]::FromHours(3)) { throw "rounds cover only $roundsTime" }
+    if ($limit -le $roundsTime) { throw "time limit $limit, rounds take $roundsTime" }
 }
 Check 'startup: days off is left to the resync, which brings it in on round 2; the sub-second step never fires' {
     $clock = New-StandinClock 11873082.0
@@ -210,10 +234,47 @@ Check 'startup task: registered from New-StartupTaskArguments and New-StartupTas
     if ($fn -notmatch 'New-StartupTaskArguments' -or $fn -notmatch '-Settings \(New-StartupTaskSettings\)') { throw 'not built from the tested pieces' }
     if ([System.IO.File]::ReadAllText($mainScript) -notmatch "\`$installDirectory = Join-Path \`$env:ProgramFiles 'W2G-Clock'") { throw 'not installed under Program Files' }
 }
-Check '-AtStartup runs Invoke-StartupClockCheck with the real resync, stripchart and Set-Date -Adjust, and exits by its outcome' {
+Check 'step 5 wiring: the task is registered with exactly the path Install-StartupCopy returned, copied from this script into the install directory' {
+    $try = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $false)
+    $register = @(Find-Commands $try.Body 'Register-StartupResyncTask')
+    if ($register.Count -ne 1) { throw "$($register.Count) Register-StartupResyncTask calls" }
+    $bound = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($register[0], $true)
+    $scriptPath = $bound.BoundParameters['ScriptPath'].Value
+    if ($scriptPath -isnot [System.Management.Automation.Language.VariableExpressionAst]) { throw "-ScriptPath is $($scriptPath.Extent.Text)" }
+    $name = $scriptPath.VariablePath.UserPath
+    $assignments = @($mainAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq "`$$name" }, $true))
+    if ($assignments.Count -ne 1) { throw "`$$name is assigned $($assignments.Count) times" }
+    $install = @(Find-Commands $assignments[0].Right 'Install-StartupCopy')
+    if ($install.Count -ne 1 -or $assignments[0].Right.Extent.Text -ne $install[0].Parent.Extent.Text) { throw "`$$name = $($assignments[0].Right.Extent.Text)" }
+    $args5 = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($install[0], $true).BoundParameters
+    if ($args5['Source'].Value.Extent.Text -ne '$PSCommandPath' -or $args5['Directory'].Value.Extent.Text -ne '$installDirectory') { throw "Install-StartupCopy $($install[0].Extent.Text)" }
+}
+Check 'Install-StartupCopy copies into the directory, and re-running from the installed copy does not throw (review S4)' {
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clock-selftest-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $dir 'src') | Out-Null
+        $source = Join-Path $dir 'src\07-fix-clock.ps1'
+        Set-Content -LiteralPath $source -Value 'v1' -Encoding utf8NoBOM
+        $installed = Install-StartupCopy -Source $source -Directory (Join-Path $dir 'inst') 6>$null
+        if ($installed -ne (Join-Path $dir 'inst\07-fix-clock.ps1') -or (Get-Content -LiteralPath $installed -Raw).Trim() -ne 'v1') { throw "installed $installed" }
+        $again = Install-StartupCopy -Source $installed -Directory (Join-Path $dir 'inst') 6>$null
+        if ($again -ne $installed -or (Get-Content -LiteralPath $installed -Raw).Trim() -ne 'v1') { throw "re-run returned $again" }
+        Set-Content -LiteralPath $source -Value 'v2' -Encoding utf8NoBOM
+        $null = Install-StartupCopy -Source $source -Directory (Join-Path $dir 'inst') 6>$null
+        if ((Get-Content -LiteralPath $installed -Raw).Trim() -ne 'v2') { throw 'a newer source did not replace the installed copy' }
+    }
+    finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+Check 'step 5 runs before anything talks to the server, so a failure in steps 3 and 4 keeps the startup task (review S5)' {
+    $try = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $false)
+    $register = (Find-Commands $try.Body 'Register-StartupResyncTask')[0].Extent.StartOffset
+    $first = @(@('Restart-Service', 'Invoke-Resync', 'Invoke-SubSecondCorrection', 'Set-Date') | ForEach-Object { Find-Commands $try.Body $_ } | ForEach-Object { $_.Extent.StartOffset } | Sort-Object)[0]
+    if ($register -gt $first) { throw "registered at $register, first server/clock step at $first" }
+}
+Check '-AtStartup runs Invoke-StartupClockCheck with the real resync, stripchart and Set-Date -Adjust, and exits 0 only on IN_RANGE' {
     $if = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -match "'AtStartup'" }, $false)
     $body = $if.Clauses[0].Item2.Extent.Text
-    foreach ($needle in 'Invoke-StartupClockCheck', '-Resync { Invoke-Resync -Attempts 1 }', '-Measure { Get-ServerOffsetSeconds -Server $TimeServer }', '-Adjust { param($by) Set-Date -Adjust $by | Out-Null }', 'exit ((Test-ClockCorrectionSucceeded $result) ? 0 : 1)') {
+    foreach ($needle in 'Invoke-StartupClockCheck', '-Resync { Invoke-Resync -Attempts 1 }', '-Measure { Get-ServerOffsetSeconds -Server $TimeServer }', '-Adjust { param($by) Set-Date -Adjust $by | Out-Null }', "exit ((`$result.Outcome -eq 'IN_RANGE') ? 0 : 1)") {
         if (-not $body.Contains($needle)) { throw "missing: $needle" }
     }
 }
@@ -222,4 +283,8 @@ Check 'the interactive run steps a sub-second offset too, after the resync' {
     $resync = (Find-Commands $try.Body 'Invoke-Resync')[0].Extent.StartOffset
     $correct = @(Find-Commands $try.Body 'Invoke-SubSecondCorrection')
     if ($correct.Count -lt 1 -or $correct[0].Extent.StartOffset -lt $resync) { throw 'no sub-second correction after the resync' }
+}
+Check 'the interactive run ends with exit 2 when the offset is not confirmed (review S6)' {
+    $last = $mainAst.EndBlock.Statements[-1].Extent.Text
+    if ($last -ne 'if (-not (Test-ClockCorrectionSucceeded $correction)) { exit 2 }') { throw "last statement: $last" }
 }
