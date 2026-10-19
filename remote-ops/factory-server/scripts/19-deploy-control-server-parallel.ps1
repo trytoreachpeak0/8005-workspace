@@ -95,8 +95,8 @@
 
 .PARAMETER ProductionCutover
     control-server#564 (that repository's docs/production-cutover-mode-plan.md; user decision 2026-10-13). Deploys a
-    production cutover definition -- one carrying productionCutover.approvalRecord, agv01 in its roster, all six task types
-    from the production MesIngest -- and is passed on to the server's installer. The definition check lifts those two guards
+    production cutover definition -- one carrying productionCutover.approvalRecord, agv01 in its roster, the task types of the control-server
+    module's Get-ParallelCutoverWorkType (seven since v5) from the production MesIngest -- and is passed on to the server's installer. The definition check lifts those two guards
     only with this switch and that record together; the MVP's service name, paths, ports and map 25 stay refused. On the
     server the first cutover install must find an empty data root and must not be -Rollback, and once the instance is a
     cutover every later install and rollback must carry this switch. Running it reads the production MesIngest for every
