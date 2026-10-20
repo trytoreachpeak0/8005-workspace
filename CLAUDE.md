@@ -254,8 +254,10 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 | `vmwin01-protocol` | vm-win-01 | 服务（session 0） | `node24` `headless` | 8005-agv-protocol | **在用**（10-20 切入） |
 | `vmwin01-riot-sdk` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | riot-sdk | **在用**（10-20 切入） |
 | `vmwin01-mes-ingest` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | 8005-mes-ingest（test、repo-scan、release） | **在用**（10-20 切入） |
-| `vmwin01-control-server` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | 8005-agv-control-server（l2 合成场景、g3 的 gate/report、release） | **在用**（10-20 切入） |
+| `vmwin01-control-server` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | 8005-agv-control-server（release、g3 的 register/gate/report、夜间 trigger、main 与 MVP 的推送；cs#820 合入前还有 l2 合成场景） | **在用**（10-20 切入） |
 | `vmwin01-control-server-2` | vm-win-01 | 服务（session 0） | `dotnet8` `cs-test` | 8005-agv-control-server（只跑 `test.yml`） | **在用**（10-20 切入） |
+| `vmwin01-control-server-3` | vm-win-01 | 服务（session 0） | `dotnet8` `cs-test` | 8005-agv-control-server（只跑 `test.yml`，与 `-2` 并行） | **在用**（10-21 01:19 切入，cs#820） |
+| `vmwin01-control-server-l2` | vm-win-01 | 服务（session 0） | `dotnet8` `cs-l2` | 8005-agv-control-server（只跑 `l2.yml` 的 `scenarios`，8 路） | **已挂标签**（10-21 02:21，cs#820）；control-server#821 合入后接活 |
 | `vmwin01-control-server-desktop` | vm-win-01 | 交互式（session 1，账户 `vm-win-01`） | `dotnet8` `cs-desktop` | 8005-agv-control-server（`l2.yml` 的 `real-rig`、g3 的 g3 作业） | **在用**（10-20 切入） |
 | `vmwin01-onboard-hmi` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | 8005-agv-onboard-hmi | **在用**（10-20 切入） |
 
@@ -263,7 +265,7 @@ vm01 上的九个都带 `self-hosted` `Windows` `X64` `win11-01`；vm-win-01 上
 加上表中的标签（临时标签 `vmwin01-*` 切换后保留，无害）。`win11-01-simple` 另外只带 `simple`，不带
 `headless`／`cs-test`／`cs-desktop`／`golden-renderer`，所以不会领 v2 各仓的作业。注意两个交互式 runner 都**不带**
 `headless`，`win11-01-mes-ingest-desktop` 是唯一带 `golden-renderer` 的，
-`vmwin01-control-server-desktop`（10-20 前是 `win11-01-control-server-desktop`）是唯一带 `cs-desktop` 的——这一条正是标签分工能成立的原因。
+`vmwin01-control-server-desktop`（10-20 前是 `win11-01-control-server-desktop`）是唯一带 `cs-desktop` 的——这一条正是标签分工能成立的原因。`vmwin01-control-server-l2` 是唯一带 `cs-l2` 的：两个 l2 合成作业不能同时跑，否则会在槽 1～8 的端口锁上逐场景排队，谁也不更快（cs#820 实测）；要加第二个 L2 runner，先给它分不重叠的槽段。
 
 交互式 runner 由登录触发的计划任务（`GitHubRunner-<名字>`）在桌面会话里拉起，依赖客户机的 autologon（用
 Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，`DefaultPassword`
