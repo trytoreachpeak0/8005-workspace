@@ -158,15 +158,15 @@ if (Test-Path -LiteralPath `$root) {
 New-Item -ItemType Directory -Path (Split-Path -Parent `$root) -Force | Out-Null
 Move-Item -LiteralPath `$unpack -Destination `$root
 
-# Same shape as the onboard client's shortcut: the vehicle operator starts both
-# from the desktop, and the simulator has to be listening first.
+# No desktop shortcut. 10-start-onboard-stack.ps1 starts the exe directly from a
+# scheduled task, simulator first, and nothing else needs one. On a production
+# vehicle a shortcut on the public desktop is only something an operator can
+# click by mistake: on 2026-10-20 a stray start on agv03 crashed the simulator
+# and took the onboard client down with it. One left by an older deployment is
+# removed, so a redeploy never brings it back.
 `$shortcut = "`$([Environment]::GetFolderPath('CommonDesktopDirectory'))\8005 仓位模拟器.lnk"
-`$shell = New-Object -ComObject WScript.Shell
-`$link = `$shell.CreateShortcut(`$shortcut)
-`$link.TargetPath = "`$root\SQCD_8005AGV_Simulator.exe"
-`$link.WorkingDirectory = `$root
-`$link.Description = '8005 AGV 仓位 IO 模拟器（Modbus 127.0.0.1:1502）'
-`$link.Save()
+`$shortcutRemoved = Test-Path -LiteralPath `$shortcut
+if (`$shortcutRemoved) { Remove-Item -LiteralPath `$shortcut -Force }
 
 Remove-Item -LiteralPath `$archive -Force -ErrorAction SilentlyContinue
 [pscustomobject]@{
@@ -175,7 +175,7 @@ Remove-Item -LiteralPath `$archive -Force -ErrorAction SilentlyContinue
     exePresent    = Test-Path -LiteralPath "`$root\SQCD_8005AGV_Simulator.exe"
     settings      = Test-Path -LiteralPath "`$root\simulator.settings.json"
     previousKept  = Test-Path -LiteralPath `$previous
-    shortcut      = `$shortcut
+    shortcutRemoved = `$shortcutRemoved
 } | ConvertTo-Json -Compress
 "@ | ConvertFrom-Json
 
@@ -183,12 +183,12 @@ Remove-Item -LiteralPath `$archive -Force -ErrorAction SilentlyContinue
 
     Write-Host ''
     Write-Step "Installed to $($result.installRoot): $($result.fileCount) files"
-    Write-Step "Shortcut: $($result.shortcut)"
+    if ($result.shortcutRemoved) { Write-Step 'Removed the desktop shortcut an older deployment left behind' }
     if ($result.previousKept) { Write-Step 'Previous generation kept alongside as .previous' }
     Write-Host ''
-    Write-Host 'Not started. The simulator is a WPF application and must be started from the' -ForegroundColor Yellow
-    Write-Host 'vehicle desktop, BEFORE the onboard client, so its Modbus port is listening' -ForegroundColor Yellow
-    Write-Host 'when the client connects.' -ForegroundColor Yellow
+    Write-Host 'Not started, and no desktop shortcut is created. Start it with' -ForegroundColor Yellow
+    Write-Host '10-start-onboard-stack.ps1, which brings the simulator up BEFORE the onboard' -ForegroundColor Yellow
+    Write-Host 'client so its Modbus port is listening when the client connects.' -ForegroundColor Yellow
 
     [pscustomobject]@{
         sourceCommit = $sourceCommit
