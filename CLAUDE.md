@@ -235,26 +235,39 @@ commit 的 conventional 前缀、标识符、路径、命令、环境变量、�
 别的作业；装法是 `remote-ops/factory-server/scripts/18-install-control-server-desktop-runner.ps1`
 （`-Remove` 卸掉）。它与 mes-ingest 的桌面作业共用同一个桌面，靠下面第 2 条的互斥体排队：
 
-| runner | 模式 | 标签 | 归属仓 |
-| --- | --- | --- | --- |
-| `win11-01-riot-sdk` | 服务（session 0） | `dotnet8` `headless` | riot-sdk |
-| `win11-01-mes-ingest` | 服务（session 0） | `dotnet8` `headless` | 8005-mes-ingest |
-| `win11-01-mes-ingest-desktop` | 交互式（session 1） | `golden-renderer` | 8005-mes-ingest |
-| `win11-01-control-server` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-control-server |
-| `win11-01-protocol` | 服务（session 0） | `node24` `headless` | 8005-agv-protocol |
-| `win11-01-onboard-hmi` | 服务（session 0） | `dotnet8` `headless` | 8005-agv-onboard-hmi |
-| `win11-01-control-server-2` | 服务（session 0） | `dotnet8` `cs-test` | 8005-agv-control-server（只跑 `test.yml`） |
-| `win11-01-control-server-desktop` | 交互式（session 1） | `dotnet8` `cs-desktop` | 8005-agv-control-server（只跑 `l2.yml` 的 `real-rig` 作业） |
-| `win11-01-simple` | 服务（session 0） | `simple` | simple（2026-10-17 加，`trytoreachpeak0/simple#20`） |
+**2026-10-20 起 CI 按仓从 vm01 迁到 vm-win-01**（用户本机 Hyper-V 上的客户机，`ssh vm-win-01`，
+过程与对照见 `8005-workspace-v2/ci-research/migration-vm-win-01-build-log.md`）。每个仓切换时，
+新 runner 加上正式功能标签，vm01 上对应 runner 经 API 摘掉功能标签（不卸载、不停服务，留作备用，
+两周无事再卸）。「状态」一列以 `gh api repos/<仓>/actions/runners` 为准，切一个仓改一行。
 
-九个都带 `self-hosted` `Windows` `X64` `win11-01`。`win11-01-simple` 另外只带 `simple`，不带
+| runner | 机器 | 模式 | 标签 | 归属仓 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `win11-01-riot-sdk` | vm01 | 服务（session 0） | `dotnet8`（10-20 摘掉 `headless`） | riot-sdk | **备用**，不领作业 |
+| `win11-01-mes-ingest` | vm01 | 服务（session 0） | `dotnet8`（10-20 摘掉 `headless`） | 8005-mes-ingest | **备用**，不领作业 |
+| `win11-01-mes-ingest-desktop` | vm01 | 交互式（session 1） | `golden-renderer` | 8005-mes-ingest | 在用（不迁） |
+| `win11-01-control-server` | vm01 | 服务（session 0） | `dotnet8`（10-20 摘掉 `headless`） | 8005-agv-control-server | **备用**，不领作业 |
+| `win11-01-protocol` | vm01 | 服务（session 0） | `node24`（10-20 摘掉 `headless`） | 8005-agv-protocol | **备用**，不领作业 |
+| `win11-01-onboard-hmi` | vm01 | 服务（session 0） | `dotnet8`（10-20 摘掉 `headless`） | 8005-agv-onboard-hmi | **备用**，不领作业 |
+| `win11-01-control-server-2` | vm01 | 服务（session 0） | `dotnet8`（10-20 摘掉 `cs-test`） | 8005-agv-control-server（只跑 `test.yml`） | **备用**，不领作业 |
+| `win11-01-control-server-desktop` | vm01 | 交互式（session 1） | `dotnet8`（10-20 摘掉 `cs-desktop`） | 8005-agv-control-server（只跑 `l2.yml` 的 `real-rig` 作业） | **备用**，不领作业 |
+| `win11-01-simple` | vm01 | 服务（session 0） | `simple` | simple（2026-10-17 加，`trytoreachpeak0/simple#20`） | 在用（不在迁移范围） |
+| `vmwin01-protocol` | vm-win-01 | 服务（session 0） | `node24` `headless` | 8005-agv-protocol | **在用**（10-20 切入） |
+| `vmwin01-riot-sdk` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | riot-sdk | **在用**（10-20 切入） |
+| `vmwin01-mes-ingest` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | 8005-mes-ingest（test、repo-scan、release） | **在用**（10-20 切入） |
+| `vmwin01-control-server` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | 8005-agv-control-server（l2 合成场景、g3 的 gate/report、release） | **在用**（10-20 切入） |
+| `vmwin01-control-server-2` | vm-win-01 | 服务（session 0） | `dotnet8` `cs-test` | 8005-agv-control-server（只跑 `test.yml`） | **在用**（10-20 切入） |
+| `vmwin01-control-server-desktop` | vm-win-01 | 交互式（session 1，账户 `vm-win-01`） | `dotnet8` `cs-desktop` | 8005-agv-control-server（`l2.yml` 的 `real-rig`、g3 的 g3 作业） | **在用**（10-20 切入） |
+| `vmwin01-onboard-hmi` | vm-win-01 | 服务（session 0） | `dotnet8` `headless` | 8005-agv-onboard-hmi | **在用**（10-20 切入） |
+
+vm01 上的九个都带 `self-hosted` `Windows` `X64` `win11-01`；vm-win-01 上的只带 `self-hosted` `Windows` `X64`
+加上表中的标签（临时标签 `vmwin01-*` 切换后保留，无害）。`win11-01-simple` 另外只带 `simple`，不带
 `headless`／`cs-test`／`cs-desktop`／`golden-renderer`，所以不会领 v2 各仓的作业。注意两个交互式 runner 都**不带**
 `headless`，`win11-01-mes-ingest-desktop` 是唯一带 `golden-renderer` 的，
-`win11-01-control-server-desktop` 是唯一带 `cs-desktop` 的——这一条正是标签分工能成立的原因。
+`vmwin01-control-server-desktop`（10-20 前是 `win11-01-control-server-desktop`）是唯一带 `cs-desktop` 的——这一条正是标签分工能成立的原因。
 
-交互式那两个由登录触发的计划任务（`GitHubRunner-<名字>`）在桌面会话里拉起，依赖客户机的 autologon（用
+交互式 runner 由登录触发的计划任务（`GitHubRunner-<名字>`）在桌面会话里拉起，依赖客户机的 autologon（用
 Sysinternals Autologon 配的，密码进 LSA secret 而不是明文注册表，`DefaultPassword`
-键不存在）。**workflow 的 `runs-on` 一定要带 `headless`、`golden-renderer`、`cs-test` 或 `cs-desktop`**，
+键不存在）。vm-win-01 上的账户名与计算机名相同（都叫 `vm-win-01`），计划任务要写 `vm-win-01\vm-win-01`。**workflow 的 `runs-on` 一定要带 `headless`、`golden-renderer`、`cs-test` 或 `cs-desktop`**，
 只写 `[self-hosted, win11-01]` 会被两种 runner 里任意一个领走，而其中一个画不了图。
 
 **加了 runner 就回来改这张表。**它漏记了两个 runner 至少一天，而这张表是判断
