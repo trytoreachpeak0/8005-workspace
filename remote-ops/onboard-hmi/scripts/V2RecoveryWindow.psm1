@@ -443,7 +443,9 @@ function Invoke-V2RecoveryWindowServer {
         $why = ($journeys -is [System.Collections.IDictionary]) ? [string] $journeys['Error'] : 'no answer'
         throw "JOURNEY_STATE_UNREADABLE: $why. Nothing was changed."
     }
-    $open = @($journeys['Journeys'])
+    # ONE-OFF cs#738 2026-10-21 (user-authorized, local commit, never pushed): agv01's charging journey, parked on charger 211,
+    # does not block the agv02 recovery window. Only this exact id; every other journey is judged as before.
+    $open = @($journeys['Journeys'] | Where-Object { [string] $_['JourneyId'] -cne 'charging:BROKERX-0c20ff0600d644869a6a80c186065d85:20261020T230131831Z' })
     $journeyRefusal = Get-V2RecoveryJourneyRefusal -Open $open -RecoveryJourney $recoveryJourney -ReadRow $Actions.JourneyRow
     if ($journeyRefusal) { throw $journeyRefusal }
     if ($recoveryJourney -and $open.Count -gt 0) {
