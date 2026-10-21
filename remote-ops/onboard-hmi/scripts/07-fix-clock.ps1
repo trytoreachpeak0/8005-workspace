@@ -86,9 +86,11 @@
          with Set-Date -Adjust (Invoke-SubSecondCorrection).
       5. Install a copy of this script under Program Files and register a
          startup task that runs steps 3 and 4 (-AtStartup) before anyone
-         starts the onboard stack, so the next power loss costs nobody a trip.
-         It runs right after step 2, so a failure in steps 3 and 4 does not
-         cost the car its startup task.
+         starts the onboard stack, so the next power loss costs nobody a trip,
+         and an hourly task that runs step 4 alone (-Periodic), so drift
+         between boots cannot build up past the tolerance either. It runs
+         right after step 2, so a failure in steps 3 and 4 does not cost the
+         car its tasks.
 
     Exit 2 when the offset could not be confirmed within the threshold.
 
@@ -110,6 +112,16 @@
     offset (steps 3 and 4), logging to the installed copy's directory. Exit 0
     only when the offset was measured and is within the threshold.
 
+.PARAMETER Periodic
+    What the hourly task runs: measure once and step the offset out when it is
+    over the threshold and under 5 s (step 4, no resync), logging to
+    periodic.log beside the installed copy. Exit 0 when the offset was measured
+    and is, or was brought, within the threshold.
+
+.PARAMETER Uninstall
+    Unregister both scheduled tasks. Leaves the installed copy, its logs, the
+    correction limits and the time source as they are.
+
 .PARAMETER SelfTest
     Offline self-test (07-fix-clock.selftest.ps1): the offset decision, the
     startup loop and the registry writes, with stand-ins for w32tm, Set-Date
@@ -123,10 +135,17 @@ param(
 
     [Parameter(ParameterSetName = 'Fix')]
     [Parameter(ParameterSetName = 'AtStartup')]
+    [Parameter(ParameterSetName = 'Periodic')]
     [string] $TimeServer = '172.19.205.222',
 
     [Parameter(Mandatory, ParameterSetName = 'AtStartup')]
     [switch] $AtStartup,
+
+    [Parameter(Mandatory, ParameterSetName = 'Periodic')]
+    [switch] $Periodic,
+
+    [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
+    [switch] $Uninstall,
 
     [Parameter(Mandatory, ParameterSetName = 'SelfTest')]
     [switch] $SelfTest
@@ -138,6 +157,11 @@ Set-StrictMode -Version 3.0
 $configKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config'
 $ntpClientKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient'
 $startupTaskName = 'W2G-ClockResyncAtStartup'
+$periodicTaskName = 'W2G-ClockCheckPeriodic'
+
+# Held by whichever of the two tasks is measuring and stepping, so they never
+# both step the same offset (each would move the clock by the full amount).
+$clockLockName = 'Global\W2G-ClockStep'
 
 # Program Files, not ProgramData: a SYSTEM task must not run a file from a
 # directory a standard user can write to.
@@ -158,7 +182,9 @@ $script:ClockTouched = $false
 
 function Write-Step {
     param([string] $Message)
-    $line = "[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message
+    # Milliseconds, so a step in the log can be lined up with the onboard log
+    # to the 100 ms windows it can disturb (review L4 of workspace#55).
+    $line = "[{0:HH:mm:ss.fff}] {1}" -f (Get-Date), $Message
     Write-Host $line
     if ($script:StepLog) { Add-Content -LiteralPath $script:StepLog -Value ("{0:yyyy-MM-dd} {1}" -f (Get-Date), $line) -Encoding utf8NoBOM }
 }
@@ -222,36 +248,80 @@ function Set-W32TimeDword {
     Write-Step ("{0} = {1} (was {2})" -f $Name, (Format-Dword $Value), (Format-RegistryValue $current))
 }
 
-# The offset in w32tm /stripchart /dataonly output, in seconds, positive when
-# this machine is ahead; $null when no sample parses (the server did not
-# answer). The median of the samples, so one slow round trip does not decide.
+# A sample whose round trip took longer than this is dropped. One NTP exchange
+# cannot place the server's clock more precisely than half its round trip, so
+# 0.1 s bounds a kept sample's error at 0.05 s -- a quarter of the 0.2 s
+# threshold, and well inside the 0.3 s between the threshold and the 0.5 s
+# onboard tolerance. NOT calibrated on the cars yet: no stripchart with the
+# round trip (d:) has been recorded over the CPE link (the 10-21 agv02 readings
+# were offsets only, five within 5 ms of each other). periodic.log now records
+# every raw sample, so the first days after installing are the calibration;
+# a CPE roam is what this is meant to drop (review M2 of workspace#55).
+$maxRoundTripSeconds = 0.1
+
+# Kept samples further apart than this are not one clock reading but noise, and
+# nothing is decided on them.
+$maxSampleSpreadSeconds = 0.1
+
+# At least this many kept samples, so one answer never decides alone.
+$minKeptSamples = 2
+
+# The offset in w32tm /stripchart output (WITHOUT /dataonly, which hides the
+# round trip), in seconds, positive when this machine is ahead. Each sample
+# line reads "HH:mm:ss, d:+00.0123456s o:-00.7654321s"; d is the round trip,
+# o the offset. Returns Offset = the median of the kept samples, or $null with
+# Reason saying why nothing may be decided: no sample answered, fewer than
+# $minKeptSamples within $maxRoundTripSeconds, or the kept ones spread wider
+# than $maxSampleSpreadSeconds.
 function ConvertFrom-StripchartOutput {
     param([string[]] $Lines)
 
-    $hits = [regex]::Matches(($Lines -join "`n"), '(?m),\s*([-+]?\d+(?:[.,]\d+)?)s\s*$')
-    if ($hits.Count -eq 0) { return $null }
+    $parse = { param($text) [double]::Parse(($text -replace ',', '.'), [cultureinfo]::InvariantCulture) }
+    $hits = [regex]::Matches(($Lines -join "`n"), '(?m),\s*d:\s*([-+]?\d+(?:[.,]\d+)?)s\s+o:\s*([-+]?\d+(?:[.,]\d+)?)s')
 
     # stripchart reports the offset of the PEER relative to us, so a machine
     # running fast shows a large negative number. Flip it so "how far ahead is
     # this machine" reads the way it is named.
-    $samples = @($hits | ForEach-Object { -1 * [double]::Parse(($_.Groups[1].Value -replace ',', '.'), [cultureinfo]::InvariantCulture) } | Sort-Object)
-    return $samples[[int][Math]::Floor(($samples.Count - 1) / 2)]
+    $all = @($hits | ForEach-Object { [pscustomobject]@{ RoundTrip = & $parse $_.Groups[1].Value; Offset = -1 * (& $parse $_.Groups[2].Value) } })
+    $kept = @($all | Where-Object { [Math]::Abs($_.RoundTrip) -le $maxRoundTripSeconds } | ForEach-Object Offset | Sort-Object)
+    $result = [pscustomobject]@{ Offset = $null; Answered = $all.Count; Kept = $kept.Count; Reason = $null }
+
+    if ($all.Count -eq 0) { $result.Reason = 'no sample answered'; return $result }
+    if ($kept.Count -lt $minKeptSamples) {
+        $result.Reason = '{0} of {1} sample(s) within the {2} s round trip, {3} needed' -f $kept.Count, $all.Count, $maxRoundTripSeconds, $minKeptSamples
+        return $result
+    }
+    $spread = $kept[-1] - $kept[0]
+    if ($spread -ge $maxSampleSpreadSeconds) {
+        $result.Reason = 'kept samples spread {0:0.000} s, {1} s or more' -f $spread, $maxSampleSpreadSeconds
+        return $result
+    }
+    $result.Offset = $kept[[int][Math]::Floor(($kept.Count - 1) / 2)]
+    return $result
 }
 
 # Offset against the server as w32time itself sees it. Independent of any
 # reference time the caller passed -- which is the point, because the caller
-# need not pass one. Best effort: returns $null when the output cannot be
-# parsed, and the caller reports "unknown" rather than pretending the machine
-# is fine.
+# need not pass one. Best effort: returns $null when no offset may be decided,
+# and the caller reports "unknown" rather than pretending the machine is fine.
+# Every raw sample line goes to the log (review L4).
 function Get-ServerOffsetSeconds {
     param([string] $Server)
 
-    $output = @(w32tm /stripchart /computer:$Server /samples:3 /dataonly 2>&1 | ForEach-Object { "$_" })
-    $offset = ConvertFrom-StripchartOutput -Lines $output
-    if ($null -eq $offset) {
-        Write-Step ("stripchart gave nothing parseable: {0}" -f (($output -join ' ').Trim()))
-    }
-    return $offset
+    $output = @(w32tm /stripchart /computer:$Server /samples:3 2>&1 | ForEach-Object { "$_" })
+    $samples = @($output | Where-Object { $_ -match ',\s*(d:|error)' })
+    Write-Step ("stripchart: {0}" -f (($samples.Count ? $samples : $output) -join ' | ').Trim())
+    $reading = ConvertFrom-StripchartOutput -Lines $output
+    if ($null -eq $reading.Offset) { Write-Step ("No offset decided: {0}" -f $reading.Reason) }
+    return $reading.Offset
+}
+
+# w32time's own view, logged once per periodic round so a step can be read
+# against its last sync and phase offset (review L4). The whole output: the
+# field names are localized.
+function Write-W32TimeStatus {
+    $status = @(w32tm /query /status /verbose 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    Write-Step ("w32tm status: {0}" -f ($status -join ' | '))
 }
 
 # What to do about one measured offset (seconds, positive = this machine ahead).
@@ -309,6 +379,7 @@ function Invoke-SubSecondCorrection {
         'Adjust' {
             $script:ClockTouched = $true
             $result.AdjustSeconds = $decision.AdjustSeconds
+            Write-Step ("Stepping the clock by {0:+0.000;-0.000} s now." -f $decision.AdjustSeconds)
             & $Adjust ([TimeSpan]::FromSeconds($decision.AdjustSeconds))
             $after = & $Measure
             $result.After = $after
@@ -334,15 +405,19 @@ function Test-ClockCorrectionSucceeded {
 # to give up after 10 rounds, about 5 minutes. After a plant-wide power cut the
 # factory server reboots as well and its NTP answers late, and a task that has
 # already given up leaves the car stranded exactly as on 10-18. 480 rounds at
-# 30 s is about 4 hours; one NTP packet per round costs nothing. It stays a
-# startup task rather than also running every hour: a sub-second step is a
-# discontinuity, and after the first good round w32time's own slew is what
-# should hold the clock.
+# 30 s is about 4 hours; one NTP packet per round costs nothing. After the
+# first good round w32time's own slew is meant to hold the clock; the hourly
+# check (Invoke-PeriodicClockCheck) catches it when it does not.
 #
 # After a step it waits $Settle and measures again in the next round, because
 # a measurement right after Set-Date cannot show whether w32time's pending
 # slew then pulls the clock off again (review S2). Stepping again in that
 # round is allowed; the log shows it.
+#
+# It holds the clock lock for the whole loop, so the hourly check stays out of
+# the way while it runs. -Lock returns the release scriptblock, or $null when
+# the lock could not be had; the startup check then runs anyway, because it is
+# the one that must not be skipped.
 function Invoke-StartupClockCheck {
     param(
         [Parameter(Mandatory)][scriptblock] $Resync,
@@ -350,18 +425,97 @@ function Invoke-StartupClockCheck {
         [Parameter(Mandatory)][scriptblock] $Adjust,
         [scriptblock] $Sleep = { Start-Sleep -Seconds 30 },
         [scriptblock] $Settle = { Start-Sleep -Seconds 90 },
-        [int] $Rounds = 480
+        [int] $Rounds = 480,
+        [scriptblock] $Lock = { {} }
     )
 
-    $result = $null
-    foreach ($round in 1..$Rounds) {
-        $synced = & $Resync
-        Write-Step ("Startup round {0}: resync {1}" -f $round, ($synced ? 'succeeded' : 'failed'))
-        $result = Invoke-SubSecondCorrection -Measure $Measure -Adjust $Adjust
-        if ($result.Outcome -eq 'IN_RANGE') { return $result }
-        if ($round -lt $Rounds) { & ($result.Outcome -eq 'ADJUSTED' ? $Settle : $Sleep) }
+    $release = & $Lock
+    if ($null -eq $release) { Write-Step 'Clock lock not obtained; checking anyway.' }
+    try {
+        $result = $null
+        foreach ($round in 1..$Rounds) {
+            $synced = & $Resync
+            Write-Step ("Startup round {0}: resync {1}" -f $round, ($synced ? 'succeeded' : 'failed'))
+            $result = Invoke-SubSecondCorrection -Measure $Measure -Adjust $Adjust
+            if ($result.Outcome -eq 'IN_RANGE') { return $result }
+            if ($round -lt $Rounds) { & ($result.Outcome -eq 'ADJUSTED' ? $Settle : $Sleep) }
+        }
+        return $result
     }
-    return $result
+    finally {
+        if ($null -ne $release) { & $release }
+    }
+}
+
+# What the hourly task does (workspace#55, 10-21 scope). A clock that was set
+# right at boot still drifts: agv02 gained 0.12 s in the day after its last
+# step on 10-20 and was held four times at PRE_DEPARTURE_SAFETY_NOT_VALID on
+# 10-21, w32time's hourly poll slewing all along. The startup check runs once,
+# so nothing stopped the drift from growing past the 0.5 s tolerance in a few
+# days. One measurement, the same decision and threshold as at boot, both
+# directions: a fast clock holds the pre-departure check, a slow one makes the
+# projection stale (VEHICLE_NOT_READY). Under the threshold it is w32time's;
+# unmeasured it touches nothing; 5 s or more is the poll's, which steps
+# anything over MaxAllowedPhaseOffset (1 s) by itself.
+#
+# No resync: the poll already syncs every hour (SpecialPollInterval), and a
+# forced resync could step a coarse offset at a moment the onboard client is
+# mid-operation for no gain over waiting for the poll.
+#
+# Outcomes are those of Invoke-SubSecondCorrection, plus LOCKED when the
+# startup check (or another run) is busy with the clock: skipped, not a
+# success, the next hour tries again.
+#
+# After a step it waits $Settle and measures once more, for the log only
+# (Settled), as the startup check does (review L1, same reason as S2 there): a
+# measurement right after Set-Date cannot show whether w32time's pending slew
+# pulls the clock off again. It does not step a second time; the next hour does
+# if it has to. The lock is held through the wait.
+function Invoke-PeriodicClockCheck {
+    param(
+        [Parameter(Mandatory)][scriptblock] $Measure,
+        [Parameter(Mandatory)][scriptblock] $Adjust,
+        [Parameter(Mandatory)][scriptblock] $Lock,
+        [scriptblock] $Settle = { Start-Sleep -Seconds 90 }
+    )
+
+    $release = & $Lock
+    if ($null -eq $release) {
+        Write-Step 'Another clock check holds the clock lock; skipped this round.'
+        return [pscustomobject]@{ Outcome = 'LOCKED'; Before = $null; After = $null; AdjustSeconds = 0.0; Settled = $null }
+    }
+    try {
+        $result = Invoke-SubSecondCorrection -Measure $Measure -Adjust $Adjust
+        $result | Add-Member -NotePropertyName Settled -NotePropertyValue $null
+        if ($result.AdjustSeconds -ne 0.0) {
+            & $Settle
+            $result.Settled = & $Measure
+            Write-Step ("After the settle wait: {0}" -f ($null -eq $result.Settled ? 'unmeasured' : ('{0:+0.000;-0.000} s' -f $result.Settled)))
+        }
+        return $result
+    }
+    finally {
+        & $release
+    }
+}
+
+# Takes the machine-wide clock lock. Returns a scriptblock that releases it, or
+# $null when it is held elsewhere (-Wait: after waiting up to 15 minutes, about
+# ten hourly checks back to back). A lock abandoned by a killed run counts as
+# taken. The release must run on the thread that took it, which it does: the
+# task runs one script on one thread.
+function Enter-ClockLock {
+    param([string] $Name = $clockLockName, [switch] $Wait)
+
+    $mutex = [System.Threading.Mutex]::new($false, $Name)
+    try {
+        $taken = $mutex.WaitOne(($Wait ? [TimeSpan]::FromMinutes(15) : [TimeSpan]::Zero))
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        $taken = $true
+    }
+    if (-not $taken) { $mutex.Dispose(); return $null }
+    return { $mutex.ReleaseMutex(); $mutex.Dispose() }.GetNewClosure()
 }
 
 # The operator-facing line when the script stops on an error: whether the clock
@@ -452,6 +606,67 @@ function Register-StartupResyncTask {
     Write-Step ("Startup task '{0}' registered, running {1} -File {2} -AtStartup" -f $TaskName, $pwsh, $ScriptPath)
 }
 
+function New-PeriodicTaskArguments {
+    param([string] $ScriptPath, [string] $Server)
+    return '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Periodic -TimeServer {1}' -f $ScriptPath, $Server
+}
+
+# Every hour on the hour, with no end. 0.12 s a day (agv02 10-20 to 10-21)
+# reaches the 0.2 s threshold in under two days, so an hour leaves the drift
+# nowhere near the 0.5 s tolerance and keeps each step small; it is also the
+# w32time poll interval, so it adds one NTP exchange an hour. An empty
+# Repetition.Duration is "indefinitely".
+#
+# The start is a fixed date in the past, NEVER the install-time clock (review
+# M1): step 5 registers before the resync, on a machine whose image clock reads
+# 158 days fast, and a trigger that starts in the future does not fire once
+# until that date -- the task would be installed and silent for months. From a
+# past start the scheduler fires at the next whole hour.
+$periodicTaskStart = [datetime]'2026-01-01'
+
+function New-PeriodicTaskTrigger {
+    return New-ScheduledTaskTrigger -Once -At $periodicTaskStart -RepetitionInterval (New-TimeSpan -Hours 1)
+}
+
+# On battery for the same reason as the startup task. IgnoreNew: a run that
+# hangs on the server does not pile up behind itself. Ten minutes is far past
+# one measure-step-measure (two stripcharts of 3 samples).
+function New-PeriodicTaskSettings {
+    return New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+}
+
+function Register-PeriodicClockTask {
+    param([string] $TaskName, [string] $ScriptPath, [string] $Server)
+
+    $pwsh = (Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue)?.Source
+    if (-not $pwsh) { throw 'pwsh was not found on this machine; the periodic task would never run.' }
+
+    $action = New-ScheduledTaskAction -Execute $pwsh -Argument (New-PeriodicTaskArguments -ScriptPath $ScriptPath -Server $Server)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger (New-PeriodicTaskTrigger) -Principal $principal -Settings (New-PeriodicTaskSettings) -Description 'Every hour, measure the offset against the factory server and step it out when it is over 0.2 s (workspace#55).' -Force | Out-Null
+    Write-Step ("Periodic task '{0}' registered, running {1} -File {2} -Periodic every hour" -f $TaskName, $pwsh, $ScriptPath)
+}
+
+# -Uninstall (review L6): removes both tasks, each only if it is there. It
+# leaves the installed copy and its logs (the record of what the tasks did),
+# and it does not put back the correction limits or the time source -- those
+# are what keep workspace#5 from coming back. -Find and -Unregister default to
+# the ScheduledTasks cmdlets and are stand-ins in the self-test.
+function Uninstall-ClockTasks {
+    param(
+        [Parameter(Mandatory)][string[]] $TaskName,
+        [scriptblock] $Find = { param($name) Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue },
+        [scriptblock] $Unregister = { param($name) Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+    )
+
+    foreach ($name in $TaskName) {
+        if ($null -eq (& $Find $name)) { Write-Step ("Task '{0}' is not registered; nothing to remove" -f $name); continue }
+        & $Unregister $name
+        Write-Step ("Task '{0}' removed" -f $name)
+    }
+}
+
 function Invoke-SelfTest {
     $failures = [System.Collections.Generic.List[string]]::new()
     function Check([string] $Name, [scriptblock] $Body) {
@@ -481,19 +696,51 @@ if (-not $WhatIfPreference) {
     }
 }
 
-if ($PSCmdlet.ParameterSetName -eq 'AtStartup') {
-    $script:StepLog = Join-Path $PSScriptRoot 'startup.log'
+function Open-StepLog {
+    param([string] $Name)
+    $script:StepLog = Join-Path $PSScriptRoot $Name
     if ((Test-Path -LiteralPath $script:StepLog) -and (Get-Item -LiteralPath $script:StepLog).Length -gt 1MB) {
         Move-Item -LiteralPath $script:StepLog -Destination "$($script:StepLog).1" -Force
     }
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'AtStartup') {
+    Open-StepLog 'startup.log'
     Write-Step ("Startup clock check against {0}" -f $TimeServer)
     $result = Invoke-StartupClockCheck `
         -Resync { Invoke-Resync -Attempts 1 } `
         -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
-        -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
+        -Adjust { param($by) Set-Date -Adjust $by | Out-Null } `
+        -Lock { Enter-ClockLock -Wait }
     Write-Step ("Startup clock check: {0}" -f $result.Outcome)
     # Only a round that measured the clock in range without stepping it counts.
     exit (($result.Outcome -eq 'IN_RANGE') ? 0 : 1)
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Periodic') {
+    Open-StepLog 'periodic.log'
+    # A failure (Set-Date refused, w32tm missing) goes to the log with its
+    # reason; a SYSTEM task has no console to show it on (review L4).
+    try {
+        Write-W32TimeStatus
+        $result = Invoke-PeriodicClockCheck `
+            -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
+            -Adjust { param($by) Set-Date -Adjust $by | Out-Null } `
+            -Lock { Enter-ClockLock }
+        Write-Step ("Periodic clock check against {0}: {1}" -f $TimeServer, $result.Outcome)
+    }
+    catch {
+        Write-Step ("Periodic clock check FAILED: {0} ({1})" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage -replace '\s+', ' ')
+        exit 1
+    }
+    exit ((Test-ClockCorrectionSucceeded $result) ? 0 : 1)
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Uninstall') {
+    if ($PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Unregister '$startupTaskName' and '$periodicTaskName'")) {
+        Uninstall-ClockTasks -TaskName $startupTaskName, $periodicTaskName
+    }
+    return
 }
 
 $hasReference = $PSBoundParameters.ContainsKey('ReferenceTime')
@@ -538,8 +785,11 @@ try {
     # poll, mid-drive, with the onboard client stamping and comparing times --
     # a backward step there is what a slew exists to avoid. What it fails to do
     # is close a sub-second gap promptly (0.77 s stayed for 83 minutes on agv02
-    # 2026-10-18). That one case is handled by step 4 instead, once, shortly
-    # after boot, bounded to under 5 seconds and measured against the server.
+    # 2026-10-18). That case is handled by step 4 instead: shortly after boot,
+    # and once an hour after that (drift between boots, agv02 2026-10-21),
+    # bounded to under 5 seconds, measured against the server, and only when
+    # the offset is already over 0.2 s -- a step per day or two at the drift
+    # seen, not a step at every poll.
     Set-W32TimeDword -Path $configKey -Name 'MaxPosPhaseCorrection' -Value 0xFFFFFFFF
     Set-W32TimeDword -Path $configKey -Name 'MaxNegPhaseCorrection' -Value 0xFFFFFFFF
 
@@ -556,6 +806,7 @@ try {
     # which is what fixes the clock at the next boot without anyone present.
     $installed = Install-StartupCopy -Source $PSCommandPath -Directory $installDirectory
     Register-StartupResyncTask -TaskName $startupTaskName -ScriptPath $installed -Server $TimeServer
+    Register-PeriodicClockTask -TaskName $periodicTaskName -ScriptPath $installed -Server $TimeServer
 
     Set-Service w32time -StartupType Automatic
     # w32time may sync as it comes back up, so a failure past here may follow a
@@ -564,33 +815,43 @@ try {
     Restart-Service w32time
     Start-Sleep -Seconds 3
 
-    # Step 3: this is now the step that moves the clock, however far off it is.
-    $synced = Invoke-Resync
-    Write-Step ("Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
-
-    # Step 4: what the resync leaves under a second, it slews; step it out.
-    $correction = Invoke-SubSecondCorrection `
-        -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
-        -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
-    $offset = $correction.After
-    if ($null -ne $offset) {
-        Write-Step ("Offset vs {0}: {1:N3} seconds" -f $TimeServer, $offset)
-    }
-
-    # The fallback. It is the old step 1, demoted: it only runs when the resync left
-    # the clock wrong AND the caller supplied a time to jump to.
-    $stillWrong = ($null -ne $offset -and [Math]::Abs($offset) -ge $coarseOffsetSeconds) -or (-not $synced -and $null -eq $offset)
-    if ($stillWrong -and $hasReference) {
-        Write-Step 'Resync did not bring the clock in; falling back to the manual coarse jump.'
-        Set-Date -Date $ReferenceTime | Out-Null
-        Write-Step ("Clock set by hand. Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+    # Steps 3 and 4 hold the clock lock, like the two tasks (review L2): the
+    # tasks registered just above may already be running, and both of them
+    # stepping the same offset would move the clock twice.
+    $releaseClock = Enter-ClockLock -Wait
+    if ($null -eq $releaseClock) { Write-Warning 'Another clock check has held the clock lock for 15 minutes; going ahead anyway.' }
+    try {
+        # Step 3: this is now the step that moves the clock, however far off it is.
         $synced = Invoke-Resync
+        Write-Step ("Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+
+        # Step 4: what the resync leaves under a second, it slews; step it out.
         $correction = Invoke-SubSecondCorrection `
             -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
             -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
+        $offset = $correction.After
+        if ($null -ne $offset) {
+            Write-Step ("Offset vs {0}: {1:N3} seconds" -f $TimeServer, $offset)
+        }
+
+        # The fallback. It is the old step 1, demoted: it only runs when the resync left
+        # the clock wrong AND the caller supplied a time to jump to.
+        $stillWrong = ($null -ne $offset -and [Math]::Abs($offset) -ge $coarseOffsetSeconds) -or (-not $synced -and $null -eq $offset)
+        if ($stillWrong -and $hasReference) {
+            Write-Step 'Resync did not bring the clock in; falling back to the manual coarse jump.'
+            Set-Date -Date $ReferenceTime | Out-Null
+            Write-Step ("Clock set by hand. Now: {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+            $synced = Invoke-Resync
+            $correction = Invoke-SubSecondCorrection `
+                -Measure { Get-ServerOffsetSeconds -Server $TimeServer } `
+                -Adjust { param($by) Set-Date -Adjust $by | Out-Null }
+        }
+        elseif ($stillWrong) {
+            Write-Warning "The clock is still wrong and no -ReferenceTime was passed. Re-run with one, and check that 16-enable-ntp-server.ps1 has been run on the factory server."
+        }
     }
-    elseif ($stillWrong) {
-        Write-Warning "The clock is still wrong and no -ReferenceTime was passed. Re-run with one, and check that 16-enable-ntp-server.ps1 has been run on the factory server."
+    finally {
+        if ($null -ne $releaseClock) { & $releaseClock }
     }
 
     if (-not (Test-ClockCorrectionSucceeded $correction)) {
