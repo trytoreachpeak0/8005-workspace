@@ -388,8 +388,18 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    这个上限，而后续维持交给了一个根本不被允许纠正的 NTP。
 
    脚本已于 2026-09-21 改过（[workspace#5](https://github.com/trytoreachpeak0/8005-workspace/issues/5)），
-   现在做四件事：指 NTP、把两个上限放开到 `0xFFFFFFFF`、resync、注册开机触发的计划任务
-   `W2G-ClockResyncAtStartup`（SYSTEM 身份，开机后延迟 30 秒，失败每 30 秒重试共 10 次）。
+   现在做这几件事：指 NTP、把两个上限放开到 `0xFFFFFFFF`、把脚本副本装到
+   `C:\Program Files\W2G-Clock\`、注册两个计划任务、resync，再量一次对厂区服务器的偏差，
+   亚秒偏差直接拨掉（[workspace#55](https://github.com/trytoreachpeak0/8005-workspace/issues/55)）。
+   两个计划任务都以 SYSTEM 身份运行装好的副本：
+   - `W2G-ClockResyncAtStartup`（`-AtStartup`）：开机后延迟 30 秒，每轮先 resync，再量偏差，
+     超过 0.2 秒、小于 5 秒就 `Set-Date -Adjust`。量不到或没确认就每 30 秒再来一轮，最多约
+     4 小时。日志在同目录的 `startup.log`。
+   - `W2G-ClockCheckPeriodic`（`-Periodic`）：每个整点一次，只量偏差、超过 0.2 秒才拨，
+     不做 resync，管两次开机之间的漂移（10-21 agv02 一天快了 0.12 秒）。日志在 `periodic.log`。
+
+   两个任务用同一把全机锁，不会同时拨钟。要撤掉两个任务，运行
+   `07-fix-clock.ps1 -Uninstall`。它不会改回纠正上限和时间源。
    放开上限的代价是这台机器从此接受任意大的时间跳变；在一台已知会跳、又没有别的时间源的
    车载机上这笔账是划算的，它现在的状态是停在错误时间上不动，没有比这更糟的。改完之后
    **机器自己就能把任意大的偏差纠回来，断电不再需要人上车校时**，`-ReferenceTime` 因此
@@ -405,7 +415,8 @@ ssh agv01 "(Get-Content C:\ProgramData\ssh\sshd_config) -replace '^PasswordAuthe
    重启，它自己回得来"，不是"现在读数对"。
 
    **这把一个持续的错误缩成了一个开机窗口，没有消灭它。**开机后时钟错的时间大约是 35 秒
-   （计划任务延迟 30 秒起 + resync 几秒），CPE 链路慢时按 30 秒一次重试，最坏到 5 分钟。
+   （计划任务延迟 30 秒起 + resync 几秒），CPE 链路慢或厂区服务器还没起来时按 30 秒一次重试，
+   最多约 4 小时。
    这个窗口在本目录这套工具下咬不到车载端：`SQCD.Agv.Wpf` 不是服务，**没有任何东西会在开机时
    替你把它拉起来**——10 号脚本是人从 SSH 敲的，拉起用的计划任务跑完即注销（第 8 节）；这台
    机器开机直进桌面也不是自动登录，而是 `HT` 账户没有密码（见
