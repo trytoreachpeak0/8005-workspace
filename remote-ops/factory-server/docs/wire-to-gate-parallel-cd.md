@@ -608,6 +608,15 @@ control-server 检出复制 `ParallelInstance.psm1`、`ParallelHost.psm1` 到 `<
 凭据）的那段时间：它开窗时在服务端写的共用凭据，服务端在列了每车凭据之后**只在这个变量有值时**也认（`18 -Revert` 删掉就不认了），
 而且开会话照样要授权——没有授权，开了窗也开不了会话。
 
+后备与常设凭据混用时有两处不显然（control-server#797 审查 L2）：
+
+- **`18 -Revert -VehicleOnly` 只收车上那一半，共用凭据留在服务端。**`18` 的说明把这条残留称作无害，control-server#797 之后不再是：
+  服务端只要这个变量有值就认共用凭据，拿着这个值的车（例如另一台还开着窗的车）在有授权时仍开得了会话。要连服务端一起收，实例空闲后
+  再跑一次不带 `-VehicleOnly` 的 `-Revert`，用 `-Status` 对账。
+- **对已经 `06-deploy -RecoveryResume` 的车开 `18` 窗，会把车上 `CONTROL_SERVER_RECOVERY_PROOF` 覆盖成共用凭据。**`-Revert` 关窗时
+  关掉车上的恢复开关、删掉这个变量，本车凭据和常开的开关都不会自己回来，这台车此后开不了会话。所以对换装过的车不要开 `18`；已经开了
+  的，`-Revert` 之后对这台车重跑一次 `06-deploy -RecoveryResume`，把开关和本车凭据写回去。
+
 
 ### 7.2 多车实例每台车一个出发安全投影凭据（control-server#600）
 
@@ -728,10 +737,13 @@ RIoT 里手动解锁 8005 的急停」在 v2 上同样成立；RIoT 手动解锁
 - 授权结束时车上开着、没有动作在执行的恢复会话立即结束（屏上收到 `CLOSED`）；已经发给车的那个动作照常做完、对账，然后会话照常关。
 
 **下授权**（每次先问用户，跑顺两次之后再定是否放开，ADR-cross-0066 决策 6；`RESUME_HELD_ORDER`、`REBUILD_STOPPED_ORDER` 会让车动，
-始终属于「Ask first」第 1 类）。在控制端，凭据同故障人工恢复入口：
+始终属于「Ask first」第 1 类）。在控制端，凭据同故障人工恢复入口，从 DPAPI 秘密存储读（第 7.1 节的 `V2FaultRecoveryCredential`，
+只有存它的那个 Windows 用户读得出来），只放进这个 PowerShell 进程的环境变量，用完删掉；不要把凭据的值敲在命令行上：
 
 ```powershell
-$env:CONTROL_SERVER_FAULT_RECOVERY_CREDENTIAL = '<V2FaultRecoveryCredential 的值>'   # 或 --credential-env 指别的变量
+$store = Import-Clixml "$env:LOCALAPPDATA\AgvOpsSecrets\control-server-deployment.xml"
+$env:CONTROL_SERVER_FAULT_RECOVERY_CREDENTIAL = [System.Net.NetworkCredential]::new('', $store['V2FaultRecoveryCredential']).Password
+Remove-Variable store   # FieldOps 默认读这个变量；--credential-env 可指别的
 # 先演练：只输出计划与确认码，服务端什么都不写
 ControlServer.FieldOps.exe grant-recovery --server http://172.19.205.222:58107/ --vehicle-key <RIoT VehicleKey> `
   --journey <journey:...> --operator <工号> --reason <为什么> --site-verification <现场核实记录引用>
@@ -740,16 +752,21 @@ ControlServer.FieldOps.exe grant-recovery ...（同上）... --confirm <演练�
 # 只放别的动作或改时长：--actions RESUME_AFTER_REPAIR,FAULT_CARGO_HANDOFF --minutes 60
 ControlServer.FieldOps.exe recovery-grants --server http://172.19.205.222:58107/          # 列出眼下有效的
 ControlServer.FieldOps.exe revoke-recovery --server http://172.19.205.222:58107/ --vehicle-key <...> --operator <工号> --reason <...>
+Remove-Item Env:CONTROL_SERVER_FAULT_RECOVERY_CREDENTIAL
 ```
 
-`--journey` 只对车上的会话和控制端涉及旅程的动作有意义；只放 `CLEAR_FAULT` 或两个充电确认时可以不给。旅程号与车号从看板或只读查库
-得到（`JourneyRuntimes.JourneyId`、`VehicleKey`）。
+`--journey` 只对车上的会话和控制端涉及旅程的动作有意义：车有未完成的旅程时，放这些动作必须点名那一趟，不给就拒绝
+（`RECOVERY_GRANT_JOURNEY_REQUIRED`）；只放 `CLEAR_FAULT` 或两个充电确认，或车没有未完成的旅程时可以不给。旅程号与车号从看板或只读
+查库得到（`JourneyRuntimes.JourneyId`、`VehicleKey`）。车上的会话因授权结束而关时，屏上收到的关闭原因可能是
+`RECOVERY_AUTHENTICATION_FAILED`（ADR-cross-0066 决策 5）。
 
 **部署时一次装好的东西**：
 
 - **开关**：实例定义可写 `"recoveryGrant": { "required": true|false }`；**不写就随 `vehicleFaultRecovery.enabled`**——恢复入口一开
-  （control-server#844），授权要求随之打开，不必另加键。写 `true` 而入口关着，定义检查拒绝（那样连 `18` 后备都开不了会话）。叠加层每次写
-  `RecoveryGrant:required`；服务环境里的 `RecoveryGrant__*`、`Recovery__VehicleProofs__*` 当覆盖拒绝。
+  （control-server#844），授权要求随之打开，不必另加键。写 `true` 而入口关着，定义检查拒绝（那样连 `18` 后备都开不了会话）。
+  `productionCutover.phase` 是 `trial` 或 `production` 的定义写 `false` 也拒绝（`RECOVERY_GRANT_OFF_IN_CUTOVER`）：那时车上的恢复开关
+  常开，只有授权挡着；`false` 只留给没有 `productionCutover` 的台架。叠加层每次写 `RecoveryGrant:required`；服务环境里的
+  `RecoveryGrant__*`、`Recovery__VehicleProofs__*` 当覆盖拒绝。
 - **每车恢复凭据**：控制端 `control-server/Set-ControlServerSecret.ps1 -NewVehicleRecoveryProof agv02, agv03`（键名
   `RecoveryProof:<vehicleKey>`，256 位随机，只打印键名；要换加 `-Rotate`）。`19-deploy` 按车队表每行取出放进 `deploy-config.json` 的
   `recoveryProofs`，服务器端安装脚本写进 v2 服务 `Environment`（`CONTROL_SERVER_V2_RECOVERY_PROOF_RIOT59`、`..._RIOT60`），配置里写
@@ -758,9 +775,14 @@ ControlServer.FieldOps.exe revoke-recovery --server http://172.19.205.222:58107/
 - **车载端**：`06-deploy-onboard-hmi.ps1 -SshAlias agv02 -OnboardPort 58105 -HealthPort 58107 -RecoveryResume`：`recoveryResumeEnabled`
   渲染为 `true`，本车的 `RecoveryProof:<vehicleKey>` 写进车上 `CONTROL_SERVER_RECOVERY_PROOF`，到车上读回开关。不带 `-RecoveryResume` 时
   开关照模板（关）、车上变量不动，与以前一样。MVP 端口对上拒绝。
+  **只有服务端的 `RECOVERY_GRANT_READINESS` 是 `required=True` 才能做 `-RecoveryResume`。**脚本自己也核：读服务端阶段的那一次只读 ssh
+  顺带读安装目录 `appsettings.Production.json` 里的 `RecoveryGrant:required`，不是 `True` 就拒绝、什么都不发
+  （`RECOVERY_RESUME_SERVER_NOT_GRANTING`；含 control-server#797 之前的包写不出这个键，读作 `ABSENT`）。
 
 **顺序：服务端先上、车载端后换**（ADR-cross-0066 决策 7）。先生成每车恢复凭据 → `19-deploy` 一个含 control-server#797 的包 → 确认
-`RECOVERY_GRANT_READINESS` 一行 → 再逐台 `06-deploy -RecoveryResume`。反过来的话，车上开关常开而服务端还没有授权检查，恢复只靠凭据挡。
+`RECOVERY_GRANT_READINESS` 一行是 `required=True` → 再逐台 `06-deploy -RecoveryResume`。反过来的话，车上开关常开而服务端还没有授权检查，
+恢复只靠凭据挡。**control-server#844（打开恢复入口）合入并部署之后，才能对车做 `-RecoveryResume`**：在那之前入口关着、`required` 随之
+是 `False`，脚本会拒绝。
 
 **10-21 agv02 那一形现在怎么走**：问用户 → `grant-recovery` 演练、带码执行（只放 `RESUME_AFTER_REPAIR`，点名那趟旅程）→ 现场在屏上
 「申请恢复 → 维修后恢复原仓位操作」→ 门按原卸货命令打开，人放好篮子关门，卸货提交、旅程收尾 → 授权到点失效或 `revoke-recovery`。

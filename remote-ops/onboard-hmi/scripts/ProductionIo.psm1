@@ -19,6 +19,11 @@
     A record that is absent, unreadable, of another instance (onboardPort) or of an unknown phase is refused, never
     taken for "not production".
 
+    control-server#797 (review M2): the same read also reports RecoveryGrant:required from the configuration the installer
+    wrote (<installRoot>\appsettings.Production.json of the recorded definition). 06-deploy -RecoveryResume turns a vehicle's
+    recovery entry on for good and needs it 'True': a package before control-server#797 never writes the key (ABSENT), and a
+    server that does not ask for a grant would leave the entry guarded by the proof alone.
+
     Used by 06-deploy-onboard-hmi.ps1, 09-switch-io-module.ps1, 20-check-production-io.ps1 and
     factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1. Self-test: Test-ProductionIo.ps1.
 #>
@@ -51,7 +56,14 @@ function Get-ServerPhaseProbeCommand {
         "    `$phase = (`$cut -is [System.Collections.IDictionary]) ? `$cut['phase'] : ('(productionCutover is not an object: ' + ((`$null -eq `$cut) ? 'null' : `$cut.GetType().Name) + ')')"
         "    `$journey = (`$d['journeyRuntime'] -is [System.Collections.IDictionary]) ? `$d['journeyRuntime'] : @{}"
         "    `$fleet = @(@(`$journey['fleet']) | Where-Object { `$_ -is [System.Collections.IDictionary] } | ForEach-Object { [string] `$_['vehicleKey'] })"
-        "    'SERVER_PHASE=PRESENT ' + (@{ onboardPort = `$d['onboardPort']; cutover = `$hasCut; phase = (`$hasCut ? `$phase : `$null); fleet = `$fleet } | ConvertTo-Json -Compress)"
+        "    `$grant = 'NO_CONFIGURATION'"
+        "    `$root = `$d['installRoot']"
+        "    `$cfg = (`$root -is [string] -and `$root) ? (Join-Path `$root 'appsettings.Production.json') : `$null"
+        "    if (`$cfg -and (Test-Path -LiteralPath `$cfg -PathType Leaf)) {"
+        "        try { `$g = (Get-Content -Raw -LiteralPath `$cfg | ConvertFrom-Json -AsHashtable)['RecoveryGrant']; `$grant = (`$g -is [System.Collections.IDictionary] -and `$g.Contains('required')) ? [string] `$g['required'] : 'ABSENT' }"
+        "        catch { `$grant = 'UNREADABLE' }"
+        '    }'
+        "    'SERVER_PHASE=PRESENT ' + (@{ onboardPort = `$d['onboardPort']; cutover = `$hasCut; phase = (`$hasCut ? `$phase : `$null); fleet = `$fleet; recoveryGrant = `$grant } | ConvertTo-Json -Compress)"
         '} catch {'
         "    'SERVER_PHASE=UNREADABLE ' + `$_.Exception.Message"
         '}'
@@ -95,7 +107,11 @@ function ConvertFrom-ServerPhaseProbe {
     if ($phase -cnotin @('production', 'trial', 'none')) {
         throw "SERVER_PHASE_INVALID: $where has productionCutover.phase '$($state['phase'])', which is neither 'trial' nor 'production'."
     }
-    return [pscustomobject]@{ Phase = $phase; FleetVehicleKeys = @($state['fleet'] | Where-Object { $_ }) }
+    return [pscustomobject]@{
+        Phase = $phase
+        FleetVehicleKeys = @($state['fleet'] | Where-Object { $_ })
+        RecoveryGrantRequired = $state.Contains('recoveryGrant') ? [string] $state['recoveryGrant'] : 'NOT_REPORTED'
+    }
 }
 
 function Read-ServerCutoverPhase {
@@ -107,13 +123,32 @@ function Read-ServerCutoverPhase {
         [Parameter(Mandatory = $true)][int] $OnboardPort,
         [string] $RecordPath = $script:InstalledDefinitionPath
     )
-    if ($OnboardPort -eq 58005) { return [pscustomobject]@{ Phase = 'mvp'; FleetVehicleKeys = @() } }
+    if ($OnboardPort -eq 58005) { return [pscustomobject]@{ Phase = 'mvp'; FleetVehicleKeys = @(); RecoveryGrantRequired = 'MVP' } }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-ServerPhaseProbeCommand -RecordPath $RecordPath)))
     $output = @(& ssh -o BatchMode=yes -o ConnectTimeout=15 $ServerSshAlias "pwsh -NoProfile -EncodedCommand $encoded" 2>&1 | ForEach-Object { "$_" })
     if ($LASTEXITCODE -ne 0) {
         throw "SERVER_PHASE_UNREAD: ssh $ServerSshAlias failed (exit $LASTEXITCODE): $(($output | Select-Object -First 3) -join ' | '). Refusing rather than guessing."
     }
     return ConvertFrom-ServerPhaseProbe -Output $output -OnboardPort $OnboardPort -RecordPath $RecordPath -SshAlias $ServerSshAlias
+}
+
+function Get-RecoveryResumeServerRefusal {
+    <#
+        control-server#797 (review M2). Null when the server's configuration says RecoveryGrant:required True; otherwise
+        the refusal 06-deploy -RecoveryResume throws before anything reaches the vehicle. Pure.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $RecoveryGrantRequired)
+    if ($RecoveryGrantRequired -ceq 'True') { return $null }
+    $why = switch -CaseSensitive ($RecoveryGrantRequired) {
+        'False' { 'the server is configured not to ask for a recovery grant' }
+        'ABSENT' { 'the installed package writes no RecoveryGrant section, so it predates control-server#797' }
+        'NO_CONFIGURATION' { 'the installed configuration (appsettings.Production.json) was not found' }
+        'UNREADABLE' { 'the installed configuration could not be read' }
+        default { "the server reported '$RecoveryGrantRequired'" }
+    }
+    return ("RECOVERY_RESUME_SERVER_NOT_GRANTING: RecoveryGrant:required is not True on the server ($why). -RecoveryResume " +
+        'leaves this vehicle''s recovery entry on for good on the promise that the server asks for a per-vehicle grant; deploy ' +
+        'a package with control-server#797 (19-deploy) and check its RECOVERY_GRANT_READINESS line says required=True first. Nothing was sent.')
 }
 
 function Test-LoopbackIoHost {
@@ -207,4 +242,4 @@ function Get-IoCheckRecordRefusal {
 }
 
 Export-ModuleMember -Function Get-DefaultInstalledDefinitionPath, Get-ServerPhaseProbeCommand, ConvertFrom-ServerPhaseProbe,
-    Read-ServerCutoverPhase, Test-LoopbackIoHost, Get-ProductionIoRefusal, Assert-ProductionIoTarget, Get-IoCheckRecordRefusal
+    Read-ServerCutoverPhase, Get-RecoveryResumeServerRefusal, Test-LoopbackIoHost, Get-ProductionIoRefusal, Assert-ProductionIoTarget, Get-IoCheckRecordRefusal

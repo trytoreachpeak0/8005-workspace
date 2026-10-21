@@ -498,7 +498,8 @@ if ($KeepCurrentIo -and $UseSiteIo) {
 # workspace#51. Before the vehicle is asked anything: is the server it talks to in the production phase? Read from the
 # server (one read-only ssh), not from a switch on this call -- a switch is what gets forgotten. The MVP pair never asks.
 Import-Module (Join-Path $scriptRoot 'ProductionIo.psm1') -Force
-$serverPhase = (Read-ServerCutoverPhase -ServerSshAlias $ServerSshAlias -OnboardPort $OnboardPort).Phase
+$serverRead = Read-ServerCutoverPhase -ServerSshAlias $ServerSshAlias -OnboardPort $OnboardPort
+$serverPhase = $serverRead.Phase
 Write-Step ("Server phase: {0} ({1})" -f $serverPhase, ($serverPhase -cin @('production', 'mvp') ?
         'the IO must be the site file''s real module' : 'the simulator IO is allowed'))
 
@@ -840,6 +841,10 @@ try {
         $recoveryChoice = Resolve-VehicleRecoveryProof -ProofVariable $proofVariable `
             -VehicleKey ([string] $config.vehicleSafety.expectedVehicleKey) -StoreKeys @($secrets.Keys | Where-Object { $secrets[$_] }) `
             -IsMvpPair $isMvpPair
+        # Review M2: and only onto a server that asks for a grant, read from the server in the same ssh as its phase.
+        $serverRefusal = Get-RecoveryResumeServerRefusal -RecoveryGrantRequired $serverRead.RecoveryGrantRequired
+        if ($serverRefusal) { throw $serverRefusal }
+        Write-Step "Server asks for a recovery grant: RecoveryGrant:required $($serverRead.RecoveryGrantRequired)"
         $recoveryProof = [System.Net.NetworkCredential]::new('', $secrets[$recoveryChoice.StoreKey]).Password
         $config.wireToGate.recoveryResumeEnabled = $true
         Write-Step "Recovery entry: on (recoveryResumeEnabled true); $($recoveryChoice.Variable) from $($recoveryChoice.StoreKey); value not shown"
