@@ -114,6 +114,42 @@ try {
     Write-Result -Ok ($null -ne $e -and $e.StartsWith('SERVER_PHASE_UNREAD:')) -Name 'output without a SERVER_PHASE line is refused (SERVER_PHASE_UNREAD)' -Detail "error: $e"
 
     Write-Host ''
+    Write-Host 'The recovery grant switch the server reports (control-server#797 review M2)' -ForegroundColor Cyan
+    function New-GrantRecord([string] $Name, [AllowNull()][string] $Configuration) {
+        $root = Join-Path $work "install-$Name"
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        if ($Configuration) { Set-Content -LiteralPath (Join-Path $root 'appsettings.Production.json') -Value $Configuration }
+        $path = Join-Path $work "grant-$Name.json"
+        [ordered]@{ instanceId = 'factory01-v2-parallel'; onboardPort = 58105; installRoot = $root
+            journeyRuntime = @{ fleet = @(@{ agvId = 'x'; vehicleKey = $agv02Key }) } } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path
+        return $path
+    }
+    foreach ($case in @(
+            @{ Name = 'on'; Configuration = '{ "RecoveryGrant": { "required": true }, "Health": { "url": "http://0.0.0.0:58107" } }'; Expect = 'True' }
+            @{ Name = 'off'; Configuration = '{ "RecoveryGrant": { "required": false } }'; Expect = 'False' }
+            @{ Name = 'absent'; Configuration = '{ "Health": { "url": "http://0.0.0.0:58107" } }'; Expect = 'ABSENT' }
+            @{ Name = 'unreadable'; Configuration = '{ "RecoveryGrant": '; Expect = 'UNREADABLE' }
+            @{ Name = 'missing'; Configuration = $null; Expect = 'NO_CONFIGURATION' })) {
+        $p = Invoke-Probe (New-GrantRecord $case.Name $case.Configuration)
+        Write-Result -Ok ($null -eq $p.Error -and $p.Value.RecoveryGrantRequired -ceq $case.Expect -and $p.Value.Phase -ceq 'none') `
+            -Name "configuration $($case.Name): the probe reports RecoveryGrant:required $($case.Expect), the phase read as before" -Detail "error: $($p.Error); raw: $($p.Raw -join ' | ')"
+        $r = Get-RecoveryResumeServerRefusal -RecoveryGrantRequired $p.Value.RecoveryGrantRequired
+        Write-Result -Ok (($case.Expect -ceq 'True') ? ($null -eq $r) : "$r".StartsWith('RECOVERY_RESUME_SERVER_NOT_GRANTING:')) `
+            -Name "configuration $($case.Name): -RecoveryResume $(($case.Expect -ceq 'True') ? 'may go ahead' : 'is refused (RECOVERY_RESUME_SERVER_NOT_GRANTING)')" -Detail "refusal: $r"
+    }
+    $p = Invoke-Probe (New-InstalledRecord 'grant-no-root' 'trial')
+    Write-Result -Ok ($null -eq $p.Error -and $p.Value.RecoveryGrantRequired -ceq 'NO_CONFIGURATION') -Name 'a record without installRoot reports NO_CONFIGURATION, never True' -Detail "error: $($p.Error); raw: $($p.Raw -join ' | ')"
+    $old = ConvertFrom-ServerPhaseProbe -Output @('SERVER_PHASE=PRESENT {"onboardPort":58105,"cutover":false,"phase":null,"fleet":[]}') -OnboardPort 58105 -RecordPath 'x' -SshAlias 'factory01'
+    Write-Result -Ok ($old.RecoveryGrantRequired -ceq 'NOT_REPORTED' -and "$(Get-RecoveryResumeServerRefusal -RecoveryGrantRequired $old.RecoveryGrantRequired)".StartsWith('RECOVERY_RESUME_SERVER_NOT_GRANTING:')) `
+        -Name 'an answer without recoveryGrant (an older probe) is NOT_REPORTED and refuses -RecoveryResume' -Detail "value: $($old.RecoveryGrantRequired)"
+    foreach ($odd in @('true', 'TRUE', '')) {
+        Write-Result -Ok ("$(Get-RecoveryResumeServerRefusal -RecoveryGrantRequired $odd)".StartsWith('RECOVERY_RESUME_SERVER_NOT_GRANTING:')) `
+            -Name "only the exact 'True' a JSON true reads as lets -RecoveryResume through, not '$odd'" -Detail ''
+    }
+    Write-Result -Ok ((Read-ServerCutoverPhase -ServerSshAlias 'unused' -OnboardPort 58005).RecoveryGrantRequired -ceq 'MVP') `
+        -Name 'the MVP pair reports MVP without asking, which refuses -RecoveryResume as well' -Detail ''
+
+    Write-Host ''
     Write-Host 'The IO target by phase' -ForegroundColor Cyan
     $refuse = { param($phase, $h, $port) Get-ProductionIoRefusal -Phase $phase -IoHost $h -IoPort $port -SiteHost $site }
     $r = & $refuse 'production' '127.0.0.1' 1502
