@@ -54,6 +54,11 @@
     CONTROL_SERVER_V2_EMERGENCY_LOADED_RELEASE_CREDENTIAL. Who uses them, and how: remote-ops/factory-server/docs/
     wire-to-gate-parallel-cd.md, the emergency stop release section.
 
+    Since control-server#797 it also holds one exception recovery proof per vehicle, under RecoveryProof:<vehicleKey>. Never
+    typed: -NewVehicleRecoveryProof generates them. 19-deploy sends each roster vehicle's to the parallel instance, which
+    accepts a vehicle's recovery session only with that vehicle's own proof (and a grant, ADR-cross-0066); 06-deploy
+    -RecoveryResume writes a vehicle's own into CONTROL_SERVER_RECOVERY_PROOF on that vehicle.
+
 .PARAMETER Import
     Take whatever is already on this machine instead of retyping it:
     CONTROL_SERVER_RIOT_CALL_API_KEY and CONTROL_SERVER_OPERATOR_ID from the
@@ -84,8 +89,16 @@
     other value in the store is refused and nothing is stored. A new or rotated credential takes effect on the next
     19-deploy. Prints names only, never a value.
 
+.PARAMETER NewVehicleRecoveryProof
+    control-server#797. Generate the exception recovery proof of these vehicles, by SSH alias, filed under
+    RecoveryProof:<vehicleKey> (the vehicleKey from site-<alias>.json, as for -NewVehicleSafetyCredential). One that is
+    present is refused unless -Rotate; a generated value equal to any other value in the store is refused and nothing is
+    stored. A new or rotated proof takes effect after 19-deploy and that vehicle's 06-deploy -RecoveryResume. Prints names
+    only, never a value.
+
 .PARAMETER Rotate
-    With -NewVehicleSafetyCredential or -NewEmergencyReleaseCredential: replace a credential that is present.
+    With -NewVehicleSafetyCredential, -NewVehicleRecoveryProof or -NewEmergencyReleaseCredential: replace a credential that is
+    present.
 
 .PARAMETER Show
     List which secrets are present and how long they are. Never prints a value.
@@ -104,6 +117,9 @@
 
 .EXAMPLE
     ./Set-ControlServerSecret.ps1 -NewEmergencyReleaseCredential Empty, Loaded
+
+.EXAMPLE
+    ./Set-ControlServerSecret.ps1 -NewVehicleRecoveryProof agv02, agv03
 #>
 [CmdletBinding(DefaultParameterSetName = 'Set')]
 param(
@@ -125,11 +141,17 @@ param(
     [ValidateSet('Empty', 'Loaded', IgnoreCase = $false)]
     [string[]] $NewEmergencyReleaseCredential,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'VehicleRecovery')]
+    [ValidatePattern('^agv0[123]$')]
+    [string[]] $NewVehicleRecoveryProof,
+
     [Parameter(ParameterSetName = 'VehicleSafety')]
     [Parameter(ParameterSetName = 'EmergencyRelease')]
+    [Parameter(ParameterSetName = 'VehicleRecovery')]
     [switch] $Rotate,
 
     [Parameter(ParameterSetName = 'VehicleSafety')]
+    [Parameter(ParameterSetName = 'VehicleRecovery')]
     [string] $SiteDirectory = (Join-Path $PSScriptRoot '..\..\..\onboard-hmi\config'),
 
     [string] $SecretPath = (Join-Path $env:LOCALAPPDATA 'AgvOpsSecrets\control-server-deployment.xml'),
@@ -292,6 +314,44 @@ function Add-EmergencyReleaseSecret {
     return $Store
 }
 
+function Get-VehicleRecoverySecretKey {
+    <#
+        control-server#797. The store key of one vehicle's exception recovery proof. The name is the contract with
+        19-deploy-control-server-parallel.ps1 and 06-deploy-onboard-hmi.ps1, which read it by the same literal.
+    #>
+    param([Parameter(Mandatory = $true)][string] $VehicleKey)
+    return 'RecoveryProof:' + $VehicleKey
+}
+
+function Add-VehicleRecoverySecret {
+    <#
+        control-server#797. Puts a new exception recovery proof for one vehicle into the store and returns the store. Refuses a
+        vehicle that has one unless -Rotate, and a generated value equal to any other value in the store: two vehicles with one
+        proof would let one open the other's recovery sessions, and a value shared with any other secret is one more place it
+        leaks from. Pure apart from -NewSecret, which the self-test replaces. Errors name the vehicle, never a value.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable] $Store,
+        [Parameter(Mandatory = $true)][string] $VehicleKey,
+        [Parameter(Mandatory = $true)][scriptblock] $NewSecret,
+        [switch] $Rotate
+    )
+    $key = Get-VehicleRecoverySecretKey -VehicleKey $VehicleKey
+    if ($Store.ContainsKey($key) -and $Store[$key] -and -not $Rotate) {
+        throw "VEHICLE_RECOVERY_PROOF_PRESENT: $VehicleKey already has a recovery proof. Pass -Rotate to replace it, then deploy the server and that vehicle (06-deploy -RecoveryResume) again."
+    }
+    $value = & $NewSecret
+    $text = [System.Net.NetworkCredential]::new('', $value).Password
+    foreach ($other in @($Store.Keys)) {
+        if ($other -ceq $key -or -not $Store[$other] -or $Store[$other] -isnot [securestring]) { continue }
+        if ([System.Net.NetworkCredential]::new('', $Store[$other]).Password -ceq $text) {
+            throw "VEHICLE_RECOVERY_PROOF_NOT_UNIQUE: the value generated for $VehicleKey equals the one stored as $other. Nothing was stored; run again."
+        }
+    }
+    $Store[$key] = $value
+    return $Store
+}
+
 $required = @('RiotCallApiKey', 'OnboardCredential', 'MesIngestSharedSecret', 'OperatorId')
 $optional = @('V2FaultRecoveryCredential')
 $keys = $required + $optional
@@ -304,6 +364,8 @@ if (Test-Path -LiteralPath $SecretPath) { $store = Import-Clixml -LiteralPath $S
 if ($Show) {
     # control-server#600: the per-vehicle projection credentials there are, by store key (names a vehicle, not a value).
     $vehicleKeys = @($store.Keys | Where-Object { $_.StartsWith('OnboardSafetyCredential:', [StringComparison]::Ordinal) } | Sort-Object)
+    # control-server#797: and the per-vehicle recovery proofs, by store key.
+    $vehicleKeys += @($store.Keys | Where-Object { $_.StartsWith('RecoveryProof:', [StringComparison]::Ordinal) } | Sort-Object)
     # workspace#49: shown as optional -- generated with -NewEmergencyReleaseCredential, needed once the definition turns the entries on.
     foreach ($line in Format-SecretPresence -Keys ($keys + $releaseKeys + $vehicleKeys) -Store $store -Optional ($optional + $releaseKeys)) {
         Write-Host $line -ForegroundColor ($line -match 'MISSING$' ? 'Yellow' : 'Green')
@@ -328,6 +390,25 @@ if ($NewVehicleSafetyCredential) {
     $store | Export-Clixml -LiteralPath $SecretPath -Force
     Write-Host "Stored in $SecretPath (DPAPI-encrypted; readable only by $env:USERNAME on $env:COMPUTERNAME). Values were not shown." -ForegroundColor Green
     Write-Host 'Next: deploy the v2 server (19-deploy-control-server-parallel.ps1), then each vehicle (06-deploy-onboard-hmi.ps1 -SshAlias <agv02|agv03> -OnboardPort 58105 -HealthPort 58107).' -ForegroundColor DarkGray
+    return
+}
+
+if ($NewVehicleRecoveryProof) {
+    foreach ($alias in $NewVehicleRecoveryProof) {
+        $sitePath = Join-Path $SiteDirectory "site-$alias.json"
+        if (-not (Test-Path -LiteralPath $sitePath -PathType Leaf)) { throw "No site file for ${alias}: $sitePath" }
+        $vehicleKey = [string] (Get-Content -Raw -LiteralPath $sitePath | ConvertFrom-Json).vehicleSafety.expectedVehicleKey
+        if ([string]::IsNullOrWhiteSpace($vehicleKey) -or $vehicleKey -like '*REPLACE*') {
+            throw "$sitePath has no vehicleSafety.expectedVehicleKey; the proof is filed under it."
+        }
+        $store = Add-VehicleRecoverySecret -Store $store -VehicleKey $vehicleKey -NewSecret { New-VehicleSafetySecret } -Rotate:$Rotate
+        Write-Host "  generated $(Get-VehicleRecoverySecretKey -VehicleKey $vehicleKey) ($alias)$($Rotate ? ', replacing the old one' : '')" -ForegroundColor Green
+    }
+    $directory = Split-Path -Parent $SecretPath
+    if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $store | Export-Clixml -LiteralPath $SecretPath -Force
+    Write-Host "Stored in $SecretPath (DPAPI-encrypted; readable only by $env:USERNAME on $env:COMPUTERNAME). Values were not shown." -ForegroundColor Green
+    Write-Host 'Next: deploy the v2 server (19-deploy-control-server-parallel.ps1), then, once it is running, each vehicle with 06-deploy-onboard-hmi.ps1 -RecoveryResume (server first, ADR-cross-0066 decision 7).' -ForegroundColor DarkGray
     return
 }
 

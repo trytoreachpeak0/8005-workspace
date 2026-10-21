@@ -1057,6 +1057,33 @@ if ($missingSafety.Count -gt 0) {
 Write-Step ($fleetRows.Count -eq 0 ? 'Vehicle-safety projection: single car, shared onboard credential' :
     "Vehicle-safety projection credentials loaded for $(@($safetyCredentials.Keys) -join ', ') (values not shown)")
 
+# control-server#797. One standing exception recovery proof per roster row, filed under RecoveryProof:<vehicleKey>
+# (Set-ControlServerSecret.ps1 -NewVehicleRecoveryProof). The server lists each row's variable and accepts a vehicle's recovery
+# session only with that vehicle's own proof (or, while 18-set-v2-recovery-window holds a window open, the shared one) and a
+# grant. A row without one is not refused: that vehicle simply cannot open a session outside the 18 fallback, which is shut,
+# not open. The server-side installer refuses two rows with one value.
+$recoveryProofs = [ordered]@{}
+$missingRecovery = @()
+foreach ($row in $fleetRows) {
+    $vehicleKey = [string] $row['vehicleKey']
+    $storeKey = 'RecoveryProof:' + $vehicleKey
+    if ($secrets.ContainsKey($storeKey) -and $secrets[$storeKey]) {
+        $recoveryProofs[$vehicleKey] = [System.Net.NetworkCredential]::new('', $secrets[$storeKey]).Password
+    } else {
+        $missingRecovery += "$vehicleKey (riotId $($row['riotId']))"
+    }
+}
+if ($fleetRows.Count -gt 0) {
+    Write-Step ("Recovery proofs loaded for {0} (values not shown){1}" -f
+        (@($recoveryProofs.Keys).Count ? (@($recoveryProofs.Keys) -join ', ') : 'no vehicle'),
+        ($missingRecovery.Count ? "; none for $($missingRecovery -join ', ')" : ''))
+}
+if ($missingRecovery.Count -gt 0) {
+    Write-Warning ("RECOVERY_PROOF_MISSING: $($missingRecovery -join ', ') cannot open an exception recovery session on the v2 " +
+        'server outside the 18 fallback window. control-server\Set-ControlServerSecret.ps1 -NewVehicleRecoveryProof <alias>, ' +
+        'deploy again, then 06-deploy-onboard-hmi.ps1 -RecoveryResume for that vehicle (control-server#797).')
+}
+
 # ------------------------------------------------------------------- package ---
 
 # The GUID (workspace#49 review L1): two runs started in the same second shared one directory, and each one's finally
@@ -1174,6 +1201,11 @@ try {
     # control-server#600: vehicleKey -> value, one per roster row; the installer writes each into the service's Environment.
     if ($safetyCredentials.Count -gt 0) {
         $config['onboardSafetyCredentials'] = $safetyCredentials
+    }
+    # control-server#797: vehicleKey -> value, one per roster row that has one; the installer writes each into the service's
+    # Environment as CONTROL_SERVER_V2_RECOVERY_PROOF_RIOT<riotId>.
+    if ($recoveryProofs.Count -gt 0) {
+        $config['recoveryProofs'] = $recoveryProofs
     }
     $configPath = Join-Path $localStage 'deploy-config.json'
     ConvertTo-Json -InputObject $config -Depth 5 |

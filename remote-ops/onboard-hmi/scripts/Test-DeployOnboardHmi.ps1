@@ -660,6 +660,41 @@ exit 0
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# control-server#797: -RecoveryResume turns the recovery entry on with this vehicle's own proof, never on the MVP pair, never
+# without a proof in the store; without the switch nothing about recovery changes.
+Write-Host ''
+Write-Host 'Recovery entry (-RecoveryResume, control-server#797)' -ForegroundColor Cyan
+$deployAst = [System.Management.Automation.Language.Parser]::ParseFile($DeployScript, [ref]$null, [ref]$null)
+$recoveryDefinition = $deployAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Resolve-VehicleRecoveryProof' }, $true)
+Write-Result -Ok ($null -ne $recoveryDefinition) -Name 'Resolve-VehicleRecoveryProof is defined in 06-deploy-onboard-hmi.ps1' -Detail 'missing'
+if ($null -ne $recoveryDefinition) {
+    . ([scriptblock]::Create($recoveryDefinition.Extent.Text))
+    $recoveryKey = 'BROKERX-f38975561adf46ccb1d2f23833c7d0e4'
+    function Invoke-RecoveryChoice([hashtable] $Arguments) {
+        try { return @{ Value = (Resolve-VehicleRecoveryProof @Arguments); Error = $null } } catch { return @{ Value = $null; Error = $_.Exception.Message } }
+    }
+    $own = Invoke-RecoveryChoice @{ ProofVariable = 'CONTROL_SERVER_RECOVERY_PROOF'; VehicleKey = $recoveryKey
+        StoreKeys = @('OnboardCredential', "RecoveryProof:$recoveryKey", 'RecoveryProof:BROKERX-other'); IsMvpPair = $false }
+    Write-Result -Ok ($null -eq $own.Error -and $own.Value.StoreKey -ceq "RecoveryProof:$recoveryKey" -and $own.Value.Variable -ceq 'CONTROL_SERVER_RECOVERY_PROOF') `
+        -Name 'this vehicle''s own proof, into the variable the template names' -Detail "error: $($own.Error); got $($own.Value.StoreKey) -> $($own.Value.Variable)"
+    foreach ($case in @(
+            @{ Name = 'a vehicle without a proof in the store is refused, not given another vehicle''s'; Says = 'VEHICLE_RECOVERY_PROOF_MISSING'
+                Arguments = @{ ProofVariable = 'CONTROL_SERVER_RECOVERY_PROOF'; VehicleKey = $recoveryKey; StoreKeys = @('OnboardCredential', 'RecoveryProof:BROKERX-other'); IsMvpPair = $false } }
+            @{ Name = 'the MVP pair is refused: the MVP service checks no grant'; Says = 'RECOVERY_RESUME_ON_MVP'
+                Arguments = @{ ProofVariable = 'CONTROL_SERVER_RECOVERY_PROOF'; VehicleKey = $recoveryKey; StoreKeys = @("RecoveryProof:$recoveryKey"); IsMvpPair = $true } }
+            @{ Name = 'a template without a proof variable is refused'; Says = 'recoveryAuthenticationProofEnvironmentVariable'
+                Arguments = @{ ProofVariable = ''; VehicleKey = $recoveryKey; StoreKeys = @("RecoveryProof:$recoveryKey"); IsMvpPair = $false } })) {
+        $r = Invoke-RecoveryChoice $case.Arguments
+        Write-Result -Ok ($null -ne $r.Error -and $r.Error.Contains($case.Says)) -Name "recovery entry: $($case.Name)" -Detail "error: $($r.Error)"
+    }
+}
+$deployText = Get-Content -Raw -LiteralPath $DeployScript
+Write-Result -Ok ($deployText.Contains('if ($recoveryChoice) { "[Environment]::SetEnvironmentVariable(''$($recoveryChoice.Variable)''') -and
+        $deployText.Contains('$config.wireToGate.recoveryResumeEnabled = $true') -and
+        @([regex]::Matches($deployText, '\$config\.wireToGate\.recoveryResumeEnabled = ')).Count -eq 1 -and
+        $deployText.Contains('Placed wireToGate.recoveryResumeEnabled is')) `
+    -Name 'recovery entry: the switch is set only under -RecoveryResume, the proof variable only with a choice, and both are read back on the vehicle' -Detail 'pattern not found'
+
 Write-Host ''
 Write-Host ("{0} passed, {1} failed" -f $script:Passed, $script:Failed) -ForegroundColor ($script:Failed -eq 0 ? 'Green' : 'Red')
 exit ($script:Failed -eq 0 ? 0 : 1)

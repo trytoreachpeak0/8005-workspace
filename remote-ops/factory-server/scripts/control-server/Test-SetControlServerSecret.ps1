@@ -190,6 +190,47 @@ try {
 } catch { $err = $_.Exception.Message }
 Write-Result -Ok ($null -eq $err) -Name 'the per-vehicle credential cases ran to the end' -Detail "threw: $err"
 
+# 6b. control-server#797: one exception recovery proof per vehicle, generated here, never typed.
+Write-Host ''
+Write-Host 'Per-vehicle recovery proofs (control-server#797)' -ForegroundColor Cyan
+foreach ($name in @('Get-VehicleRecoverySecretKey', 'Add-VehicleRecoverySecret')) {
+    $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    Write-Result -Ok ($null -ne $definition) -Name "$name is defined in Set-ControlServerSecret.ps1" -Detail 'missing'
+    if ($null -ne $definition) { . ([scriptblock]::Create($definition.Extent.Text)) }
+}
+$err = $null
+try {
+    Write-Result -Ok ((Get-VehicleRecoverySecretKey -VehicleKey $agv02Key) -ceq "RecoveryProof:$agv02Key") `
+        -Name 'the store key is RecoveryProof:<vehicleKey>' -Detail (Get-VehicleRecoverySecretKey -VehicleKey $agv02Key)
+    $counter = @{ N = 0 }
+    $fixed = { $counter.N++; & $secure "proof-$($counter.N)" }.GetNewClosure()
+    $store = New-MvpStore
+    $store = Add-VehicleRecoverySecret -Store $store -VehicleKey $agv02Key -NewSecret $fixed
+    Write-Result -Ok ((& $plainOf $store["RecoveryProof:$agv02Key"]) -ceq 'proof-1') -Name 'a missing recovery proof is generated into the store' -Detail ''
+    $refused = $null
+    try { $null = Add-VehicleRecoverySecret -Store $store -VehicleKey $agv02Key -NewSecret $fixed } catch { $refused = $_.Exception.Message }
+    Write-Result -Ok ($null -ne $refused -and $refused.StartsWith('VEHICLE_RECOVERY_PROOF_PRESENT:') -and $refused.Contains('-Rotate') -and
+        (& $plainOf $store["RecoveryProof:$agv02Key"]) -ceq 'proof-1' -and -not $refused.Contains('proof-')) `
+        -Name 'a present recovery proof is not replaced without -Rotate, and the refusal shows no value' -Detail "error: $refused"
+    $null = Add-VehicleRecoverySecret -Store $store -VehicleKey $agv02Key -NewSecret $fixed -Rotate
+    Write-Result -Ok ((& $plainOf $store["RecoveryProof:$agv02Key"]) -cne 'proof-1') -Name '-Rotate replaces the recovery proof' -Detail ''
+    $store = New-MvpStore
+    $store["RecoveryProof:$agv03Key"] = & $secure 'agv03-proof'
+    foreach ($case in @(@{ Name = 'another vehicle''s proof'; Value = 'agv03-proof' }, @{ Name = 'the shared onboard credential'; Value = 'value-of-OnboardCredential' })) {
+        $same = { & $secure $case.Value }.GetNewClosure()
+        $refused = $null
+        try { $null = Add-VehicleRecoverySecret -Store $store -VehicleKey $agv02Key -NewSecret $same } catch { $refused = $_.Exception.Message }
+        Write-Result -Ok ($null -ne $refused -and $refused.StartsWith('VEHICLE_RECOVERY_PROOF_NOT_UNIQUE:') -and
+            -not $store.ContainsKey("RecoveryProof:$agv02Key") -and -not $refused.Contains($case.Value)) `
+            -Name "a generated proof equal to $($case.Name) is refused, not stored" -Detail "error: $refused"
+    }
+} catch { $err = $_.Exception.Message }
+Write-Result -Ok ($null -eq $err) -Name 'the per-vehicle recovery proof cases ran to the end' -Detail "threw: $err"
+$recoverySets = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -cin 'Rotate', 'SiteDirectory' } |
+    ForEach-Object { $_.Attributes } | Where-Object { $_.TypeName.Name -ceq 'Parameter' } | ForEach-Object { $_.NamedArguments } |
+    Where-Object { $_.ArgumentName -ceq 'ParameterSetName' -and $_.Argument.Value -ceq 'VehicleRecovery' })
+Write-Result -Ok ($recoverySets.Count -eq 2) -Name '-NewVehicleRecoveryProof takes -Rotate and -SiteDirectory' -Detail "VehicleRecovery on $($recoverySets.Count) of 2"
+
 # 7. workspace#49: the two emergency stop release credentials (empty-vehicle entry, loaded-vehicle entry). Generated here,
 #    never typed, never imported; a present one is refused unless -Rotate; a generated value equal to anything else in the
 #    store is refused rather than stored -- the two equal would let the empty-vehicle credential release a loaded vehicle.
@@ -275,6 +316,8 @@ Write-Result -Ok ($deployText.Contains("'EmergencyReleaseCredential'") -and $dep
 foreach ($consumer in @('..\19-deploy-control-server-parallel.ps1', '..\..\..\onboard-hmi\scripts\06-deploy-onboard-hmi.ps1')) {
     $text = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $consumer)
     Write-Result -Ok ($text.Contains("'OnboardSafetyCredential:'")) -Name "$(Split-Path -Leaf $consumer) reads the per-vehicle store key OnboardSafetyCredential:<vehicleKey>" -Detail 'literal not found'
+    # control-server#797: and the per-vehicle recovery proof.
+    Write-Result -Ok ($text.Contains("'RecoveryProof:'")) -Name "$(Split-Path -Leaf $consumer) reads the per-vehicle store key RecoveryProof:<vehicleKey>" -Detail 'literal not found'
 }
 
 Write-Host ''
