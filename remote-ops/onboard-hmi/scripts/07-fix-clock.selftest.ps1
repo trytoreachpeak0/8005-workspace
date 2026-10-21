@@ -223,9 +223,11 @@ Check 'startup: days off is left to the resync, which brings it in on round 2; t
 # --- ws#55 (10-21 scope): the periodic check ------------------------------------------------------------------
 
 function Invoke-StandinPeriodic($Clock, [bool] $Locked = $false) {
-    $lock = [pscustomobject]@{ Taken = 0; Released = 0 }
-    $r = Invoke-PeriodicClockCheck -Measure $Clock.Measure -Adjust $Clock.Adjust -Lock { if ($Locked) { $null } else { $lock.Taken++; { $lock.Released++ }.GetNewClosure() } }.GetNewClosure() 6>$null
-    return [pscustomobject]@{ Result = $r; Lock = $lock }
+    # Built out here: a closure made inside another closure does not see what the outer one captured.
+    $state = [pscustomobject]@{ Taken = 0; Released = 0 }
+    $release = { $state.Released++ }.GetNewClosure()
+    $r = Invoke-PeriodicClockCheck -Measure $Clock.Measure -Adjust $Clock.Adjust -Lock { if ($Locked) { $null } else { $state.Taken++; $release } }.GetNewClosure() 6>$null
+    return [pscustomobject]@{ Result = $r; Lock = $state }
 }
 
 foreach ($case in @(
@@ -254,14 +256,16 @@ Check 'periodic: while the startup task holds the clock lock, the periodic check
 }
 Check 'periodic: the lock is released when the step throws' {
     $released = [ref] 0
-    try { Invoke-PeriodicClockCheck -Measure { 0.5 } -Adjust { throw 'Set-Date failed' } -Lock { { $released.Value++ }.GetNewClosure() }.GetNewClosure() 6>$null; throw 'no error' } catch { if ($_.Exception.Message -ne 'Set-Date failed') { throw } }
+    $release = { $released.Value++ }.GetNewClosure()
+    try { Invoke-PeriodicClockCheck -Measure { 0.5 } -Adjust { throw 'Set-Date failed' } -Lock { $release }.GetNewClosure() 6>$null; throw 'no error' } catch { if ($_.Exception.Message -ne 'Set-Date failed') { throw } }
     if ($released.Value -ne 1) { throw "released $($released.Value) times" }
 }
 Check 'the startup check holds the same clock lock for its whole loop' {
     $taken = [ref] 0; $released = [ref] 0; $heldDuringMeasure = [ref] $true
     $clock = New-StandinClock 0.05
+    $release = { $released.Value++ }.GetNewClosure()
     $measure = { if ($taken.Value -ne 1 -or $released.Value -ne 0) { $heldDuringMeasure.Value = $false }; & $clock.Measure }.GetNewClosure()
-    $r = Invoke-StartupClockCheck -Resync { $true } -Measure $measure -Adjust $clock.Adjust -Sleep {} -Settle {} -Rounds 3 -Lock { $taken.Value++; { $released.Value++ }.GetNewClosure() }.GetNewClosure() 6>$null
+    $r = Invoke-StartupClockCheck -Resync { $true } -Measure $measure -Adjust $clock.Adjust -Sleep {} -Settle {} -Rounds 3 -Lock { $taken.Value++; $release }.GetNewClosure() 6>$null
     if ($r.Outcome -ne 'IN_RANGE' -or $taken.Value -ne 1 -or $released.Value -ne 1 -or -not $heldDuringMeasure.Value) { throw "$($r.Outcome), taken $($taken.Value), released $($released.Value), held $($heldDuringMeasure.Value)" }
 }
 Check 'the clock lock is one machine-wide mutex: a second taker is refused until the first releases' {
