@@ -220,6 +220,101 @@ Check 'startup: days off is left to the resync, which brings it in on round 2; t
     if ($s.Result.Outcome -ne 'IN_RANGE' -or $clock.Adjusts.Count -ne 0) { throw "$($s.Result.Outcome), $($clock.Adjusts.Count) adjust(s)" }
 }
 
+# --- ws#55 (10-21 scope): the periodic check ------------------------------------------------------------------
+
+function Invoke-StandinPeriodic($Clock, [bool] $Locked = $false) {
+    $lock = [pscustomobject]@{ Taken = 0; Released = 0 }
+    $r = Invoke-PeriodicClockCheck -Measure $Clock.Measure -Adjust $Clock.Adjust -Lock { if ($Locked) { $null } else { $lock.Taken++; { $lock.Released++ }.GetNewClosure() } }.GetNewClosure() 6>$null
+    return [pscustomobject]@{ Result = $r; Lock = $lock }
+}
+
+foreach ($case in @(
+        @{ Name = 'drift +0.12 s since the last check (10-21 agv02) is under the threshold: left to w32time'; Offset = 0.12; Outcome = 'IN_RANGE'; Adjusts = @() },
+        @{ Name = 'drift -0.12 s is left alone too'; Offset = -0.12; Outcome = 'IN_RANGE'; Adjusts = @() },
+        @{ Name = 'drift +0.25 s (fast) is stepped back by 0.25 s'; Offset = 0.25; Outcome = 'ADJUSTED'; Adjusts = @(-0.25) },
+        @{ Name = 'drift -0.25 s (slow) is stepped forward by 0.25 s'; Offset = -0.25; Outcome = 'ADJUSTED'; Adjusts = @(0.25) },
+        @{ Name = 'no server: the clock is not touched, and it is not a success'; Offset = $null; Outcome = 'UNMEASURED'; Adjusts = @() },
+        @{ Name = 'seconds off is not stepped here (w32time steps anything over 1 s at its poll)'; Offset = 7.0; Outcome = 'COARSE'; Adjusts = @() })) {
+    Check "periodic: $($case.Name)" {
+        $clock = New-StandinClock $case.Offset
+        $p = Invoke-StandinPeriodic $clock
+        if ($p.Result.Outcome -ne $case.Outcome) { throw "outcome $($p.Result.Outcome)" }
+        if ($clock.Adjusts.Count -ne $case.Adjusts.Count) { throw "$($clock.Adjusts.Count) adjust call(s): $($clock.Adjusts -join ', ')" }
+        for ($i = 0; $i -lt $case.Adjusts.Count; $i++) { if ([Math]::Abs($clock.Adjusts[$i] - $case.Adjusts[$i]) -gt 1e-6) { throw "adjusted by $($clock.Adjusts[$i]), expected $($case.Adjusts[$i])" } }
+        if ($p.Lock.Taken -ne 1 -or $p.Lock.Released -ne 1) { throw "lock taken $($p.Lock.Taken), released $($p.Lock.Released)" }
+    }
+}
+Check 'periodic: while the startup task holds the clock lock, the periodic check neither measures nor steps' {
+    $clock = New-StandinClock 0.77
+    $measured = [ref] 0
+    $measure = { $measured.Value++; & $clock.Measure }.GetNewClosure()
+    $r = Invoke-PeriodicClockCheck -Measure $measure -Adjust $clock.Adjust -Lock { $null } 6>$null
+    if ($r.Outcome -ne 'LOCKED' -or $measured.Value -ne 0 -or $clock.Adjusts.Count -ne 0) { throw "$($r.Outcome), measured $($measured.Value), $($clock.Adjusts.Count) adjust(s)" }
+    if (Test-ClockCorrectionSucceeded $r) { throw 'LOCKED counted as success' }
+}
+Check 'periodic: the lock is released when the step throws' {
+    $released = [ref] 0
+    try { Invoke-PeriodicClockCheck -Measure { 0.5 } -Adjust { throw 'Set-Date failed' } -Lock { { $released.Value++ }.GetNewClosure() }.GetNewClosure() 6>$null; throw 'no error' } catch { if ($_.Exception.Message -ne 'Set-Date failed') { throw } }
+    if ($released.Value -ne 1) { throw "released $($released.Value) times" }
+}
+Check 'the startup check holds the same clock lock for its whole loop' {
+    $taken = [ref] 0; $released = [ref] 0; $heldDuringMeasure = [ref] $true
+    $clock = New-StandinClock 0.05
+    $measure = { if ($taken.Value -ne 1 -or $released.Value -ne 0) { $heldDuringMeasure.Value = $false }; & $clock.Measure }.GetNewClosure()
+    $r = Invoke-StartupClockCheck -Resync { $true } -Measure $measure -Adjust $clock.Adjust -Sleep {} -Settle {} -Rounds 3 -Lock { $taken.Value++; { $released.Value++ }.GetNewClosure() }.GetNewClosure() 6>$null
+    if ($r.Outcome -ne 'IN_RANGE' -or $taken.Value -ne 1 -or $released.Value -ne 1 -or -not $heldDuringMeasure.Value) { throw "$($r.Outcome), taken $($taken.Value), released $($released.Value), held $($heldDuringMeasure.Value)" }
+}
+Check 'the clock lock is one machine-wide mutex: a second taker is refused until the first releases' {
+    $name = "Global\8005-clock-selftest-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $first = Enter-ClockLock -Name $name
+    if ($null -eq $first) { throw 'first taker refused' }
+    try {
+        $second = ForEach-Object -Parallel { $m = [System.Threading.Mutex]::new($false, $using:name); try { $m.WaitOne(0) } finally { $m.Dispose() } }
+        if ($second) { throw 'a second thread took the held lock' }
+    }
+    finally { & $first }
+    $third = ForEach-Object -Parallel { $m = [System.Threading.Mutex]::new($false, $using:name); try { $ok = $m.WaitOne(0); if ($ok) { $m.ReleaseMutex() }; $ok } finally { $m.Dispose() } }
+    if (-not $third) { throw 'not free after release' }
+}
+Check 'periodic task: runs the installed copy with -Periodic and the server' {
+    $arguments = New-PeriodicTaskArguments -ScriptPath 'C:\Program Files\W2G-Clock\07-fix-clock.ps1' -Server '172.19.205.222'
+    if ($arguments -notmatch '-File "C:\\Program Files\\W2G-Clock\\07-fix-clock\.ps1" -Periodic -TimeServer 172\.19\.205\.222$') { throw $arguments }
+}
+Check 'periodic task: repeats every hour, indefinitely' {
+    $trigger = New-PeriodicTaskTrigger
+    if ($trigger.Repetition.Interval -ne 'PT1H') { throw "interval $($trigger.Repetition.Interval)" }
+    if (-not [string]::IsNullOrEmpty($trigger.Repetition.Duration)) { throw "duration $($trigger.Repetition.Duration) (should be indefinite)" }
+}
+Check 'periodic task: registered from the tested pieces, on battery too, one instance at a time, short time limit' {
+    $fn = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Register-PeriodicClockTask' }, $true).Extent.Text
+    foreach ($needle in 'New-PeriodicTaskArguments', 'New-PeriodicTaskTrigger', '-Settings (New-PeriodicTaskSettings)', "-UserId 'SYSTEM'") { if (-not $fn.Contains($needle)) { throw "missing: $needle" } }
+    $settings = New-PeriodicTaskSettings
+    if ($settings.DisallowStartIfOnBatteries -or $settings.StopIfGoingOnBatteries) { throw 'battery' }
+    if ($settings.MultipleInstances -ne 'IgnoreNew') { throw "MultipleInstances $($settings.MultipleInstances)" }
+    $limit = [System.Xml.XmlConvert]::ToTimeSpan($settings.ExecutionTimeLimit)
+    if ($limit -gt [TimeSpan]::FromMinutes(30) -or $limit -le [TimeSpan]::Zero) { throw "time limit $limit" }
+}
+Check 'step 5 also registers the periodic task, with the installed path, before anything talks to the server' {
+    $try = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $false)
+    $periodic = @(Find-Commands $try.Body 'Register-PeriodicClockTask')
+    if ($periodic.Count -ne 1) { throw "$($periodic.Count) Register-PeriodicClockTask calls" }
+    $startupPath = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand((Find-Commands $try.Body 'Register-StartupResyncTask')[0], $true).BoundParameters['ScriptPath'].Value.Extent.Text
+    $periodicPath = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($periodic[0], $true).BoundParameters['ScriptPath'].Value.Extent.Text
+    if ($periodicPath -ne $startupPath) { throw "periodic -ScriptPath $periodicPath, startup $startupPath" }
+    $first = @(@('Restart-Service', 'Invoke-Resync', 'Invoke-SubSecondCorrection', 'Set-Date') | ForEach-Object { Find-Commands $try.Body $_ } | ForEach-Object { $_.Extent.StartOffset } | Sort-Object)[0]
+    if ($periodic[0].Extent.StartOffset -gt $first) { throw 'registered after the first server/clock step' }
+}
+Check '-Periodic runs Invoke-PeriodicClockCheck with stripchart, Set-Date -Adjust and the machine-wide lock, and exits 0 only on IN_RANGE or ADJUSTED' {
+    $if = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -match "'Periodic'" }, $false)
+    if (-not $if) { throw 'no -Periodic branch' }
+    $body = $if.Clauses[0].Item2.Extent.Text
+    foreach ($needle in 'Invoke-PeriodicClockCheck', '-Measure { Get-ServerOffsetSeconds -Server $TimeServer }', '-Adjust { param($by) Set-Date -Adjust $by | Out-Null }', '-Lock { Enter-ClockLock }', 'exit ((Test-ClockCorrectionSucceeded $result) ? 0 : 1)') {
+        if (-not $body.Contains($needle)) { throw "missing: $needle" }
+    }
+    $startup = $mainAst.Find({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -match "'AtStartup'" }, $false).Clauses[0].Item2.Extent.Text
+    if (-not $startup.Contains('-Lock { Enter-ClockLock -Wait }')) { throw 'the startup check does not take the lock' }
+}
+
 Check 'startup task: runs the installed copy with -AtStartup and the server' {
     $arguments = New-StartupTaskArguments -ScriptPath 'C:\Program Files\W2G-Clock\07-fix-clock.ps1' -Server '172.19.205.222'
     if ($arguments -notmatch '-File "C:\\Program Files\\W2G-Clock\\07-fix-clock\.ps1" -AtStartup -TimeServer 172\.19\.205\.222$') { throw $arguments }
