@@ -634,8 +634,12 @@ agv01 的放行记录是 [8005-agv-program#44 的这条留言](https://github.co
 1. **一份干净的 control-server 检出**，作为必填参数 `-ControlServerRepository` 传进去，与 `20` 号闸门脚本一样。
    服务端那一半用的 `ParallelInstance.psm1`、`ParallelHost.psm1` 从它复制，有未提交的改动就拒绝，所以服务器上跑的
    就是它 `HEAD` 那一版。
-2. **v2 实例上没有在途旅程**（实例库里所有旅程都是 `Completed`）。有一条没走完，开窗、关窗写服务端那一步都拒绝，
-   **而且没有开关可以绕过**：重启会停掉那条旅程的故障监看。有卡住的旅程，先把它处理完再开窗。
+2. **没有「可能在动」的车挂着没走完的旅程**（8005-workspace#68 起按车判；此前要求实例库里所有旅程都是 `Completed`）。
+   服务端那一步要重启 v2，重启会停掉所有车的故障监看，所以只要有一辆挂着未完成旅程的车可能在动，开窗、关窗写服务端那一步
+   都拒绝，**而且没有开关可以绕过**。一辆车算「停稳、不会动」要同时满足：factory01 当场读 RIoT，这辆车上没有未结束的单，
+   且 `MODE_AUTO`、`MT_FINISHED`（或刚上电的 `MT_NA` 加抱闸）、速度 0、`procState=IDLE`、在线、急停正常；库里这辆车没有在效的
+   故障。停在桩上充电、充电单早已成功的车满足这些，不再挡。判据与服务端自己的车辆安全读数是同一套
+   （control-server `HttpRiotMovementGateway.Safety()`，脚本里是 `Get-ParallelRiotVehicleMotionReason`）。
 3. 派车闸门关着（`20-set-control-server-parallel-dispatch-gate.ps1 -State Closed`），车载端客户端停着。
 
 **怎么开、怎么关、怎么查**（车载端客户端必须停着；开、关是现场操作，每次由用户授权；`-Status` 不改两端状态）：
@@ -674,26 +678,33 @@ pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlia
   服务端已有同一个值（第二台车开窗）就不写、不重启。
 - 关窗：是最后一台开着的车时，先服务端只读检查 → 车（先关开关，**再**删变量）→ 存储去掉这台车 → 服务端删那一条、重启 →
   删存储。另一台还开着时只动这台车，factory01 不碰。
-- **关最后一台需要 v2 空闲**：服务端那一步要重启服务，所以和开窗一样，有车连着或有没走完的旅程就拒绝，而且拒绝发生在碰车
-  之前。v2 在生产上跑时，收工时多半不空闲——另一台车连着、库里有旅程。这时用 `-Revert -VehicleOnly`：只关这台车，服务端
-  那一条留着，存储里记成残留（凭据还在、没有车开着）。没有车持有的服务端凭据不起作用，而车上的窗一直开着就超出了授权的
-  窗口期，所以**收工时先保证车上关掉**。等 v2 空闲时，对任一台车再跑一次不带 `-VehicleOnly` 的 `-Revert`，删掉服务端那一条。
-  服务端检查拒绝时，脚本的报错会直接给出这条 `-VehicleOnly` 命令。
+- **关最后一台要能安全重启 v2**：服务端那一步要重启服务，所以和开窗一样，有车连着、或有挂着未完成旅程的车可能在动就拒绝，
+  而且拒绝发生在碰车之前。**点名的那趟旅程现在是什么状态不影响关窗**（8005-workspace#68，见下面 `-RecoveryJourneyId` 那条）。
+  真被拒时用 `-Revert -VehicleOnly`：只关这台车，服务端那一条留着，存储里记成残留（凭据还在、没有车开着）。control-server#797
+  之后这条残留不再无害（服务端只要这个变量有值就认共用凭据，见 `wire-to-gate-parallel-cd.md` 第 7.1 节），所以车停稳后尽快对
+  任一台车再跑一次不带 `-VehicleOnly` 的 `-Revert`，删掉服务端那一条。服务端检查拒绝时，脚本的报错会直接给出这条 `-VehicleOnly` 命令。
 - 服务端在写之前拒绝（不写、不重启）的情况：派车闸门开着或判断不了（配置缺失、读不出、在进程启动后被改过，与安装脚本
-  同一道检查）；服务 `Environment` 里有 `RiotCreateDispatch__*`；实例库里有没走完（非 `Completed`）的旅程，或库读不出；
+  同一道检查）；服务 `Environment` 里有 `RiotCreateDispatch__*`；有未完成旅程的车可能在动（上面第 2 条），或库、RIoT 读不出；
   有车连在车载端口上，或连接读不出。旅程那条没有开关；连接那条在现场确认可以接受另一台车断线重连进恢复时，可以加
   `-AllowConnectedVehicles` 降为警告。重启会让连着的车断线进恢复，它们的故障监看也会停，所以默认拒绝。
+- **停服务后再查一次**（8005-workspace#68）：服务端写完 `Environment`、停下 v2 之后，再读一次库和 RIoT。这期间要是有人在 RIoT 上
+  把车手动开走，就在这里拒绝：`Environment` 写回原样、服务按原样拉起来，报错以 `AFTER_STOP` 开头。
+- `-ControlServerRepository` 指向没有 8005-workspace#68 的 control-server 检出时，服务端读不了 RIoT，所有未完成旅程都按「可能在动」
+  拒绝，与以前一样。
 - **要开窗的正是那趟卡住的旅程时**（8005-workspace#58，起因是 2026-10-19 agv03 装货结果 UNKNOWN）：车卡在恢复态时，它那趟旅程
-  本身就不是 `Completed`，上一条永远过不去。这时加 `-RecoveryJourneyId <旅程号>`（开窗和 `-Revert` 都可以带）。只有同时满足下面几条，
-  服务端那一步才放行：除这一趟之外所有旅程都是 `Completed`；这一趟在 `-SshAlias` 那台车上（`agvId` 与
-  `vehicleSafety.expectedVehicleKey` 取自 `config/site-<别名>.json`，与库里那一行逐字相等）；它是 `Blocked`，阻塞码是
-  `LOAD_RESULT_REQUIRES_RECOVERY`、`UNLOAD_RESULT_REQUIRES_RECOVERY`，或普通的 `<消息类型>_NOT_RECONCILED`（补偿等结果没对上、
-  还能再开会话）。判据出处写在 `V2RecoveryWindow.psm1` 的 `Test-V2JourneyAwaitsRecovery`。闸门、`RiotCreateDispatch__*`、连着的车、
-  车上客户端要停着，这些检查一条不少。不带这个参数时行为与以前完全一样。它不能与 `-Status`、`-VehicleOnly` 合用。
-  旅程收尾成 `Completed` 之后，带不带它都按空闲实例处理。旅程号要写库里完整的 `JourneyId`（多需求旅程形如
-  `journey:<需求号>|g<代>`），不能用简写。判据只读旅程那一行，与车此刻停在哪里无关：车被人工开离原站，判断结果一样。
-  多需求旅程在补偿清空之后会被放回引擎（等装货结果、再离站），既不是 `Completed` 也不在恢复态，这时关最后一台车的
-  `-Revert` 会被拒，按上一条用 `-Revert -VehicleOnly` 先关车上，服务端那一条等实例空闲时再删。
+  本身就不是 `Completed`。按车判之后，这辆车只要停稳，不带参数也能开窗；车的 RIoT 读数不满足停稳（例如有人把它切到了
+  手动模式）时，加 `-RecoveryJourneyId <旅程号>`（开窗和 `-Revert` 都可以带）。
+  - **开窗**：这一趟按它自己的规则放行，不再问它那台车的 RIoT 读数：它在 `-SshAlias` 那台车上（`agvId` 与
+    `vehicleSafety.expectedVehicleKey` 取自 `config/site-<别名>.json`，与库里那一行逐字相等）；它是 `Blocked`，阻塞码是
+    `LOAD_RESULT_REQUIRES_RECOVERY`、`UNLOAD_RESULT_REQUIRES_RECOVERY`，或普通的 `<消息类型>_NOT_RECONCILED`（补偿等结果没对上、
+    还能再开会话）。判据出处写在 `V2RecoveryWindow.psm1` 的 `Test-V2JourneyAwaitsRecovery`。其余旅程照第 2 条按车判。
+  - **关窗（`-Revert`）**：撤的是窗口本身，**不再以这趟旅程的状态为前提**（8005-workspace#68）。恢复做完、故障交接、需求终结、
+    旅程继续开往别的站或已经 `Completed`，都照样撤掉服务端凭据与车上的开关和凭据。2026-10-21 agv03 @160 那一次，点名的
+    `ed84063a…|g101` 故障交接之后旅程挂着 T8-5、T2-8_T3-8 两个取货站停在 `AwaitingPickupArrival`，`-Revert` 被
+    `RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY` 拒了，服务端凭据成了残留；现在这一形直接关干净。关窗只在「重启不安全」时拒绝：
+    有挂着未完成旅程的车（点名那趟的车也算）可能在动，或有车连着、闸门开着等上一条那些。
+  闸门、`RiotCreateDispatch__*`、连着的车、车上客户端要停着，这些检查一条不少。它不能与 `-Status`、`-VehicleOnly` 合用。
+  旅程号要写库里完整的 `JourneyId`（多需求旅程形如 `journey:<需求号>|g<代>`），不能用简写。
 
 **检查之后、写入之前仍可能留下残留**。只读检查和真正写入之间隔着车载端那一步（几十秒到几分钟）。这期间如果有车连上、
 有旅程开始，写入那一步会拒绝，而车那一半已经做完：
@@ -701,7 +712,7 @@ pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlia
 | 情形 | 留下的状态 | 存储记的 | 怎么收拾 |
 | --- | --- | --- | --- |
 | 开窗时服务端写入被拒 | 车已开窗，服务端没有那一条（清桩入口可用，恢复续作被拒） | 这台车开着 | 条件满足后再跑一次开窗命令补上；或 `-Revert` 两端都关 |
-| 关最后一台时服务端写入被拒，或用了 `-VehicleOnly` | 车已关窗，服务端那一条还在 | 没有车开着，凭据还留着 | v2 空闲时对任一台车再跑一次 `-Revert` |
+| 关最后一台时服务端写入被拒，或用了 `-VehicleOnly` | 车已关窗，服务端那一条还在 | 没有车开着，凭据还留着 | 车停稳、没有车连着时对任一台车再跑一次 `-Revert` |
 | 开窗时车载端写完变量、开开关前失败 | 车上有变量、开关还关着（车能正常启动，入口不出现） | 这台车没开 | 再跑一次开窗命令；或 `-Revert` 把变量删掉 |
 | 关窗时车载端关了开关、删变量前失败 | 开关已关、车上变量还在（车能正常启动，入口不出现） | 这台车开着 | 再跑一次 `-Revert` |
 

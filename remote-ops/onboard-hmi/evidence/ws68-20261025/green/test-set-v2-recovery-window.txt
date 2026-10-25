@@ -1,0 +1,39 @@
+# 8005-workspace#68 implementation; 2026-10-25 10:26 +0800
+# pwsh -File remote-ops/onboard-hmi/scripts/Test-SetV2RecoveryWindow.ps1 -ControlServerRepository <control-server ws68 worktree at f57c8aefe>
+# The one FAIL is main's own 06-deploy case (since d3cf0c2/4d6fdb8, control-server#797), red before this ticket too.
+  PASS  the journey state is read with control-server's Read-ParallelRiotGateFacts (8005-workspace#68), the GET left to it unless a test passes one
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, a charging journey on a vehicle standing still -> allowed
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, a charging journey on a vehicle RIoT shows moving -> JOURNEYS_IN_PROGRESS
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, the vehicles not judged (a control-server from before #68) -> JOURNEYS_IN_PROGRESS
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, no answer for the vehicle -> JOURNEYS_IN_PROGRESS
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey and a charging vehicle standing still -> allowed
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey and a charging vehicle moving -> RECOVERY_JOURNEY_NOT_ALONE
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey released back to the engine -> RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY
+  PASS  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey not among the open ones, the rest standing still -> allowed
+  PASS  journey refusal by vehicle (8005-workspace#68): closing, the named journey gone on to its next pickup stop, its vehicle standing still (field instance 1) -> allowed
+  PASS  journey refusal by vehicle (8005-workspace#68): closing, the named journey released back to the engine, standing still -> allowed
+  PASS  journey refusal by vehicle (8005-workspace#68): closing, the named journey's vehicle with an unfinished RIoT order -> JOURNEYS_IN_PROGRESS
+  PASS  journey refusal by vehicle (8005-workspace#68): closing, another vehicle moving: only it is named -> JOURNEYS_IN_PROGRESS
+  PASS  journey refusal by vehicle (8005-workspace#68): closing, the vehicles not judged -> JOURNEYS_IN_PROGRESS
+  PASS  journey refusal by vehicle (8005-workspace#68): closing without a named journey, a charging vehicle standing still -> allowed
+  PASS  journey refusal by vehicle (8005-workspace#68): nothing open -> allowed
+  PASS  server set (8005-workspace#68): a journey not Completed on a vehicle RIoT shows standing still (one on its charger, say) -- passes, written
+  PASS  server remove (8005-workspace#68): a journey not Completed on a vehicle RIoT shows standing still (one on its charger, say) -- passes, written
+  PASS  server check (set) without recoveryJourney (8005-workspace#68): the stuck journey's vehicle standing still passes
+  PASS  server check (set) with recoveryJourney (8005-workspace#68): another journey not Completed on a vehicle standing still passes
+  PASS  server check (remove) without recoveryJourney (8005-workspace#68): the stuck journey's vehicle standing still passes
+  PASS  server check (remove) with recoveryJourney (8005-workspace#68): another journey not Completed on a vehicle standing still passes
+  PASS  server remove with recoveryJourney on another vehicle (8005-workspace#68): the window is closed regardless, written
+  PASS  server remove with recoveryJourney with the right agvId but another vehicleKey (8005-workspace#68): the window is closed regardless, written
+  PASS  server remove with recoveryJourney Blocked / ONBOARD_SESSION_LOST (8005-workspace#68): the window is closed regardless, written
+  PASS  server remove with recoveryJourney Blocked / LoadCompensationResult_NOT_RECONCILED_ON_ENDED_DEMAND (8005-workspace#68): the window is closed regardless, written
+  PASS  server remove with recoveryJourney AwaitingLoadResult / LOAD_RESULT_REQUIRES_RECOVERY (8005-workspace#68): the window is closed regardless, written
+  PASS  server remove with recoveryJourney Blocked / no reason (8005-workspace#68): the window is closed regardless, written
+  PASS  server remove with recoveryJourney (8005-workspace#68): the named row is not read at all, so one that cannot be read does not hold the close
+  PASS  close with -RecoveryJourneyId, the named journey still awaiting recovery (8005-workspace#68, field instance 1): the server entry, the switch and the vehicle variable are all gone
+  PASS  close with -RecoveryJourneyId, the named journey Completed (8005-workspace#68, field instance 1): the server entry, the switch and the vehicle variable are all gone
+  PASS  close with -RecoveryJourneyId, the named journey demand Cancelled by the fault cargo handoff, the journey on to its next pickup stops (8005-workspace#68, field instance 1): the server entry, the switch and the vehicle variable are all gone
+  PASS  server set on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+  PASS  server remove on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+  FAIL  onboard-hmi\scripts\06-deploy-onboard-hmi.ps1 names no recovery variable and does not touch the switch
+229 passed, 1 failed

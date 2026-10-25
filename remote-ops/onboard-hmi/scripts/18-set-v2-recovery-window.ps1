@@ -35,14 +35,17 @@
       Close: when it is the last open vehicle, server check (read-only) first -> vehicle (switch off,
              then variable) -> store drops the vehicle -> server entry removed -> store deleted.
              Another vehicle still open: the vehicle only; the server entry stays.
-             Closing the last vehicle needs the V2 instance idle (the server restarts). When it is not --
-             in production it usually is not -- the check refuses before the vehicle is touched and names
-             -Revert -VehicleOnly, which closes the vehicle and leaves the entry, recorded as a residue.
+             Closing the last vehicle restarts the server, so it needs no vehicle that may be under way
+             (8005-workspace#68: judged by vehicle from RIoT; a vehicle on its charger does not count) and
+             none connected. When that does not hold, the check refuses before the vehicle is touched and
+             names -Revert -VehicleOnly, which closes the vehicle and leaves the entry, recorded as a residue.
     The server refuses before any change when: the dispatch gate is open or cannot be judged (the
     installer's pre-install refusal), a RiotCreateDispatch__* override is set, a journey is not
-    Completed or the journeys cannot be read, a vehicle holds a connection to the onboard port (unless
-    -AllowConnectedVehicles: a warning) or the connections cannot be read. Restarting is skipped when
-    the entry already holds the proof.
+    Completed on a vehicle that may be under way (RIoT read on factory01, GET only; 8005-workspace#68) or
+    the journeys cannot be read, a vehicle holds a connection to the onboard port (unless
+    -AllowConnectedVehicles: a warning) or the connections cannot be read. It reads the journeys and RIoT
+    again after stopping the service, and refuses then too (the Environment written back, the service
+    started again). Restarting is skipped when the entry already holds the proof.
 
     What can still be left behind: the server check and the server write are minutes apart, with the
     vehicle in between. A journey or a connection that appears in that gap makes the write refuse
@@ -83,25 +86,29 @@
     8005-workspace#58. The one journey the window is opened for: a journey of this vehicle (-SshAlias; agvId
     and vehicleSafety.expectedVehicleKey from its site file) that stands Blocked on a slot operation result
     needing recovery (LOAD_RESULT_REQUIRES_RECOVERY, UNLOAD_RESULT_REQUIRES_RECOVERY or a plain
-    <messageType>_NOT_RECONCILED; Test-V2JourneyAwaitsRecovery in V2RecoveryWindow.psm1). Without it, a
-    restart of the V2 service is refused while any journey is not Completed -- and the journey a vehicle
-    needs the window for is itself not Completed, so the window could never be opened for it.
-    With it, the server restart (open, or -Revert of the last vehicle) passes the journey check only when
-    that journey is the only one not Completed, is on this vehicle, and awaits recovery. Every other check
-    is unchanged: the dispatch gate closed, no RiotCreateDispatch__* override, no connected vehicle (unless
-    -AllowConnectedVehicles), the client on this vehicle stopped. No journey open passes as before.
-    Not with -VehicleOnly, which never restarts the server.
-    Where the vehicle stands does not enter: the judgement reads the journey row only, so a vehicle driven
-    off the station by hand is judged the same. A recovery that releases the journey back to the engine
-    (a multi-demand journey after COMPENSATE_LOAD_ALL_EMPTY) leaves it neither Completed nor awaiting
-    recovery; the -Revert of the last vehicle is then refused, and -Revert -VehicleOnly closes the vehicle.
+    <messageType>_NOT_RECONCILED; Test-V2JourneyAwaitsRecovery in V2RecoveryWindow.psm1).
+    Every server restart (open, or -Revert of the last vehicle) judges the journeys not Completed by their
+    vehicle (8005-workspace#68): it is refused only while one rides on a vehicle that may be under way --
+    RIoT, read on factory01 at that moment and again after the service stops, does not show it standing
+    still (MODE_AUTO, MT_FINISHED, speed 0, procState IDLE, no unfinished order), or it holds a fault. A
+    vehicle parked on its charger no longer holds it. Before #68 any journey not Completed refused, and the
+    journey a vehicle needs the window for is itself not Completed -- hence this parameter.
+    Opening with it: that journey passes on its own rule (on this vehicle, awaiting recovery), whatever RIoT
+    says of its vehicle; every other journey by its vehicle. Closing (-Revert) with it: the window is taken
+    away whatever that journey has become -- recovered, handed over, its demand ended, on to other stops,
+    Completed (the field's case of 2026-10-21, refused then); only a vehicle that may be under way refuses.
+    Every other check is unchanged: the dispatch gate closed, no RiotCreateDispatch__* override, no connected
+    vehicle (unless -AllowConnectedVehicles), the client on this vehicle stopped. Not with -VehicleOnly,
+    which never restarts the server. A control-server checkout from before #68 cannot read RIoT: every
+    journey not Completed refuses then, as before.
 
 .PARAMETER VehicleOnly
     With -Revert only: close the window on the vehicle and leave the server entry, recorded in the store
-    as a residue. For the end of a field window when the V2 instance is not idle (a vehicle connected, a
-    journey not Completed): the server refuses to restart then, and a vehicle left open beyond its
-    authorized window is the worse of the two -- an entry on the server that no vehicle holds is inert.
-    Run -Revert without it later, when the instance is idle, to remove the entry.
+    as a residue. For the end of a field window when the server cannot be restarted safely (a vehicle
+    connected, or one that may be under way with a journey not Completed): a vehicle left open beyond its
+    authorized window is the worse of the two. Since control-server#797 the entry left on the server is
+    not inert (wire-to-gate-parallel-cd.md 7.1); run -Revert without it as soon as the vehicles stand still,
+    to remove it.
 
 .EXAMPLE
     pwsh -File remote-ops/onboard-hmi/scripts/18-set-v2-recovery-window.ps1 -SshAlias agv03 -ControlServerRepository <checkout> -WhatIf
@@ -275,11 +282,11 @@ if (-not $Status) {
     Write-Step ("Vehicle: CONTROL_SERVER_RECOVERY_PROOF {0}; recoveryResumeEnabled {1}" -f
         ($Revert ? 'removed after the switch is off' : 'set and read back before the switch'), (-not $Revert).ToString().ToLowerInvariant())
     Write-Step ("Server: {0}" -f $(if (-not $Revert) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF set after the vehicle (no restart when it already holds the proof)' }
-            elseif ($serverClose) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF removed after the vehicle (needs the V2 instance idle)' }
+            elseif ($serverClose) { 'checked first; CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF removed after the vehicle (needs no vehicle that may be under way, none connected)' }
             elseif ($last) { 'untouched (-VehicleOnly): its CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF stays, recorded in the store as a residue' }
             else { "untouched: still open on $($others -join ', ')" }))
     if ($recoveryJourney) {
-        Write-Step "Recovery journey: $RecoveryJourneyId, on $($recoveryJourney.agvId) / $($recoveryJourney.vehicleKey) -- before a restart, the only journey not Completed may be this one, awaiting recovery"
+        Write-Step "Recovery journey: $RecoveryJourneyId, on $($recoveryJourney.agvId) / $($recoveryJourney.vehicleKey) -- $($Revert ? 'closing does not depend on its state (8005-workspace#68)' : 'opening lets it through while it awaits recovery on this vehicle; every other journey is judged by its vehicle')"
     }
     Write-Step ("Proof: {0}" -f $(if ($Revert) { 'not needed' } elseif ($store) { 'reused from the store' } else { 'to be generated and stored' }))
 }
@@ -326,7 +333,7 @@ if ($Status) {
     if ($serverHeld) {
         if ($entry -cne 'same') { $residues.Add("the server entry reads $entry while $(@($store.OpenVehicles) -join ', ') is recorded open -- run the open command again") }
     } elseif ($entry -cne 'absent') {
-        $residues.Add("the server entry reads $entry while no vehicle is recorded open -- run -Revert on either vehicle when the V2 instance is idle")
+        $residues.Add("the server entry reads $entry while no vehicle is recorded open -- run -Revert on either vehicle once no vehicle may be under way")
     }
     Write-Step ("Store: {0}" -f ($null -eq $store ? '(none)' : "open on $($recorded ? $recorded : '(no vehicle)')"))
     Write-Host ("RESIDUE: {0}" -f ($residues.Count ? ($residues -join '; ') : 'none'))
@@ -376,7 +383,8 @@ if ($serverClose) {
     try {
         Invoke-Remote -Alias $serverAlias -Script $serverScript -Request (& $serverRequest 'check' 'remove' $null) | Out-Null
     } catch {
-        throw ("$($_.Exception.Message) The vehicle was not touched. Removing the server entry needs the V2 instance idle; to close the " +
+        throw ("$($_.Exception.Message) The vehicle was not touched. Removing the server entry restarts the V2 service, which needs no " +
+            'vehicle that may be under way and none connected (8005-workspace#68: the state of the named journey does not matter); to close the ' +
             "vehicle now and leave the entry for later, run: 18-set-v2-recovery-window.ps1 -SshAlias $SshAlias -ControlServerRepository <checkout> -Revert -VehicleOnly")
     }
 }
@@ -391,7 +399,7 @@ if (-not $last) {
 if ($VehicleOnly) {
     Write-Step ("Recovery window closed on $SshAlias (-VehicleOnly). The server entry was left; " +
         $(if ($store) { 'the store keeps the proof with no vehicle open, which -Status reports as a residue.' } else { 'there is no store, so -Status will report the entry if it is there.' }) +
-        ' Run -Revert without -VehicleOnly when the V2 instance is idle.')
+        ' Run -Revert without -VehicleOnly once no vehicle may be under way.')
     return
 }
 Write-Step "Server half on $serverAlias"

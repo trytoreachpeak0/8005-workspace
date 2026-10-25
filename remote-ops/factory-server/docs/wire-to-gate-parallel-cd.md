@@ -599,7 +599,8 @@ v2 实例。
 `18` 两端写同一个值、`-Revert` 两端都删；**部署脚本不碰它们，出厂是关**。服务端那一半与 `20` 号闸门脚本同一做法：从干净的
 control-server 检出复制 `ParallelInstance.psm1`、`ParallelHost.psm1` 到 `<opsRoot>\recovery-window\<commit>`，服务名、安装根、
 车载端口都从 `installed-instance.json` 读；写之前用安装脚本同一道 `Get-ParallelPreInstallRefusal`（闸门、配置、进程启动时刻）、
-只读实例库判在途旅程，再看车载端口上的连接，任何一条不满足就不写、不重启。所以首次安装、卸载重装 v2 服务之后（`Environment`
+只读实例库并当场读 RIoT、按车判有没有车可能在动（8005-workspace#68，与第 10 节关闸同一判据；停服务后再判一次），再看车载端口上的连接，
+任何一条不满足就不写、不重启。关窗（`-Revert`）不看点名旅程处在什么状态，只在重启不安全时拒绝。所以首次安装、卸载重装 v2 服务之后（`Environment`
 会重建），窗口内要重跑一次 `18`；普通升级保留其他条目（`ParallelHost.psm1` 的 `Invoke-ParallelInstanceConfigurationStep` 只重写本实例自己的凭据）。怎么开、怎么关、残留怎么收拾、`-Status` 怎么对账，见
 `remote-ops/onboard-hmi/docs/USAGE.md`「v2 线的恢复窗口」。
 
@@ -611,8 +612,8 @@ control-server 检出复制 `ParallelInstance.psm1`、`ParallelHost.psm1` 到 `<
 后备与常设凭据混用时有两处不显然（control-server#797 审查 L2）：
 
 - **`18 -Revert -VehicleOnly` 只收车上那一半，共用凭据留在服务端。**`18` 的说明把这条残留称作无害，control-server#797 之后不再是：
-  服务端只要这个变量有值就认共用凭据，拿着这个值的车（例如另一台还开着窗的车）在有授权时仍开得了会话。要连服务端一起收，实例空闲后
-  再跑一次不带 `-VehicleOnly` 的 `-Revert`，用 `-Status` 对账。
+  服务端只要这个变量有值就认共用凭据，拿着这个值的车（例如另一台还开着窗的车）在有授权时仍开得了会话。要连服务端一起收，车停稳、没有车连着时
+  再跑一次不带 `-VehicleOnly` 的 `-Revert`，用 `-Status` 对账（8005-workspace#68 起它不再因点名旅程的状态被拒）。
 - **对已经 `06-deploy -RecoveryResume` 的车开 `18` 窗，会把车上 `CONTROL_SERVER_RECOVERY_PROOF` 覆盖成共用凭据。**`-Revert` 关窗时
   关掉车上的恢复开关、删掉这个变量，本车凭据和常开的开关都不会自己回来，这台车此后开不了会话。所以对换装过的车不要开 `18`；已经开了
   的，`-Revert` 之后对这台车重跑一次 `06-deploy -RecoveryResume`，把开关和本车凭据写回去。
@@ -993,9 +994,37 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 服务器端脚本会因为没有 `installed-instance.json` 而拒绝，但 `dispatch-gate\<commit>` 这个目录已经建好、留在那里，没有任何东西用它，
 在意的话手工删掉即可。
 
-**有一趟旅程卡在恢复态、关不了闸时**（8005-workspace#61，起因是 2026-10-19 agv03 装货结果 UNKNOWN）：关闸要求所有旅程都是 `Completed`，
-而卡住的那趟不是；18 号开恢复窗口、19 号升级、全检站激活又都要求闸先关上，于是互相卡死。这时关闸加 `-RecoveryJourneyId <完整旅程号>`
-和 `-RecoveryVehicleAlias <agv0N>`（旅程号含 `|`，要加引号）。有几趟就各写几个，用逗号隔开，按位置一一对应：
+**关闸、开闸按车判，当场读 RIoT**（8005-workspace#68，control-server#797 方案 B）。关闸、开闸都要重启 v2，重启会停掉所有车的故障监看，
+所以脚本要的是「重启时没有车可能在跑本服务端的单」。此前它用「库里有没有不是 `Completed` 的旅程」去近似，把不会动的车也算了进去：
+充电旅程要等电量读到充满才收尾，充电单早已成功、车停在桩上，阶段一直是 `AwaitingPickupArrival`，一挡就是几个小时；开闸则把 `CONFIRMED`
+的单一律当成「可能在跑」，2026-10-21 agv03 一张 11:23 就已成功的取货单挡住了开闸。现在：
+
+- **关闸**：没走完的旅程按它那台车判。一辆车算「停稳、不会动」要同时满足：RIoT 上指派给它或由它执行的单没有未结束的（状态 1、3、7、8、9、10），
+  RIoT 读它 `MODE_AUTO`、`movementState` 为 `MT_FINISHED`（或刚上电的 `MT_NA` 且抱闸 `breakSwitchState=MOVABLE`）、速度正好 0、
+  `procState=IDLE`、`processingOrder=false`、启用、`ON_LINE`、急停 `OK`、`CONTROL_STATE_OK`、`LOCATION_STATE_RUNNING`；而且库里这辆车
+  没有在效的故障（`VehicleFaultStates` 的 `Level` 不是 `None`）。这和服务端自己做车辆安全读数用的是同一套判据（control-server
+  `HttpRiotMovementGateway.Safety()`，脚本里移植为 `Get-ParallelRiotVehicleMotionReason`，原因码也一样）。`sysState` 不在其中：
+  服务端不读它，它的取值含义没有批准过（agv03 在桩上读 `CHARGING`，急停中的 agv01 读 `ERROR`）。实读样例：2026-10-11 18:52
+  agv03 在充电点 211 上，`MODE_AUTO`、`MT_FINISHED`、速度 0、`procState=IDLE`、`breakSwitchState=MOVABLE`、`LOCATION_STATE_RUNNING`、
+  急停 `OK`，名下没有未结束的单（control-server `evidence/field/20261011-W2-prep6-two-car/16-riot-3cars-before-stack.txt`）。
+  有一辆车不满足就拒（`GATE_CLOSE_REFUSED_IN_FLIGHT`），拒绝消息逐车写出车号、车键、挂在它上面的旅程和每一条原因。
+- **开闸**：「单已经发出、或可能已经发出」的旅程照旧拒（`GATE_OPEN_REFUSED_ORDER_SENT`），只放过一种：意图是 `CONFIRMED`，按它的
+  `UpperId` 当场读 RIoT，读到的正是它记的那张单（`upperId`、`orderId` 都逐字相等），而且已是终态 SUCCESS（5）、FAILED（4）或
+  CANCELED（2）。`CREATE_ATTEMPTED`、`RESULT_UNKNOWN`、`TERMINAL_RECONCILIATION_REQUIRED` 不看 RIoT，照旧拒：服务端自己还没理清建成了什么。
+  DELETED（6）不算终态，照旧拒。
+- **读一次不够**：库和 RIoT 在停服务前、停服务后各读一次（第 5 步），读完到重启之间有人在 RIoT 上手动开走车，就在第二次读时拒。
+- **读不到就拒**：RIoT 不通、超时、返回不是成功、非终态单的分页对不上（每页总数一致、条数对、不重复、最多 20 页）、读到的是别的车或
+  别的单、没有密钥，一律当「可能在动」。拒绝消息里不出现密钥。
+- **RIoT 从哪读**：在 factory01 上，按已装 v2 服务的读法：`appsettings.json` 的 `RIoT` 节、`appsettings.Production.json` 覆盖其上；
+  密钥取 `RIoT:callApiKeyEnvironmentVariable` 指的变量，先看 v2 服务自己的注册表 `Environment`（产品安装脚本写在那里），再看机器作用域；
+  `Authorization: Bearer <key>`。只用三个只读接口，都是产品本身在用、调用白名单批准过的：`GET /api/task/v1/task/getVehicleInfo/{deviceKey}`、
+  `GET /api/order/v1/orderRecord?…filterByState=…`（按状态分页）、`GET /api/order/v1/orderRecord/detailByUpperId/{upperId}`。
+- `-ControlServerRepository` 指向没有这项改动的检出时，行为与以前一样（按「有没有不是 `Completed` 的旅程」判）。
+
+**有一趟旅程卡在恢复态、关不了闸时**（8005-workspace#61，起因是 2026-10-19 agv03 装货结果 UNKNOWN）：按车判之后，卡住的那趟只要它的车停稳就
+不再挡关闸；车的读数不满足停稳时（例如有人把它切到了手动），18 号开恢复窗口、19 号升级、全检站激活又都要求闸先关上，于是互相卡死。
+这时关闸加 `-RecoveryJourneyId <完整旅程号>` 和 `-RecoveryVehicleAlias <agv0N>`（旅程号含 `|`，要加引号）。有几趟就各写几个，用逗号隔开，
+按位置一一对应：
 
 ```bash
 pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-dispatch-gate.ps1 `
@@ -1009,19 +1038,18 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 `None` 或没有行）。为什么恢复态的旅程可以放：它是 `Blocked`，引擎每轮对它直接返回，故障监看只在到站阶段那几条路径上调用，所以重启拿不走它的
 任何监看（它那台车此刻不一定在站上）。车辆故障那一条是额外加的一道：故障在效时停稳证明的采样只在内存里，重启就丢。被故障按住的车（例如急停之后的
 隔离）等故障自己解除（被按住的单自动续行，`RESUME_HELD_ORDER`）再关闸，或者联系系统维护人员走 control-server#771 撤旅程。生产实例的
-`vehicleFaultRecovery` 入口是关着的，不能指望它。没点名的非 `Completed` 旅程照旧拒，其余检查一条不少。不带参数时行为不变。点名了却不在途的
+`vehicleFaultRecovery` 入口是关着的，不能指望它。没点名的非 `Completed` 旅程照上面按车判，其余检查一条不少。不带参数时行为不变。点名了却不在途的
 旅程（已经走完，或旅程号写错）不放宽任何东西，拒绝消息和预演里会写「named but not in flight」。
 `-ControlServerRepository` 太旧（没有这项改动）时，在复制任何东西之前就拒（`CHECKOUT_PREDATES_RECOVERY_JOURNEY`）。
 
 **`-State` 只认逐字的 `Closed` 和 `Open`**（8005-workspace#61 起）。此前小写的 `-State closed` 能通过参数检查，到服务器端却被当成开闸，
 而且会跳过开闸前的 IO 核对；现在大小写不对在参数绑定时就失败，什么都不做。
 
-**开闸不放宽**：这个参数只能配 `-State Closed`。所以点名关闸之后，那趟旅程只要还没到 `Completed`，
-`-State Open` 就会照常以 `GATE_OPEN_REFUSED_ORDER_SENT` 拒绝：它前面停靠的单都发出过。尤其要知道一条走不通的路：用 18 号开恢复窗口、
-在车上做补偿清空（`COMPENSATE_LOAD_ALL_EMPTY`）之后，**多需求旅程不会收尾**，它被放回引擎（`AwaitingLoadResult` → 离站），下一段腿因为闸门关着
-建不了单，停在 `CreateDispatchDisabled`，永远到不了 `Completed`，开闸也就一直被拒。出路只有两条：等 control-server#771 的撤旅程入口把它收成
-`Completed`，之后普通的 `-State Open` 就不再看它；或者在 RIoT 上查清这台车没有在跑的单之后，按下面「手工开闸」那一节手工开。手工开闸后
-那趟旅程会立刻为下一站建单、车会出发，这是动车，要用户单独授权、现场有人。
+**这个参数不放宽开闸**：它只能配 `-State Closed`。点名关闸之后，那趟旅程前面停靠的单都发出过；8005-workspace#68 之后，开闸对它们按上面
+「开闸」那条判：意图是 `CONFIRMED`、RIoT 当场读到那张单已是终态，就不再挡。所以 18 号开窗、在车上做补偿清空（`COMPENSATE_LOAD_ALL_EMPTY`）
+之后，多需求旅程被放回引擎（`AwaitingLoadResult` → 离站）、下一段腿因为闸门关着建不了单（`CreateDispatchDisabled`，从没发出），这一形
+现在开得了闸，不必再手工开。仍被拒的，是 RIoT 读不到、读到那张单没结束，或意图不是 `CONFIRMED` 的情形；那时先到 RIoT 上查清，再看下面
+「手工开闸」。无论哪种开法，开闸后那趟旅程都会立刻为下一站建单、车会出发，这是动车，要用户单独授权、现场有人。
 
 为什么不直接放进 `opsRoot`：`19-deploy-control-server-parallel.ps1` 把安装脚本、卸载脚本和这两个模块当成**一个整体**放在 `opsRoot`
 里。要是 20 号用一个较新的 checkout 把模块覆盖进去，之后再跑 19 号的 `-Uninstall`，就成了旧卸载脚本配新模块；部署时清理秘密文件用的
@@ -1036,17 +1064,19 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 2. **安装脚本开头那几道检查原样复用**（`Get-ParallelPreInstallRefusal`）：配置缺失或读不出、服务在启停中、Running 却读不到进程
    启动时间、配置在进程启动之后被改过，都拒绝。闸门开着这一条在这里不算拒绝，因为关的就是它。
 3. 已经是要的状态：什么都不碰，直接说明。
-4. **读 v2 自己的 SQLite 库判断有没有车在跑单**，只读打开（`Mode=ReadOnly`），库路径取自已装配置的 `ConnectionStrings:ControlServer`，
+4. **读 v2 自己的 SQLite 库和 RIoT 判断有没有车可能在跑单**。库只读打开（`Mode=ReadOnly`），库路径取自已装配置的 `ConnectionStrings:ControlServer`，
    必须落在 v2 的数据目录里。不用看板接口，是因为实读过：`/api/dashboard/*` 每个接口都只返回在途旅程的一部分（等待中的、有阻塞原因的、
-   装货阶段的），一辆正常行驶、没有阻塞原因的车在接口上看不见。
-   - **关**：有任何一个旅程不是 `Completed`（`Blocked` 也算在途），就拒绝（`GATE_CLOSE_REFUSED_IN_FLIGHT`），提示先停注入、等车跑完。
-   - **开**：只拒绝「单已经发给 RIoT、或可能已经发出」的旅程（`GATE_OPEN_REFUSED_ORDER_SENT`）。闸门关着时服务端建不了单
+   装货阶段的），一辆正常行驶、没有阻塞原因的车在接口上看不见。RIoT 只读（GET），读法见上面「关闸、开闸按车判」。
+   - **关**：没走完的旅程（`Blocked` 也算）按它那台车判，有一辆可能在动就拒绝（`GATE_CLOSE_REFUSED_IN_FLIGHT`），提示先停注入、等那些车停稳
+     或跑完。停在桩上充电的车不挡（8005-workspace#68；此前任何一个不是 `Completed` 的旅程都拒）。
+   - **开**：只拒绝「单已经发给 RIoT、或可能已经发出」、且不是「`CONFIRMED` 而 RIoT 当场读到已终态」的旅程（`GATE_OPEN_REFUSED_ORDER_SENT`）。闸门关着时服务端建不了单
      （返回 `CreateDispatchDisabled`，什么也不写），这时存在的旅程都在等这道闸门；要是因为它们就拒绝开闸，就永远开不了，只能改库。
      「没发过」的判法照搬服务端自己的定义（`WireToGateStore.IsNeverSentAsync`）：`PENDING_RECONCILIATION` 且没有建单尝试、没有单号；
      或 `RESULT_UNKNOWN` 但只是因为建单前的查询都没回音。旅程的单包括它行上记的取货段、送门段，以及同一辆车在这个旅程创建之后
      建的所有单（后续停靠、重建、充电段的单不记在旅程行上）。
    - 库读不出、表缺失、时间读不出，**一律拒绝**（`GATE_STATE_UNREADABLE`）。
-5. **停服务，再读一次**。这一次才作数：服务停了就不会再建单，读完到写之间不可能再冒出新单。这一次被拒，脚本会按原样把服务拉起来，
+5. **停服务，再读一次**（库和 RIoT 都再读）。这一次才作数：服务停了就不会再建单，读完到写之间不可能再冒出新单；车在两次读之间被人在 RIoT
+   上手动开走，也在这里被拦下。这一次被拒，脚本会按原样把服务拉起来，
    拒绝消息以 `AFTER_STOP` 开头，写明「配置没改、服务停过一次」，并照实说服务拉起后是不是回到了 Running（没回到就点名它现在的状态）。
    服务本来就是 Stopped 的，脚本不碰它，拒绝消息也就没有 `AFTER_STOP` 前缀。
 6. **写开关**：找节不区分大小写，写成 UTF-8 无 BOM；回读开关必须是写进去的布尔值，**其余每个值必须与写之前一模一样**，这一条就是
@@ -1056,9 +1086,11 @@ pwsh -File remote-ops/factory-server/scripts/20-set-control-server-parallel-disp
 
 前后各取一次 MVP 服务的指纹，有任何变化就报错。
 
-**已知限制。** 用这个脚本关的闸门，开的时候不会被挡：关的时候要求没有在途旅程，之后接的旅程都建不了单。要是闸门是绕过脚本、
-在旅程跑到一半时手工关的，那个旅程已经发出过的单会挡住开闸。这是判不清时一律拒绝的结果，而且**不会自己解除**：闸门关着，那个旅程
-就永远走不到 `Completed`。拒绝消息里写了出路，就是下面的手工开闸。
+**已知限制。** 关闸时停在桩上的车（或别的停稳的车）挂着的旅程会留到开闸时：它们的单要是 `CONFIRMED`，开闸时按 RIoT 读数放行；
+要是闸门是绕过脚本、在旅程跑到一半时手工关的，那个旅程已经发出过的单在 RIoT 上没结束（或读不到、意图不是 `CONFIRMED`）就会挡住开闸。
+这是判不清时一律拒绝的结果，而且**不会自己解除**：闸门关着，那个旅程就永远走不到 `Completed`。拒绝消息里写了出路，就是下面的手工开闸。
+「停稳」靠的是 RIoT 当场的读数：它看不见车上直接下的走站指令（RIoT 行为实验室 Round 38，`procState` 仍是 `IDLE`），也看不见
+RIoT 与车之外的动车来源；这与服务端自己的车辆安全读数是同一个前提，写在 `HttpRiotMovementGateway` 的注释里。
 
 #### 手工开闸（只在脚本因 `GATE_OPEN_REFUSED_ORDER_SENT` 拒绝、且查清之后）
 

@@ -285,41 +285,80 @@ function Read-V2JourneyRuntimeRow {
     }
 }
 
+function Get-V2MovingVehicle {
+    <#
+        8005-workspace#68. Of the vehicles of -Rows (journey rows not Completed), those that may be under way, one line each:
+        the vehicle, its journeys, and why. A vehicle -VehicleMotion has no entry for -- or all of them, when it is $null
+        because the staged control-server predates #68 -- is not judged, and may be under way. Pure.
+    #>
+    param([AllowEmptyCollection()][object[]] $Rows, [AllowNull()][object[]] $VehicleMotion)
+    foreach ($key in @($Rows | ForEach-Object { [string] $_['VehicleKey'] } | Sort-Object -Unique -CaseSensitive)) {
+        $mine = @($Rows | Where-Object { [string] $_['VehicleKey'] -ceq $key })
+        $journeys = @($mine | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
+        $agvId = @($mine | ForEach-Object { [string] $_['AgvId'] } | Sort-Object -Unique -CaseSensitive) -join ', '
+        $entry = @($VehicleMotion | Where-Object { $_ -is [System.Collections.IDictionary] -and [string] $_['VehicleKey'] -ceq $key })
+        if ($null -eq $VehicleMotion -or $entry.Count -ne 1) {
+            "vehicle $agvId / $key with $journeys`: not judged (RIoT was not read for it; a control-server checkout from before 8005-workspace#68 cannot)"
+        } elseif (@($entry[0]['Reasons']).Count -gt 0) {
+            "vehicle $agvId / $key with $journeys`: $(@($entry[0]['Reasons']) -join '; ')"
+        }
+    }
+}
+
 function Get-V2RecoveryJourneyRefusal {
     <#
         .SYNOPSIS
-            8005-workspace#58. With a named recovery journey, the journey check before a restart: $null when
-            the only journey not Completed is that journey, on that vehicle, awaiting recovery; otherwise the
-            refusal text. Without one, the unchanged JOURNEYS_IN_PROGRESS rule. Pure but for -ReadRow.
+            The journey check before a restart of the V2 service, by vehicle (8005-workspace#68): $null when no journey that
+            is not Completed rides on a vehicle that may be under way; otherwise the refusal text. Pure but for -ReadRow.
 
         .DESCRIPTION
-            -Open is the rows Get-ParallelJourneyDispatchState returned (not Completed). -RecoveryJourney is the
-            request's recoveryJourney (journeyId, agvId, vehicleKey) or $null. -ReadRow(journeyId) returns
-            Read-V2JourneyRuntimeRow's answer. No journey open passes either way: the instance is idle, which is
-            what a -Revert sees once the session has settled the journey.
+            A restart stops the fault supervision of every vehicle, so it waits while one may be moving under this
+            instance. Until 8005-workspace#68 any journey not Completed counted, and a vehicle parked on its charger -- its
+            charging journey stays AwaitingPickupArrival until the battery reads full -- held a planned restart for hours.
+            Now each such journey is judged by its vehicle: -VehicleMotion is control-server's Get-ParallelGateVehicleMotion
+            answer for them (RIoT read now shows it standing still with no unfinished order, and it holds no fault), or
+            $null when the staged control-server cannot tell, and then every journey refuses as before.
+
+            -Target says which way the window goes:
+              * 'set' (opening). With -RecoveryJourney (8005-workspace#58), that journey -- when it is among the open ones --
+                passes on its own rule: on that vehicle, awaiting recovery (-ReadRow(journeyId), Read-V2JourneyRuntimeRow's
+                answer); its vehicle is not asked. Every other journey is judged by its vehicle (RECOVERY_JOURNEY_NOT_ALONE).
+                Without it, every journey by its vehicle (JOURNEYS_IN_PROGRESS).
+              * 'remove' (closing). The window itself is taken away, whatever the named journey has become (8005-workspace#68,
+                the field's instance 1 of 2026-10-21: after a fault cargo handoff the journey went on to two more pickup stops
+                and -Revert was refused, leaving the server entry behind). -RecoveryJourney and -ReadRow are not consulted.
+                What still refuses is the one case where the close itself is unsafe: a journey on a vehicle that may be under
+                way, the named one included, because the restart would stop its supervision (JOURNEYS_IN_PROGRESS).
+            No journey open passes either way.
     #>
     param(
         [AllowEmptyCollection()][object[]] $Open,
         [AllowNull()][System.Collections.IDictionary] $RecoveryJourney,
         [scriptblock] $ReadRow,
-        # STUB (8005-workspace#68 test commit): accepted, not used yet.
-        [string] $Target = 'set',
+        [ValidateSet('set', 'remove')][string] $Target = 'set',
         [AllowNull()][object[]] $VehicleMotion
     )
     $open = @($Open)
     if ($open.Count -eq 0) { return $null }
-    $named = @($open | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
-    if ($null -eq $RecoveryJourney) {
-        return ("JOURNEYS_IN_PROGRESS: $($open.Count) journey(s) not Completed: $named. A restart stops their supervision; " +
-            'finish or settle them first. Nothing was changed.')
+    $restart = ($Target -ceq 'remove') ? 'Closing the window restarts the service' : 'Opening the window restarts the service'
+    if ($null -eq $RecoveryJourney -or $Target -ceq 'remove') {
+        $moving = @(Get-V2MovingVehicle -Rows $open -VehicleMotion $VehicleMotion)
+        if ($moving.Count -eq 0) { return $null }
+        return ("JOURNEYS_IN_PROGRESS: $($moving.Count) vehicle(s) with a journey not Completed may be under way: $($moving -join ' | '). " +
+            "$restart, which stops their supervision; wait until they stand still (RIoT: MODE_AUTO, MT_FINISHED, speed 0, no " +
+            'unfinished order) or their journeys finish.' + $(if ($Target -ceq 'remove') { ' Which journey the window was opened for, and its state, do not matter for closing it.' } else { '' }) +
+            ' Nothing was changed.')
     }
     $id = [string] $RecoveryJourney['journeyId']
     $others = @($open | Where-Object { [string] $_['JourneyId'] -cne $id })
-    if ($others.Count -gt 0) {
-        $otherNamed = @($others | ForEach-Object { "$($_['JourneyId']) ($($_['Stage']))" }) -join ', '
-        return ("RECOVERY_JOURNEY_NOT_ALONE: the recovery journey is $id, and $($others.Count) other journey(s) are not Completed: " +
-            "$otherNamed. A restart stops their supervision; finish or settle them first. Nothing was changed.")
+    $moving = @(Get-V2MovingVehicle -Rows $others -VehicleMotion $VehicleMotion)
+    if ($moving.Count -gt 0) {
+        return ("RECOVERY_JOURNEY_NOT_ALONE: the recovery journey is $id, and $($moving.Count) vehicle(s) with another journey not " +
+            "Completed may be under way: $($moving -join ' | '). $restart, which stops their supervision; wait until they stand " +
+            'still or their journeys finish. Nothing was changed.')
     }
+    # The named journey not among the open ones (finished, or mistyped) waives nothing, and everything open stands still.
+    if ($others.Count -eq $open.Count) { return $null }
     $row = & $ReadRow $id
     if ($row -isnot [System.Collections.IDictionary] -or $row.Contains('Error')) {
         $why = ($row -is [System.Collections.IDictionary]) ? [string] $row['Error'] : 'no answer'
@@ -357,22 +396,28 @@ function Invoke-V2RecoveryWindowServer {
                  readable, service Running or Stopped, a Running process newer than the file, the
                  dispatch gate closed -- Get-ParallelPreInstallRefusal); no RiotCreateDispatch__*
                  override in the Environment; no established connection on the onboard port, unless
-                 allowConnectedVehicles (then a warning); no journey that is not Completed (the
-                 instance's SQLite store, read-only; no switch). Unreadable connections or journeys refuse.
-                 With recoveryJourney (8005-workspace#58), and only then, the one journey not Completed may
-                 be that journey, on that vehicle, awaiting recovery (Get-V2RecoveryJourneyRefusal); every
-                 other check above is the same.
+                 allowConnectedVehicles (then a warning); no journey that is not Completed on a vehicle
+                 that may be under way (the instance's SQLite store, read-only, and RIoT, GET only;
+                 8005-workspace#68 -- before, any journey not Completed refused). Unreadable connections or
+                 journeys refuse. With recoveryJourney (8005-workspace#58), opening lets that journey through
+                 on its own rule -- on that vehicle, awaiting recovery -- and closing takes the window away
+                 whatever that journey has become (Get-V2RecoveryJourneyRefusal); every other check above is
+                 the same.
                  'check' stops here: CHECK_PASSED.
               5. Write the Environment with every other entry kept in its order, read it back; on a
                  mismatch the original is written back and the run fails.
-              6. Restart a Running service and require it Running again. A Stopped one is left stopped.
+              6. A Running service is stopped, the journeys and RIoT are read again (8005-workspace#68), and
+                 it is started and required Running again. Refused on that second read, the original
+                 Environment is written back and the service started on it (AFTER_STOP). A Stopped one is
+                 left stopped.
 
             Actions: built by New-V2ServerActions. RegistryPath (the key it writes, checked against
             ServiceName and the MVP); scriptblocks ReadEnvironment -> string[]; WriteEnvironment([string[]]);
             MergeEntry(environment, name, value) -> string[]; ServiceStatus -> string or $null;
-            PreInstallRefusal -> string or $null; JourneyState -> hashtable (Journeys, or Error);
-            JourneyRow(journeyId) -> Read-V2JourneyRuntimeRow's answer (only with recoveryJourney);
-            Connections -> string[] of remote addresses (throws when it cannot read); RestartService.
+            PreInstallRefusal -> string or $null; JourneyState -> hashtable (Journeys and, with a
+            control-server from 8005-workspace#68 on, VehicleMotion; or Error); JourneyRow(journeyId) ->
+            Read-V2JourneyRuntimeRow's answer (only with recoveryJourney, when opening);
+            Connections -> string[] of remote addresses (throws when it cannot read); StopService; StartService.
     #>
     [CmdletBinding()]
     param(
@@ -441,16 +486,26 @@ function Invoke-V2RecoveryWindowServer {
         }
         $lines.Add("WARNING: CONNECTED_VEHICLES ($from): the restart drops them into recovery.")
     }
-    $journeys = & $Actions.JourneyState
-    if ($journeys -isnot [System.Collections.IDictionary] -or $journeys.Contains('Error')) {
-        $why = ($journeys -is [System.Collections.IDictionary]) ? [string] $journeys['Error'] : 'no answer'
-        throw "JOURNEY_STATE_UNREADABLE: $why. Nothing was changed."
+    # The journeys not Completed and, by vehicle, whether one may be under way (8005-workspace#68); read again after the stop.
+    $journeyCheck = {
+        $journeys = & $Actions.JourneyState
+        if ($journeys -isnot [System.Collections.IDictionary] -or $journeys.Contains('Error')) {
+            $why = ($journeys -is [System.Collections.IDictionary]) ? [string] $journeys['Error'] : 'no answer'
+            return @{ Open = @(); Refusal = "JOURNEY_STATE_UNREADABLE: $why. Nothing was changed." }
+        }
+        $open = @($journeys['Journeys'])
+        $motion = $journeys.Contains('VehicleMotion') ? @($journeys['VehicleMotion']) : $null
+        return @{ Open = $open; Refusal = (Get-V2RecoveryJourneyRefusal -Open $open -RecoveryJourney $recoveryJourney -ReadRow $Actions.JourneyRow -Target $target -VehicleMotion $motion) }
     }
-    $open = @($journeys['Journeys'])
-    $journeyRefusal = Get-V2RecoveryJourneyRefusal -Open $open -RecoveryJourney $recoveryJourney -ReadRow $Actions.JourneyRow
-    if ($journeyRefusal) { throw $journeyRefusal }
-    if ($recoveryJourney -and $open.Count -gt 0) {
-        $lines.Add("RECOVERY_JOURNEY=$($recoveryJourney['journeyId']) awaits recovery on $($recoveryJourney['agvId']); no other journey open. A restart stops its supervision until the vehicle reconnects.")
+    $checked = & $journeyCheck
+    if ($checked.Refusal) { throw $checked.Refusal }
+    if ($checked.Open.Count -gt 0) {
+        $lines.Add("OPEN_JOURNEYS=$($checked.Open.Count), every one on a vehicle RIoT shows standing still$(($recoveryJourney -and ($target -ceq 'set')) ? ' or the recovery journey' : '').")
+    }
+    if ($recoveryJourney -and $checked.Open.Count -gt 0) {
+        $lines.Add($target -ceq 'set' ?
+            "RECOVERY_JOURNEY=$($recoveryJourney['journeyId']) awaits recovery on $($recoveryJourney['agvId']). A restart stops its supervision until the vehicle reconnects." :
+            "RECOVERY_JOURNEY=$($recoveryJourney['journeyId']) named; closing the window does not depend on its state (8005-workspace#68).")
     }
     if ($mode -ceq 'check') { $lines.Add('CHECK_PASSED'); return $lines.ToArray() }
 
@@ -469,13 +524,25 @@ function Invoke-V2RecoveryWindowServer {
     }
     $lines.Add("service environment now carries: $(Get-V2EntryNames $after)")
 
-    # ---- 6. the restart ----
+    # ---- 6. the restart: stop, read again, start (8005-workspace#68) ----
+    # The read after the stop counts, as for the dispatch gate (control-server ParallelHost.psm1, Invoke-ParallelDispatchGateChange
+    # step 5): a vehicle somebody drives off by hand in RIoT between the first read and the restart is caught here. Refused, the
+    # Environment is written back as it was and the service started again on it.
     $status = & $Actions.ServiceStatus
     if ($status -ceq 'Running') {
-        & $Actions.RestartService
+        & $Actions.StopService
+        $again = & $journeyCheck
+        if ($again.Refusal) {
+            & $Actions.WriteEnvironment $environment
+            $restored = ([string[]] @(& $Actions.ReadEnvironment) -join "`n") -ceq ($environment -join "`n")
+            & $Actions.StartService
+            throw ('AFTER_STOP ' + $again.Refusal.Replace(' Nothing was changed.', '') + " The service was stopped for this second read; the Environment was " +
+                $(if ($restored) { 'written back as it was' } else { 'NOT read back as it was -- check it' }) + " and '$ServiceName' started again ($(& $Actions.ServiceStatus)).")
+        }
+        & $Actions.StartService
         $now = & $Actions.ServiceStatus
         if ($now -cne 'Running') { throw "SERVICE_NOT_RUNNING_AFTER_RESTART: '$ServiceName' is $now. The Environment was written." }
-        $lines.Add("service '$ServiceName' restarted, Running")
+        $lines.Add("service '$ServiceName' stopped, the journeys and RIoT read again, started, Running")
     } else {
         $lines.Add("service '$ServiceName' is $status and left so; it reads the entry when it starts")
     }
@@ -488,14 +555,19 @@ function New-V2ServerActions {
             The actions the server half runs with. server-v2-recovery-window.ps1 passes only the four
             values it read from installed-instance.json; everything else is a default here, which is
             what production uses. The self-test calls this same function with a temporary registry
-            root, a temporary install and data root, a loopback port and a recorded restart.
+            root, a temporary install and data root, a loopback port, a recorded stop and start, and a fake
+            RIoT GET.
 
         .DESCRIPTION
             The control-server functions it calls (Get-ParallelPreInstallRefusal,
             Get-ParallelServiceProcessStartTimeUtc, Resolve-ParallelInstanceDatabasePath,
             Get-ParallelJourneyDispatchState, Set-ParallelServiceEnvironmentEntry, Get-MvpFingerprint,
-            Assert-MvpUntouched) must be imported by the caller: ParallelInstance.psm1 and ParallelHost.psm1,
-            staged beside this module.
+            Assert-MvpUntouched; from 8005-workspace#68 Resolve-ParallelRiotGateConnection, Read-ParallelRiotGateFacts and
+            Get-ParallelGateVehicleMotion, used when present) must be imported by the caller: ParallelInstance.psm1 and
+            ParallelHost.psm1, staged beside this module.
+
+            JourneyState reads RIoT as the installed service does: the RIoT section of appsettings.json under
+            appsettings.Production.json, the key from this service's registry Environment (else the machine scope), GET only.
 
             Connections: every TCP connection, then filtered here -- a filtered Get-NetTCPConnection
             reports "none" as an error, and swallowing errors would read "cannot tell" as "nobody".
@@ -508,18 +580,19 @@ function New-V2ServerActions {
         [Parameter(Mandatory = $true)][int] $OnboardPort,
         [Microsoft.Win32.RegistryKey] $RegistryRoot = [Microsoft.Win32.Registry]::LocalMachine,
         [string] $ServicesPath = $script:ServicesPath,
-        [scriptblock] $RestartService,
-        # STUB (8005-workspace#68 test commit): accepted, not used yet; a restart runs the two in order.
-        [scriptblock] $RiotGet,
+        # 8005-workspace#68: the restart in two halves, so the journeys and RIoT are read again in between.
         [scriptblock] $StopService,
-        [scriptblock] $StartService
+        [scriptblock] $StartService,
+        # 8005-workspace#68, for the self-test: replaces the RIoT GET (Read-ParallelRiotGateFacts -Get); $null in production.
+        [scriptblock] $RiotGet
     )
-    if (-not $RestartService -and $StopService -and $StartService) { $RestartService = { & $StopService; & $StartService }.GetNewClosure() }
     if ($ServiceName.Trim().TrimEnd('\') -ieq $script:MvpServiceName) { throw 'MVP_SERVICE_REFUSED: no actions are built for the MVP service. Nothing was changed.' }
     $registryPath = "$ServicesPath\$ServiceName"
     $configurationPath = "$InstallRoot\appsettings.Production.json"
+    $baseConfigurationPath = "$InstallRoot\appsettings.json"
     $readConfiguration = { (Test-Path -LiteralPath $configurationPath -PathType Leaf) ? [IO.File]::ReadAllText($configurationPath) : $null }.GetNewClosure()
-    $restart = $RestartService ?? { Restart-Service -Name $ServiceName -Force }.GetNewClosure()
+    $stop = $StopService ?? { Stop-Service -Name $ServiceName -Force }.GetNewClosure()
+    $start = $StartService ?? { Start-Service -Name $ServiceName }.GetNewClosure()
     return @{
         Description = "registry $($RegistryRoot.Name)\$registryPath; configuration $configurationPath; onboard port $OnboardPort"
         RegistryPath = $registryPath
@@ -546,7 +619,22 @@ function New-V2ServerActions {
             } catch {
                 return @{ Error = "the database path cannot be resolved from $configurationPath ($($_.Exception.Message))" }
             }
-            Get-ParallelJourneyDispatchState -DatabasePath $databasePath -AssemblyDirectory $InstallRoot
+            $state = Get-ParallelJourneyDispatchState -DatabasePath $databasePath -AssemblyDirectory $InstallRoot
+            # 8005-workspace#68: each vehicle with a journey not Completed asked of RIoT, with control-server's own functions.
+            # A staged control-server from before #68 has none of them: no VehicleMotion then, and every journey refuses as before.
+            if (@(Get-Command Read-ParallelRiotGateFacts, Resolve-ParallelRiotGateConnection, Get-ParallelGateVehicleMotion -ErrorAction SilentlyContinue).Count -ne 3) {
+                return $state
+            }
+            $base = $null
+            try { if (Test-Path -LiteralPath $baseConfigurationPath -PathType Leaf) { $base = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($baseConfigurationPath)) -AsHashtable -Depth 12 } } catch { $base = $null }
+            $serviceEnvironment = try { [string[]] @(Read-V2RegistryMultiString -Root $RegistryRoot -Path $registryPath) } catch { [string[]] @() }
+            $connection = Resolve-ParallelRiotGateConnection -BaseConfiguration $base -Configuration $configuration -ServiceEnvironment $serviceEnvironment `
+                -MachineVariable { param([string] $Name) [Environment]::GetEnvironmentVariable($Name, 'Machine') }
+            $state = Read-ParallelRiotGateFacts -State $state -Direction Close -Connection $connection -Get $RiotGet
+            if ($state -is [System.Collections.IDictionary] -and -not $state.Contains('Error')) {
+                $state['VehicleMotion'] = @(Get-ParallelGateVehicleMotion -State $state -Journeys @($state['Journeys']))
+            }
+            $state
         }.GetNewClosure()
         JourneyRow = {
             param([string] $JourneyId)
@@ -558,7 +646,8 @@ function New-V2ServerActions {
             }
             Read-V2JourneyRuntimeRow -DatabasePath $databasePath -AssemblyDirectory $InstallRoot -JourneyId $JourneyId
         }.GetNewClosure()
-        RestartService = $restart
+        StopService = $stop
+        StartService = $start
         IsElevated = { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
         MvpFingerprint = { Get-MvpFingerprint }
         AssertMvpUntouched = { param($Before, $After) Assert-MvpUntouched -Before $Before -After $After }

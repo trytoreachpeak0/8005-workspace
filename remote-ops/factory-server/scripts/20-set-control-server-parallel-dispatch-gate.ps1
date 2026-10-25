@@ -33,10 +33,13 @@
     logic in ParallelHost.psm1's Invoke-ParallelDispatchGateChange) does, and refuses:
       * takes the service name and every path from the definition the installer recorded
         (installed-instance.json), asserted as for an install: the MVP's service, paths or ports are refused;
-      * reads the instance's own SQLite store, read-only: -State Closed refuses while any journey is not
-        Completed; -State Open refuses while any journey has an order that was or may have been sent to
-        RIoT (journeys waiting for the gate are allowed -- they are what opening it is for);
-      * reads it once with the service running and once after stopping it; a refusal on the second read
+      * reads the instance's own SQLite store, read-only, and RIoT, GET only (8005-workspace#68; with a checkout
+        that has it): -State Closed refuses while a journey is not Completed on a vehicle that may be under way --
+        RIoT does not show it standing still with no unfinished order, or it holds a fault (a vehicle parked on its
+        charger no longer holds the gate); -State Open refuses while any journey has an order that was or may have
+        been sent to RIoT, except a CONFIRMED one RIoT shows ended (SUCCESS, FAILED, CANCELED) -- journeys waiting
+        for the gate are allowed, they are what opening it is for;
+      * reads both once with the service running and once after stopping it; a refusal on the second read
         starts the service again on the unchanged file and says so;
       * writes the flag with the section found ignoring case, reads the flag back and checks that every
         other value -- the Chinese agvId above all -- reads back unchanged; on a failed write the original
@@ -71,8 +74,9 @@
     8005-workspace#61, with -RecoveryVehicleAlias and -State Closed only. The whole JourneyId
     (journey:<demandId>|g<generation>, quoted for the '|') of each journey a vehicle stuck on a slot operation result is
     recovered from; several, comma-separated, each paired by position with -RecoveryVehicleAlias. Without it, closing is
-    refused while any journey is not Completed -- and such a journey is not -- while 18's recovery window, 19 and the
-    task-type station activation all need the gate closed first. With it, closing lets each named journey through while
+    refused while such a journey's vehicle may be under way (until 8005-workspace#68: while any journey is not
+    Completed, which such a journey is not) -- while 18's recovery window, 19 and the task-type station activation all
+    need the gate closed first. With it, closing lets each named journey through while
     it is on its vehicle, Blocked on a slot operation result that needs recovery (LOAD_RESULT_REQUIRES_RECOVERY,
     UNLOAD_RESULT_REQUIRES_RECOVERY, <messageType>_NOT_RECONCILED), and its vehicle holds no fault (a restart would drop
     the stop proof of a fault that stands; wait until it clears -- the held order resumed -- or for control-server#771).
