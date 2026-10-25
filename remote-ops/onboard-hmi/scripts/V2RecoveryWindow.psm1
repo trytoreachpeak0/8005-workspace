@@ -301,7 +301,10 @@ function Get-V2RecoveryJourneyRefusal {
     param(
         [AllowEmptyCollection()][object[]] $Open,
         [AllowNull()][System.Collections.IDictionary] $RecoveryJourney,
-        [scriptblock] $ReadRow
+        [scriptblock] $ReadRow,
+        # STUB (8005-workspace#68 test commit): accepted, not used yet.
+        [string] $Target = 'set',
+        [AllowNull()][object[]] $VehicleMotion
     )
     $open = @($Open)
     if ($open.Count -eq 0) { return $null }
@@ -505,8 +508,13 @@ function New-V2ServerActions {
         [Parameter(Mandatory = $true)][int] $OnboardPort,
         [Microsoft.Win32.RegistryKey] $RegistryRoot = [Microsoft.Win32.Registry]::LocalMachine,
         [string] $ServicesPath = $script:ServicesPath,
-        [scriptblock] $RestartService
+        [scriptblock] $RestartService,
+        # STUB (8005-workspace#68 test commit): accepted, not used yet; a restart runs the two in order.
+        [scriptblock] $RiotGet,
+        [scriptblock] $StopService,
+        [scriptblock] $StartService
     )
+    if (-not $RestartService -and $StopService -and $StartService) { $RestartService = { & $StopService; & $StartService }.GetNewClosure() }
     if ($ServiceName.Trim().TrimEnd('\') -ieq $script:MvpServiceName) { throw 'MVP_SERVICE_REFUSED: no actions are built for the MVP service. Nothing was changed.' }
     $registryPath = "$ServicesPath\$ServiceName"
     $configurationPath = "$InstallRoot\appsettings.Production.json"

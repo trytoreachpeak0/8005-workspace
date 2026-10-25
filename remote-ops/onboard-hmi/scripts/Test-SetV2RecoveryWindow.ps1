@@ -390,17 +390,24 @@ exit 0
     $r = Invoke-Captured { New-V2ServerActions -ServiceName '8005 AGV ControlServer' -InstallRoot 'C:\x' -DataRoot 'C:\y' -OnboardPort 1 }
     Write-Result -Ok ($r.Error -match 'MVP_SERVICE_REFUSED') -Name 'New-V2ServerActions refuses the MVP service name' -Detail $r.All
 
-    # The two defaults every case below replaces -- the restart (with a recorder) and the elevation check
-    # (with { $true }) -- are pinned by their text here, since no case runs them (review L1).
+    # The defaults every case below replaces -- the stop and the start (with recorders; 8005-workspace#68 split the restart
+    # so the journeys and RIoT are read again between them), the RIoT GET (with a fake) and the elevation check (with
+    # { $true }) -- are pinned by their text here, since no case runs them (review L1).
     $moduleAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'V2RecoveryWindow.psm1'), [ref]$null, [ref]$null)
     $factory = $moduleAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-V2ServerActions' }, $true)
-    $restartDefault = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$restart' }, $true))
-    Write-Result -Ok ($restartDefault.Count -eq 1 -and $restartDefault[0].Right.Extent.Text -ceq '$RestartService ?? { Restart-Service -Name $ServiceName -Force }.GetNewClosure()') `
-        -Name 'the default restart restarts the service named by -ServiceName, and nothing else' -Detail (@($restartDefault | ForEach-Object { $_.Extent.Text }) -join ' | ')
+    $controlDefault = { param([string] $Name) @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq $Name }, $true)) }
+    $stopDefault = @(& $controlDefault '$stop'); $startDefault = @(& $controlDefault '$start')
+    Write-Result -Ok ($stopDefault.Count -eq 1 -and $stopDefault[0].Right.Extent.Text -ceq '$StopService ?? { Stop-Service -Name $ServiceName -Force }.GetNewClosure()' -and
+        $startDefault.Count -eq 1 -and $startDefault[0].Right.Extent.Text -ceq '$StartService ?? { Start-Service -Name $ServiceName }.GetNewClosure()') `
+        -Name 'the default stop and start act on the service named by -ServiceName, and nothing else' -Detail (@($stopDefault + $startDefault | ForEach-Object { $_.Extent.Text }) -join ' | ')
     $serviceNameWrites = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ieq '$ServiceName' }, $true))
     Write-Result -Ok ($serviceNameWrites.Count -eq 0) -Name '... and New-V2ServerActions never reassigns -ServiceName' -Detail (@($serviceNameWrites | ForEach-Object { $_.Extent.Text }) -join ' | ')
     $restartCalls = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -match 'Restart-Service|Stop-Service|Start-Service' }, $true))
-    Write-Result -Ok ($restartCalls.Count -eq 1 -and $restartCalls[0].Extent.Text -ceq 'Restart-Service -Name $ServiceName -Force') -Name '... and it is the only service control call in New-V2ServerActions' -Detail (@($restartCalls | ForEach-Object { $_.Extent.Text }) -join ' | ')
+    Write-Result -Ok ($restartCalls.Count -eq 2 -and ((@($restartCalls | ForEach-Object { $_.Extent.Text }) -join ' | ') -ceq 'Stop-Service -Name $ServiceName -Force | Start-Service -Name $ServiceName')) `
+        -Name '... and they are the only service control calls in New-V2ServerActions' -Detail (@($restartCalls | ForEach-Object { $_.Extent.Text }) -join ' | ')
+    $riotDefault = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq 'Read-ParallelRiotGateFacts' }, $true))
+    Write-Result -Ok ($riotDefault.Count -eq 1 -and $riotDefault[0].Extent.Text.Contains('-Direction Close') -and $riotDefault[0].Extent.Text.Contains('-Get $RiotGet')) `
+        -Name "the journey state is read with control-server's Read-ParallelRiotGateFacts (8005-workspace#68), the GET left to it unless a test passes one" -Detail (@($riotDefault | ForEach-Object { $_.Extent.Text }) -join ' | ')
     $elevated = @($factory.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true) | ForEach-Object { $_.KeyValuePairs } |
             Where-Object { $_.Item1.Extent.Text -ceq 'IsElevated' })
     Write-Result -Ok ($elevated.Count -eq 1 -and $elevated[0].Item2.Extent.Text -ceq '{ ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }') `
@@ -543,7 +550,33 @@ exit 0
         (& $pick 'sqlitepclraw.lib.e_sqlite3' 'runtimes\win-x64\native\e_sqlite3.dll'))
     $haveSqlite = @($sqliteParts | Where-Object { $_ }).Count -eq 5
     if ($haveSqlite) { $sqliteParts | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $serverInstall } }
-    function New-Database([string[]] $Stages, [hashtable[]] $Journeys = @()) {
+    # 8005-workspace#68: the RIoT the server half reads, as the installed service would read it -- appsettings.json in the
+    # install root names the key's variable, the key is in the service Environment (a sentinel) -- and answered by a fake
+    # passed as -RiotGet. Every vehicle stands still (agv03's reading on its charger, 2026-10-11) unless its key is in
+    # $riotNow.Moving; the non-final listing carries $riotNow.Orders.
+    [IO.File]::WriteAllText((Join-Path $serverInstall 'appsettings.json'), '{"RIoT":{"baseUrl":"http://riot.selftest","callApiKeyEnvironmentVariable":"CONTROL_SERVER_RIOT_CALL_API_KEY"}}')
+    $riotNow = @{ Moving = [System.Collections.Generic.HashSet[string]]::new(); Orders = [System.Collections.Generic.List[object]]::new(); Calls = [System.Collections.Generic.List[string]]::new() }
+    $riotGet = {
+        param([string] $Path)
+        $riotNow.Calls.Add($Path)
+        if ($Path -match '^/api/task/v1/task/getVehicleInfo/(.+)$') {
+            $key = [uri]::UnescapeDataString($Matches[1])
+            $moving = $riotNow.Moving.Contains($key)
+            $body = [ordered]@{
+                vehicle = [ordered]@{ movementState = ($moving ? 'MT_RUNNING' : 'MT_FINISHED'); controlState = 'CONTROL_STATE_OK'; emergencyState = 'OK'; breakSwitchState = 'MOVABLE'
+                    locationState = 'LOCATION_STATE_RUNNING'; speed = ($moving ? 0.5 : 0); mode = 'MODE_AUTO' }
+                vehicleTaskInfo = [ordered]@{ key = $key; procState = ($moving ? 'EXECUTING' : 'IDLE'); processingOrder = $moving; enable = $true; integrationLevel = 'ON_LINE' }
+            }
+            return @{ Status = 200; Content = (ConvertTo-Json -InputObject $body -Depth 5 -Compress) }
+        }
+        if ($Path.StartsWith('/api/order/v1/orderRecord?')) {
+            $records = @($riotNow.Orders)
+            return @{ Status = 200; Content = (ConvertTo-Json -InputObject ([ordered]@{ code = '0'; message = 'ok'; result = [ordered]@{ current = 1; size = 100; total = $records.Count; records = $records } }) -Depth 6 -Compress) }
+        }
+        return @{ Status = 404; Content = '' }
+    }.GetNewClosure()
+
+    function New-Database([string[]] $Stages, [hashtable[]] $Journeys = @(), [string[]] $FaultedAgvIds = @()) {
         Remove-Item -LiteralPath $databasePath -Force -ErrorAction SilentlyContinue
         foreach ($assembly in 'SQLitePCLRaw.core.dll', 'SQLitePCLRaw.provider.e_sqlite3.dll', 'SQLitePCLRaw.batteries_v2.dll', 'Microsoft.Data.Sqlite.dll') {
             Add-Type -LiteralPath (Join-Path $serverInstall $assembly) -ErrorAction SilentlyContinue
@@ -556,10 +589,12 @@ exit 0
         $rows = @($Stages | ForEach-Object { $i++; "INSERT INTO JourneyRuntimes VALUES ('j-$i', '$_', 'car', 'K', 'p$i', NULL, '2026-10-12 09:00:00+08:00', NULL);" }) -join "`n"
         $rows += "`n" + (@($Journeys | ForEach-Object {
                     "INSERT INTO JourneyRuntimes VALUES ('$($_.Id)', '$($_.Stage)', '$($_.AgvId)', '$($_.VehicleKey)', 'p-$($_.Id)', NULL, '2026-10-19 14:37:00+08:00', $($_.Block ? "'$($_.Block)'" : 'NULL'));" }) -join "`n")
+        $rows += "`n" + (@($FaultedAgvIds | ForEach-Object { "INSERT INTO VehicleFaultStates VALUES ('$_', 'Blocked', 'EMERGENCY_STOP_LATCHED');" }) -join "`n")
         $command.CommandText = @"
 CREATE TABLE JourneyRuntimes (JourneyId TEXT PRIMARY KEY, Stage TEXT, AgvId TEXT, VehicleKey TEXT, PickupUpperId TEXT, GateUpperId TEXT, CreatedAt TEXT, BlockReasonCode TEXT);
 CREATE TABLE OrderIntents (MovementLegId TEXT PRIMARY KEY, UpperId TEXT, VehicleKey TEXT, Status TEXT, OrderId TEXT, CreateAttemptCount INTEGER, CreateAttemptId TEXT, DispatchAuditVersion INTEGER, ExperimentalCreateAuthorizationId TEXT, CreatedAt TEXT);
 CREATE TABLE RiotDispatchAuditEvents (AuditEventId TEXT PRIMARY KEY, MovementLegId TEXT, Phase TEXT, Outcome TEXT, AttemptId TEXT, ReturnedOrderId TEXT, ResultPresent INTEGER);
+CREATE TABLE VehicleFaultStates (AgvId TEXT PRIMARY KEY, Level TEXT, EvidenceCode TEXT);
 $rows
 "@
         $null = $command.ExecuteNonQuery(); $command.Dispose(); $writer.Dispose()
@@ -570,10 +605,12 @@ $rows
         CONTROL_SERVER_ONBOARD_CREDENTIAL = "sentinel-onboard-$([guid]::NewGuid().ToString('N'))"
         CONTROL_SERVER_MES_INGEST_SHARED_SECRET = "sentinel-mes-$([guid]::NewGuid().ToString('N'))"
         CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL = "sentinel-fault-$([guid]::NewGuid().ToString('N'))"
+        # 8005-workspace#68: the key RIoT is read with, from the service Environment as the product installer writes it.
+        CONTROL_SERVER_RIOT_CALL_API_KEY = "sentinel-riot-$([guid]::NewGuid().ToString('N'))"
     }
-    $baseEnvironment = [string[]] @('DOTNET_ENVIRONMENT', 'CONTROL_SERVER_ONBOARD_CREDENTIAL', 'CONTROL_SERVER_MES_INGEST_SHARED_SECRET', 'CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL' |
-            ForEach-Object { "$_=$($sentinels[$_])" })
-    $withEntry = [string[]] @($baseEnvironment[0..1] + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof" + $baseEnvironment[2..3])
+    $baseEnvironment = [string[]] @('DOTNET_ENVIRONMENT', 'CONTROL_SERVER_ONBOARD_CREDENTIAL', 'CONTROL_SERVER_MES_INGEST_SHARED_SECRET', 'CONTROL_SERVER_V2_FAULT_RECOVERY_CREDENTIAL',
+            'CONTROL_SERVER_RIOT_CALL_API_KEY' | ForEach-Object { "$_=$($sentinels[$_])" })
+    $withEntry = [string[]] @($baseEnvironment[0..1] + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof" + $baseEnvironment[2..($baseEnvironment.Count - 1)])
     $servicesPath = "$testKeyPath\Services"
     $freePort = { $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $l.Start(); $p = $l.LocalEndpoint.Port; $l.Stop(); $p }
 
@@ -581,11 +618,17 @@ $rows
         param([string] $Service = $stoppedService, [string[]] $Environment = $baseEnvironment, [int] $Port = (& $freePort))
         $hkcu.CreateSubKey("$servicesPath\$Service").Close()
         Write-V2RegistryMultiString -Root $hkcu -Path "$servicesPath\$Service" -Value $Environment
-        $rig = @{ Events = [System.Collections.Generic.List[string]]::new(); Service = $Service; Path = "$servicesPath\$Service" }
+        $rig = @{ Events = [System.Collections.Generic.List[string]]::new(); Service = $Service; Path = "$servicesPath\$Service"; OnStop = $null }
+        # The stop and the start recorded with the entry as the registry holds it then; -OnStop (set on the rig) is what
+        # happens while the service is down -- a vehicle somebody drives off in RIoT, say (8005-workspace#68).
         $rig.Actions = New-V2ServerActions -ServiceName $Service -InstallRoot $serverInstall -DataRoot $serverData -OnboardPort $Port `
-            -RegistryRoot $hkcu -ServicesPath $servicesPath -RestartService {
+            -RegistryRoot $hkcu -ServicesPath $servicesPath -RiotGet $riotGet -StopService {
             $entry = @(Read-V2RegistryMultiString -Root $hkcu -Path $rig.Path | Where-Object { $_ -like 'CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=*' }).Count
-            $rig.Events.Add("restart with entry $entry")
+            $rig.Events.Add("stop with entry $entry")
+            if ($rig.OnStop) { & $rig.OnStop }
+        }.GetNewClosure() -StartService {
+            $entry = @(Read-V2RegistryMultiString -Root $hkcu -Path $rig.Path | Where-Object { $_ -like 'CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=*' }).Count
+            $rig.Events.Add("start with entry $entry")
         }.GetNewClosure()
         $realWrite = $rig.Actions.WriteEnvironment
         $rig.Actions.WriteEnvironment = { param([string[]] $v) $rig.Events.Add('write'); & $realWrite $v }.GetNewClosure()
@@ -660,14 +703,70 @@ $rows
     $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
     Write-Result -Ok ($null -eq $r.Error -and $r.Text -match 'NO_CHANGE' -and $rig.Events.Count -eq 0) -Name 'server set when the entry already holds the proof: no write, no restart' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
 
+    # ---- 8005-workspace#68: Get-V2RecoveryJourneyRefusal by vehicle, pure. -VehicleMotion is control-server's
+    # Get-ParallelGateVehicleMotion answer (one entry per vehicle, Reasons empty when it stands still), $null when the staged
+    # control-server predates #68 and cannot tell -- then every journey not Completed refuses, as before.
+    $motion = { param([string] $Key, [string] $AgvId, [string[]] $Reasons = @()) [ordered]@{ VehicleKey = $Key; AgvId = $AgvId; Journeys = @(); Reasons = [string[]] $Reasons } }
+    $row = { param([string] $Id, [string] $Stage, [string] $AgvId, [string] $Key) [ordered]@{ JourneyId = $Id; Stage = $Stage; AgvId = $AgvId; VehicleKey = $Key } }
+    $charging = & $row 'journey:charge-1|g1' 'AwaitingPickupArrival' 'car1' 'K1'
+    $stuckRow = & $row 'j-target' 'Blocked' 'car3' 'K3'
+    $named = @{ journeyId = 'j-target'; agvId = 'car3'; vehicleKey = 'K3' }
+    $readStuck = { param($id) @{ Found = $true; JourneyId = 'j-target'; Stage = 'Blocked'; BlockReasonCode = 'LOAD_RESULT_REQUIRES_RECOVERY'; AgvId = 'car3'; VehicleKey = 'K3' } }
+    $readReleased = { param($id) @{ Found = $true; JourneyId = 'j-target'; Stage = 'AwaitingLoadResult'; BlockReasonCode = $null; AgvId = 'car3'; VehicleKey = 'K3' } }
+    $readNever = { param($id) throw 'closing must not read the named row' }
+    $still = @((& $motion 'K1' 'car1'), (& $motion 'K3' 'car3'))
+    $k1Moving = @((& $motion 'K1' 'car1' @('RIOT_MOTION_ACTIVE (movementState MT_RUNNING, speed 0.5)')), (& $motion 'K3' 'car3'))
+    $k3Moving = @((& $motion 'K1' 'car1'), (& $motion 'K3' 'car3' @('RIOT_NONFINAL_ORDER_PRESENT (o-9 / u-9 orderState 3)')))
+    $refusalCases = @(
+        @{ Name = 'opening, a charging journey on a vehicle standing still'; Target = 'set'; Open = @($charging); Motion = $still; Expect = $null }
+        @{ Name = 'opening, a charging journey on a vehicle RIoT shows moving'; Target = 'set'; Open = @($charging); Motion = $k1Moving; Expect = 'JOURNEYS_IN_PROGRESS'; Has = @('car1', 'RIOT_MOTION_ACTIVE') }
+        @{ Name = 'opening, the vehicles not judged (a control-server from before #68)'; Target = 'set'; Open = @($charging); Motion = $null; Expect = 'JOURNEYS_IN_PROGRESS'; Has = @('not judged') }
+        @{ Name = 'opening, no answer for the vehicle'; Target = 'set'; Open = @($charging); Motion = @((& $motion 'K3' 'car3')); Expect = 'JOURNEYS_IN_PROGRESS'; Has = @('K1') }
+        @{ Name = 'opening, named stuck journey and a charging vehicle standing still'; Target = 'set'; Open = @($stuckRow, $charging); Rj = $named; Read = $readStuck; Motion = $still; Expect = $null }
+        @{ Name = 'opening, named stuck journey and a charging vehicle moving'; Target = 'set'; Open = @($stuckRow, $charging); Rj = $named; Read = $readStuck; Motion = $k1Moving; Expect = 'RECOVERY_JOURNEY_NOT_ALONE'; Has = @('car1'); HasNot = @('j-target (') }
+        @{ Name = 'opening, named stuck journey released back to the engine'; Target = 'set'; Open = @($stuckRow); Rj = $named; Read = $readReleased; Motion = $still; Expect = 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' }
+        @{ Name = 'opening, named stuck journey not among the open ones, the rest standing still'; Target = 'set'; Open = @($charging); Rj = $named; Read = $readNever; Motion = $still; Expect = $null }
+        @{ Name = 'closing, the named journey gone on to its next pickup stop, its vehicle standing still (field instance 1)'; Target = 'remove'; Open = @((& $row 'j-target' 'AwaitingPickupArrival' 'car3' 'K3')); Rj = $named; Read = $readNever; Motion = $still; Expect = $null }
+        @{ Name = 'closing, the named journey released back to the engine, standing still'; Target = 'remove'; Open = @($stuckRow); Rj = $named; Read = $readNever; Motion = $still; Expect = $null }
+        @{ Name = "closing, the named journey's vehicle with an unfinished RIoT order"; Target = 'remove'; Open = @($stuckRow); Rj = $named; Read = $readNever; Motion = $k3Moving; Expect = 'JOURNEYS_IN_PROGRESS'; Has = @('car3', 'RIOT_NONFINAL_ORDER_PRESENT') }
+        @{ Name = 'closing, another vehicle moving: only it is named'; Target = 'remove'; Open = @($stuckRow, $charging); Rj = $named; Read = $readNever; Motion = $k1Moving; Expect = 'JOURNEYS_IN_PROGRESS'; Has = @('car1'); HasNot = @('car3') }
+        @{ Name = 'closing, the vehicles not judged'; Target = 'remove'; Open = @($stuckRow); Rj = $named; Read = $readNever; Motion = $null; Expect = 'JOURNEYS_IN_PROGRESS'; Has = @('not judged') }
+        @{ Name = 'closing without a named journey, a charging vehicle standing still'; Target = 'remove'; Open = @($charging); Motion = $still; Expect = $null }
+        @{ Name = 'nothing open'; Target = 'set'; Open = @(); Motion = $null; Expect = $null })
+    foreach ($case in $refusalCases) {
+        $r = Invoke-Captured { Get-V2RecoveryJourneyRefusal -Open $case.Open -RecoveryJourney $case['Rj'] -ReadRow ($case['Read'] ?? $readNever) -Target $case.Target -VehicleMotion $case.Motion }
+        $got = $r.Error ? "THREW: $($r.Error)" : ($r.Text ? $r.Text : $null)
+        $has = @($case['Has'] | Where-Object { $_ } | Where-Object { $null -eq $got -or -not $got.Contains($_) })
+        $hasNot = @($case['HasNot'] | Where-Object { $_ } | Where-Object { $null -ne $got -and $got.Contains($_) })
+        Write-Result -Ok ($has.Count -eq 0 -and $hasNot.Count -eq 0 -and ($null -eq $case.Expect ? ($null -eq $got) : ($null -ne $got -and $got.StartsWith("$($case.Expect):") -and $got.EndsWith('Nothing was changed.')))) `
+            -Name "journey refusal by vehicle (8005-workspace#68): $($case.Name) -> $($case.Expect ?? 'allowed')" -Detail "got: $got missing: $($has -join ', ') unwanted: $($hasNot -join ', ')"
+    }
+
     Write-Result -Ok $haveSqlite -Name 'Microsoft.Data.Sqlite and SQLitePCLRaw are in the NuGet cache (the journey reader needs them)' -Detail "looked under $nuget"
     if ($haveSqlite) {
         Set-Config
+        $wantAfter = { param([string] $Mode, [string] $Proof = $testProof) ($Mode -eq 'set') ? (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$Proof") -join "`n") : ($baseEnvironment -join "`n") }
         foreach ($req in @(@{ mode = 'set'; proof = $testProof }, @{ mode = 'remove' })) {
             $env0 = ($req.mode -eq 'set') ? $baseEnvironment : $withEntry
             New-Database @('Completed', 'Dispatched')
-            Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEYS_IN_PROGRESS' 'a journey not Completed (a real SQLite store)'
-            Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ allowConnectedVehicles = $true }) 'JOURNEYS_IN_PROGRESS' 'a journey not Completed, with allowConnectedVehicles'
+            # 8005-workspace#68: a journey not Completed holds the restart only when its vehicle may be under way.
+            $riotNow.Moving.Clear(); $null = $riotNow.Moving.Add('K')
+            Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEYS_IN_PROGRESS' 'a journey not Completed on a vehicle RIoT shows moving (a real SQLite store)'
+            Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ allowConnectedVehicles = $true }) 'JOURNEYS_IN_PROGRESS' 'a journey not Completed on a vehicle RIoT shows moving, with allowConnectedVehicles'
+            $riotNow.Moving.Clear()
+            $riotNow.Orders.Add([ordered]@{ id = 7; orderId = 'o-7'; upperId = 'u-7'; orderState = 3; appointVehicleKey = 'K'; executeVehicleKey = 'K' })
+            Assert-Refused (New-ServerRig -Environment $env0) $req 'RIOT_NONFINAL_ORDER_PRESENT' 'a journey not Completed on a vehicle standing with an unfinished RIoT order'
+            $riotNow.Orders.Clear()
+            New-Database @('Completed', 'Dispatched') -FaultedAgvIds @('car')
+            Assert-Refused (New-ServerRig -Environment $env0) $req 'VEHICLE_FAULT' 'a journey not Completed on a vehicle standing still but holding a fault'
+            New-Database @('Completed', 'Dispatched')
+            $riotNow.Calls.Clear()
+            $rig = New-ServerRig -Environment $env0
+            $r = Invoke-Server $rig $req
+            Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (& $wantAfter $req.mode) -and ($rig.Events -join ';') -ceq 'write' -and
+                $riotNow.Calls -ccontains '/api/task/v1/task/getVehicleInfo/K') `
+                -Name "server $($req.mode) (8005-workspace#68): a journey not Completed on a vehicle RIoT shows standing still (one on its charger, say) -- passes, written" -Detail ($r.All + ' events: ' + ($rig.Events -join ';') + ' riot: ' + ($riotNow.Calls -join ' | '))
+            Write-Result -Ok (-not (Test-ServerLeak $r)) -Name "... and server $($req.mode) prints neither the proof nor the RIoT key nor any other entry value" -Detail ''
         }
         # ---- a named recovery journey (8005-workspace#58), against a real SQLite store ----
         $target = @{ journeyId = 'j-target'; agvId = 'car3'; vehicleKey = 'K3' }
@@ -675,34 +774,55 @@ $rows
         $withTarget = { param([hashtable] $req) $req + @{ recoveryJourney = $target } }
         foreach ($req in @(@{ mode = 'set'; proof = $testProof }, @{ mode = 'remove' })) {
             $env0 = ($req.mode -eq 'set') ? $baseEnvironment : $withEntry
-            $want = ($req.mode -eq 'set') ? (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof") -join "`n") : ($baseEnvironment -join "`n")
+            $riotNow.Moving.Clear()
             Set-Config
             New-Database @('Completed', 'Completed') -Journeys @($stuck)
             $rig = New-ServerRig -Environment $env0
             $r = Invoke-Server $rig (& $withTarget $req)
-            Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq $want -and ($rig.Events -join ';') -ceq 'write' -and $r.Text -match 'RECOVERY_JOURNEY=j-target awaits recovery on car3') `
+            $line = ($req.mode -eq 'set') ? 'RECOVERY_JOURNEY=j-target awaits recovery on car3' : 'RECOVERY_JOURNEY=j-target named'
+            Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (& $wantAfter $req.mode) -and ($rig.Events -join ';') -ceq 'write' -and $r.Text.Contains($line)) `
                 -Name "server $($req.mode) with recoveryJourney: the target Blocked on LOAD_RESULT_REQUIRES_RECOVERY, the rest Completed -- passes, written" -Detail ($r.All + ' events: ' + ($rig.Events -join ';'))
             Write-Result -Ok (-not (Test-ServerLeak $r)) -Name "... and server $($req.mode) prints no proof and no other entry value" -Detail ''
             $rig = New-ServerRig -Environment $env0
             $r = Invoke-Server $rig @{ mode = 'check'; target = $req.mode; recoveryJourney = $target; proof = $testProof }
             Write-Result -Ok ($r.Text -match 'CHECK_PASSED' -and $rig.Events.Count -eq 0) -Name "server check ($($req.mode)) with recoveryJourney: passes, writes nothing" -Detail $r.All
 
-            Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEYS_IN_PROGRESS' 'the same stuck journey without recoveryJourney (unchanged)'
+            # The same stuck journey not named: before 8005-workspace#68 it refused like any journey in progress; now its
+            # vehicle is asked, and only a vehicle that may be under way refuses.
+            $null = $riotNow.Moving.Add('K3')
+            Assert-Refused (New-ServerRig -Environment $env0) $req 'JOURNEYS_IN_PROGRESS' 'the same stuck journey without recoveryJourney, its vehicle moving'
+            $riotNow.Moving.Clear()
+            $r = Invoke-Server (New-ServerRig -Environment $env0) @{ mode = 'check'; target = $req.mode; proof = $testProof }
+            Write-Result -Ok ($r.Text -match 'CHECK_PASSED') -Name "server check ($($req.mode)) without recoveryJourney (8005-workspace#68): the stuck journey's vehicle standing still passes" -Detail $r.All
+            # Another journey not Completed: it refuses through its vehicle, and only then.
             New-Database @('Completed', 'Dispatched') -Journeys @($stuck)
-            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_NOT_ALONE' 'recoveryJourney with another journey not Completed'
+            $null = $riotNow.Moving.Add('K')
+            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) ($req.mode -eq 'set' ? 'RECOVERY_JOURNEY_NOT_ALONE' : 'JOURNEYS_IN_PROGRESS') 'recoveryJourney with another journey not Completed on a vehicle RIoT shows moving'
+            $riotNow.Moving.Clear()
+            $r = Invoke-Server (New-ServerRig -Environment $env0) @{ mode = 'check'; target = $req.mode; recoveryJourney = $target; proof = $testProof }
+            Write-Result -Ok ($r.Text -match 'CHECK_PASSED') -Name "server check ($($req.mode)) with recoveryJourney (8005-workspace#68): another journey not Completed on a vehicle standing still passes" -Detail $r.All
             New-Database @('Completed') -Journeys @($stuck)
-            Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ recoveryJourney = @{ journeyId = 'j-other'; agvId = 'car3'; vehicleKey = 'K3' } }) 'RECOVERY_JOURNEY_NOT_ALONE' 'recoveryJourney naming another journey than the stuck one'
-            $j = $stuck.Clone(); $j.AgvId = 'car2'; $j.VehicleKey = 'K2'
-            New-Database @('Completed') -Journeys @($j)
-            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_VEHICLE_MISMATCH' 'recoveryJourney whose journey is on another vehicle'
-            $j = $stuck.Clone(); $j.VehicleKey = 'K2'
-            New-Database @('Completed') -Journeys @($j)
-            Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_VEHICLE_MISMATCH' 'recoveryJourney whose journey has the right agvId but another vehicleKey'
-            foreach ($state in @(@{ Stage = 'Blocked'; Block = 'ONBOARD_SESSION_LOST' }, @{ Stage = 'Blocked'; Block = 'LoadCompensationResult_NOT_RECONCILED_ON_ENDED_DEMAND' },
-                    @{ Stage = 'AwaitingLoadResult'; Block = 'LOAD_RESULT_REQUIRES_RECOVERY' }, @{ Stage = 'Blocked'; Block = $null })) {
-                $j = $stuck.Clone(); $j.Stage = $state.Stage; $j.Block = $state.Block
-                New-Database @('Completed') -Journeys @($j)
-                Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' "recoveryJourney on a journey $($state.Stage) / $($state.Block ?? 'no reason')"
+            $null = $riotNow.Moving.Add('K3')
+            Assert-Refused (New-ServerRig -Environment $env0) ($req + @{ recoveryJourney = @{ journeyId = 'j-other'; agvId = 'car3'; vehicleKey = 'K3' } }) ($req.mode -eq 'set' ? 'RECOVERY_JOURNEY_NOT_ALONE' : 'JOURNEYS_IN_PROGRESS') 'recoveryJourney naming another journey than the stuck one, whose vehicle moves'
+            $riotNow.Moving.Clear()
+            # Opening checks the named journey; closing (8005-workspace#68, the field's instance 1 of 2026-10-21) does not.
+            $named = @(
+                @{ Label = 'on another vehicle'; Journey = $(& { $j = $stuck.Clone(); $j.AgvId = 'car2'; $j.VehicleKey = 'K2'; $j }); Expect = 'RECOVERY_JOURNEY_VEHICLE_MISMATCH' }
+                @{ Label = 'with the right agvId but another vehicleKey'; Journey = $(& { $j = $stuck.Clone(); $j.VehicleKey = 'K2'; $j }); Expect = 'RECOVERY_JOURNEY_VEHICLE_MISMATCH' }
+                @{ Label = 'Blocked / ONBOARD_SESSION_LOST'; Journey = $(& { $j = $stuck.Clone(); $j.Block = 'ONBOARD_SESSION_LOST'; $j }); Expect = 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' }
+                @{ Label = 'Blocked / LoadCompensationResult_NOT_RECONCILED_ON_ENDED_DEMAND'; Journey = $(& { $j = $stuck.Clone(); $j.Block = 'LoadCompensationResult_NOT_RECONCILED_ON_ENDED_DEMAND'; $j }); Expect = 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' }
+                @{ Label = 'AwaitingLoadResult / LOAD_RESULT_REQUIRES_RECOVERY'; Journey = $(& { $j = $stuck.Clone(); $j.Stage = 'AwaitingLoadResult'; $j }); Expect = 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' }
+                @{ Label = 'Blocked / no reason'; Journey = $(& { $j = $stuck.Clone(); $j.Block = $null; $j }); Expect = 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' })
+            foreach ($case in $named) {
+                New-Database @('Completed') -Journeys @($case.Journey)
+                if ($req.mode -eq 'set') {
+                    Assert-Refused (New-ServerRig -Environment $env0) (& $withTarget $req) $case.Expect "recoveryJourney $($case.Label)"
+                } else {
+                    $rig = New-ServerRig -Environment $env0
+                    $r = Invoke-Server $rig (& $withTarget $req)
+                    Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (& $wantAfter 'remove') -and ($rig.Events -join ';') -ceq 'write') `
+                        -Name "server remove with recoveryJourney $($case.Label) (8005-workspace#68): the window is closed regardless, written" -Detail ($r.All + ' events: ' + ($rig.Events -join ';'))
+                }
             }
             # The other checks still hold with a named journey.
             New-Database @('Completed') -Journeys @($stuck)
@@ -732,13 +852,34 @@ $rows
         $rig = New-ServerRig -Environment $baseEnvironment
         $rig.Actions.JourneyRow = { param($id) @{ Error = 'disk gone (injected)' } }
         New-Database @('Completed') -Journeys @($stuck)
-        Assert-Refused $rig (& $withTarget @{ mode = 'set'; proof = $testProof }) 'JOURNEY_STATE_UNREADABLE' 'recoveryJourney whose row cannot be read'
+        Assert-Refused $rig (& $withTarget @{ mode = 'set'; proof = $testProof }) 'JOURNEY_STATE_UNREADABLE' 'recoveryJourney whose row cannot be read (opening)'
+        $rig = New-ServerRig -Environment $withEntry
+        $rig.Actions.JourneyRow = { param($id) throw 'closing must not read the named row (injected)' }
+        $r = Invoke-Server $rig (& $withTarget @{ mode = 'remove' })
+        Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq ($baseEnvironment -join "`n")) -Name 'server remove with recoveryJourney (8005-workspace#68): the named row is not read at all, so one that cannot be read does not hold the close' -Detail $r.All
 
-        # After COMPENSATE_LOAD_ALL_EMPTY on a multi-demand journey the engine takes it back (AwaitingLoadResult, then the
-        # departure): not awaiting recovery, so a -Revert naming it is refused like any journey in progress.
-        $j = $stuck.Clone(); $j.Stage = 'AwaitingLoadResult'; $j.Block = $null
-        New-Database @('Completed') -Journeys @($j)
-        Assert-Refused (New-ServerRig -Environment $withEntry) @{ mode = 'remove'; recoveryJourney = $target } 'RECOVERY_JOURNEY_NOT_AWAITING_RECOVERY' 'recoveryJourney released back to the engine after the recovery (close: -VehicleOnly)'
+        # ---- 8005-workspace#68: the field's instance 1 of 2026-10-21, closed clean in every state the named journey can be in ----
+        # The window was opened for ed84063a|g101 (Blocked on the load result); at 12:46 the screen handed the fault cargo over,
+        # the demand ended Cancelled, the session went back to Ready, and the journey went on to two more pickup stops
+        # (AwaitingPickupArrival) with the gate closed. The -Revert -RecoveryJourneyId was refused then and the server entry
+        # stayed behind. Each state below: the server entry goes, and the vehicle half takes the switch and the variable off.
+        $instance1 = @(
+            @{ Label = 'still awaiting recovery'; Journeys = @($stuck); Stages = @('Completed') }
+            @{ Label = 'Completed'; Journeys = @($(& { $j = $stuck.Clone(); $j.Stage = 'Completed'; $j.Block = $null; $j })); Stages = @() }
+            @{ Label = 'demand Cancelled by the fault cargo handoff, the journey on to its next pickup stops'; Journeys = @($(& { $j = $stuck.Clone(); $j.Stage = 'AwaitingPickupArrival'; $j.Block = $null; $j })); Stages = @() })
+        foreach ($case in $instance1) {
+            New-Database $case.Stages -Journeys $case.Journeys
+            $rig = New-ServerRig -Environment $withEntry
+            $r = Invoke-Server $rig (& $withTarget @{ mode = 'remove' })
+            Set-Content -LiteralPath $settingsPath -Value $pristine -Encoding utf8NoBOM
+            $vehicle = New-VehicleRig
+            $null = Invoke-V2RecoveryWindowVehicle -Request (& $request 'Open' $testProof) -Actions $vehicle.Actions
+            $closed = Invoke-Captured { Invoke-V2RecoveryWindowVehicle -Request (& $request 'Close' $null) -Actions $vehicle.Actions }
+            $entryLeft = @(Read-Rig $rig | Where-Object { $_ -like 'CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=*' }).Count
+            Write-Result -Ok ($null -eq $r.Error -and $entryLeft -eq 0 -and $null -eq $closed.Error -and (& $readSwitch) -eq $false -and $null -eq (& $variableNow)) `
+                -Name "close with -RecoveryJourneyId, the named journey $($case.Label) (8005-workspace#68, field instance 1): the server entry, the switch and the vehicle variable are all gone" `
+                -Detail ($r.All + ' | vehicle: ' + $closed.All)
+        }
         New-Database @('Completed') -Journeys @($stuck)
         $row = Read-V2JourneyRuntimeRow -DatabasePath $databasePath -AssemblyDirectory $serverInstall -JourneyId "j-target' OR '1'='1"
         Write-Result -Ok ($row['Found'] -eq $false) -Name 'the journey row reader takes the id as a parameter, not as SQL' -Detail ($row | ConvertTo-Json -Compress)
@@ -753,7 +894,7 @@ $rows
 
         $rig = New-ServerRig -Environment $baseEnvironment
         $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof }
-        Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$testProof") -join "`n") -and ($rig.Events -join ';') -ceq 'write' -and $r.Text -match 'fingerprint unchanged') `
+        Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (& $wantAfter 'set') -and ($rig.Events -join ';') -ceq 'write' -and $r.Text -match 'fingerprint unchanged') `
             -Name 'server set on a stopped service: others kept in order, entry appended, not restarted, MVP fingerprint compared' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
         Write-Result -Ok (-not (Test-ServerLeak $r)) -Name 'server set prints no proof and no other entry value' -Detail ''
         $rig = New-ServerRig -Environment $withEntry
@@ -766,21 +907,39 @@ $rows
         if ($runningService) {
             $rig = New-ServerRig -Service $runningService -Environment $withEntry
             $r = Invoke-Server $rig @{ mode = 'set'; proof = $otherProof }
-            Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (($baseEnvironment + "CONTROL_SERVER_RECOVERY_AUTHENTICATION_PROOF=$otherProof") -join "`n") -and ($rig.Events -join ';') -ceq 'write;restart with entry 1') `
-                -Name "server set on a running service ($runningService): replaced, others kept, restarted after the write" -Detail ($r.All + ' ' + ($rig.Events -join ';'))
+            Write-Result -Ok ($null -eq $r.Error -and ((Read-Rig $rig) -join "`n") -ceq (& $wantAfter 'set' $otherProof) -and ($rig.Events -join ';') -ceq 'write;stop with entry 1;start with entry 1') `
+                -Name "server set on a running service ($runningService): replaced, others kept, stopped and started after the write" -Detail ($r.All + ' ' + ($rig.Events -join ';'))
             Write-Result -Ok (-not (Test-ServerLeak $r)) -Name '... and prints neither value' -Detail ''
             $rig = New-ServerRig -Service $runningService -Environment $withEntry
             $r = Invoke-Server $rig @{ mode = 'remove' }
-            Write-Result -Ok ($null -eq $r.Error -and ($rig.Events -join ';') -ceq 'write;restart with entry 0') -Name 'server remove on a running service: restarted after the entry is gone' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
+            Write-Result -Ok ($null -eq $r.Error -and ($rig.Events -join ';') -ceq 'write;stop with entry 0;start with entry 0') -Name 'server remove on a running service: stopped and started after the entry is gone' -Detail ($r.All + ' ' + ($rig.Events -join ';'))
             $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $listener.Start()
             $busyPort = $listener.LocalEndpoint.Port
             $client = [Net.Sockets.TcpClient]::new(); $client.Connect([Net.IPAddress]::Loopback, $busyPort); $accepted = $listener.AcceptTcpClient()
             try {
                 $rig = New-ServerRig -Service $runningService -Environment $baseEnvironment -Port $busyPort
                 $r = Invoke-Server $rig @{ mode = 'set'; proof = $testProof; allowConnectedVehicles = $true }
-                Write-Result -Ok ($null -eq $r.Error -and $r.Text -match 'WARNING: CONNECTED_VEHICLES' -and ($rig.Events -join ';') -ceq 'write;restart with entry 1') `
-                    -Name 'server set with allowConnectedVehicles and a real connection: a warning, then write and restart' -Detail $r.All
+                Write-Result -Ok ($null -eq $r.Error -and $r.Text -match 'WARNING: CONNECTED_VEHICLES' -and ($rig.Events -join ';') -ceq 'write;stop with entry 1;start with entry 1') `
+                    -Name 'server set with allowConnectedVehicles and a real connection: a warning, then write, stop and start' -Detail $r.All
             } finally { $accepted.Dispose(); $client.Dispose(); $listener.Stop() }
+
+            # ---- 8005-workspace#68: read again after the stop. A vehicle driven off by hand in RIoT between the first read
+            # and the restart is caught there: the Environment is put back as it was, the service started again, refused.
+            foreach ($req in @(@{ mode = 'set'; proof = $testProof }, @{ mode = 'remove' })) {
+                $env0 = ($req.mode -eq 'set') ? $baseEnvironment : $withEntry
+                New-Database @('Completed', 'Dispatched')
+                $riotNow.Moving.Clear()
+                $rig = New-ServerRig -Service $runningService -Environment $env0
+                $rig.OnStop = { $null = $riotNow.Moving.Add('K') }.GetNewClosure()
+                $r = Invoke-Server $rig $req
+                $entries = ($req.mode -eq 'set') ? 'write;stop with entry 1;write;start with entry 0' : 'write;stop with entry 0;write;start with entry 1'
+                Write-Result -Ok ($r.Error -match '^AFTER_STOP JOURNEYS_IN_PROGRESS:' -and $r.Error.Contains('RIOT_MOTION_ACTIVE') -and ((Read-Rig $rig) -join "`n") -ceq ($env0 -join "`n") -and
+                    ($rig.Events -join ';') -ceq $entries -and -not (Test-ServerLeak $r)) `
+                    -Name "server $($req.mode) on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again" `
+                    -Detail ($r.All + ' events: ' + ($rig.Events -join ';'))
+                $riotNow.Moving.Clear()
+            }
+            New-Database @('Completed')
         }
 
         # The MVP fingerprint is compared: a change between before and after fails the run.

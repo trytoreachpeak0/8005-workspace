@@ -1,0 +1,44 @@
+# 8005-workspace#68 test commit, run on signature-only stubs; 2026-10-25 10:17 +0800
+# pwsh -File remote-ops/onboard-hmi/scripts/Test-SetV2RecoveryWindow.ps1 -ControlServerRepository <control-server ws68 worktree at f57c8aefe>
+# The 06-deploy failure is main's own (since d3cf0c2/4d6fdb8, control-server#797), not this ticket's.
+  FAIL  the default stop and start act on the service named by -ServiceName, and nothing else
+  FAIL  ... and they are the only service control calls in New-V2ServerActions
+  FAIL  the journey state is read with control-server's Read-ParallelRiotGateFacts (8005-workspace#68), the GET left to it unless a test passes one
+  FAIL  journey refusal by vehicle (8005-workspace#68): opening, a charging journey on a vehicle standing still -> allowed
+  FAIL  journey refusal by vehicle (8005-workspace#68): opening, a charging journey on a vehicle RIoT shows moving -> JOURNEYS_IN_PROGRESS
+  FAIL  journey refusal by vehicle (8005-workspace#68): opening, the vehicles not judged (a control-server from before #68) -> JOURNEYS_IN_PROGRESS
+  FAIL  journey refusal by vehicle (8005-workspace#68): opening, no answer for the vehicle -> JOURNEYS_IN_PROGRESS
+  FAIL  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey and a charging vehicle standing still -> allowed
+  FAIL  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey and a charging vehicle moving -> RECOVERY_JOURNEY_NOT_ALONE
+  FAIL  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey not among the open ones, the rest standing still -> allowed
+  FAIL  journey refusal by vehicle (8005-workspace#68): closing, the named journey gone on to its next pickup stop, its vehicle standing still (field instance 1) -> allowed
+  FAIL  journey refusal by vehicle (8005-workspace#68): closing, the named journey released back to the engine, standing still -> allowed
+  FAIL  journey refusal by vehicle (8005-workspace#68): closing, the named journey's vehicle with an unfinished RIoT order -> JOURNEYS_IN_PROGRESS
+  FAIL  journey refusal by vehicle (8005-workspace#68): closing, another vehicle moving: only it is named -> JOURNEYS_IN_PROGRESS
+  FAIL  journey refusal by vehicle (8005-workspace#68): closing, the vehicles not judged -> JOURNEYS_IN_PROGRESS
+  FAIL  journey refusal by vehicle (8005-workspace#68): closing without a named journey, a charging vehicle standing still -> allowed
+  FAIL  server set: a journey not Completed on a vehicle standing with an unfinished RIoT order is refused, no write, no restart
+  FAIL  server set: a journey not Completed on a vehicle standing still but holding a fault is refused, no write, no restart
+  FAIL  server set (8005-workspace#68): a journey not Completed on a vehicle RIoT shows standing still (one on its charger, say) -- passes, written
+  FAIL  server remove: a journey not Completed on a vehicle standing with an unfinished RIoT order is refused, no write, no restart
+  FAIL  server remove: a journey not Completed on a vehicle standing still but holding a fault is refused, no write, no restart
+  FAIL  server remove (8005-workspace#68): a journey not Completed on a vehicle RIoT shows standing still (one on its charger, say) -- passes, written
+  FAIL  server check (set) without recoveryJourney (8005-workspace#68): the stuck journey's vehicle standing still passes
+  FAIL  server check (set) with recoveryJourney (8005-workspace#68): another journey not Completed on a vehicle standing still passes
+  FAIL  server remove with recoveryJourney: the target Blocked on LOAD_RESULT_REQUIRES_RECOVERY, the rest Completed -- passes, written
+  FAIL  server check (remove) without recoveryJourney (8005-workspace#68): the stuck journey's vehicle standing still passes
+  FAIL  server remove: recoveryJourney with another journey not Completed on a vehicle RIoT shows moving is refused, no write, no restart
+  FAIL  server check (remove) with recoveryJourney (8005-workspace#68): another journey not Completed on a vehicle standing still passes
+  FAIL  server remove: recoveryJourney naming another journey than the stuck one, whose vehicle moves is refused, no write, no restart
+  FAIL  server remove with recoveryJourney on another vehicle (8005-workspace#68): the window is closed regardless, written
+  FAIL  server remove with recoveryJourney with the right agvId but another vehicleKey (8005-workspace#68): the window is closed regardless, written
+  FAIL  server remove with recoveryJourney Blocked / ONBOARD_SESSION_LOST (8005-workspace#68): the window is closed regardless, written
+  FAIL  server remove with recoveryJourney Blocked / LoadCompensationResult_NOT_RECONCILED_ON_ENDED_DEMAND (8005-workspace#68): the window is closed regardless, written
+  FAIL  server remove with recoveryJourney AwaitingLoadResult / LOAD_RESULT_REQUIRES_RECOVERY (8005-workspace#68): the window is closed regardless, written
+  FAIL  server remove with recoveryJourney Blocked / no reason (8005-workspace#68): the window is closed regardless, written
+  FAIL  server remove with recoveryJourney (8005-workspace#68): the named row is not read at all, so one that cannot be read does not hold the close
+  FAIL  close with -RecoveryJourneyId, the named journey demand Cancelled by the fault cargo handoff, the journey on to its next pickup stops (8005-workspace#68, field instance 1): the server entry, the switch and the vehicle variable are all gone
+  FAIL  server set on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+  FAIL  server remove on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+  FAIL  onboard-hmi\scripts\06-deploy-onboard-hmi.ps1 names no recovery variable and does not touch the switch
+190 passed, 40 failed
