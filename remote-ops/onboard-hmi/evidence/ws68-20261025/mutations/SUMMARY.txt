@@ -1,0 +1,56 @@
+# 8005-workspace#68 mutations (workspace), each on V2RecoveryWindow.psm1 alone, restored with git afterwards; 2026-10-25 10:36 +0800
+# Each count includes main's own 06-deploy FAIL (red before this ticket).
+
+## W1-vehicles-not-asked (remote-ops/onboard-hmi/scripts/V2RecoveryWindow.psm1): 206 passed, 24 failed
+   - param([AllowEmptyCollection()][object[]] $Rows, [AllowNull()][object[]] $VehicleMotion)
+   + param([AllowEmptyCollection()][object[]] $Rows, [AllowNull()][object[]] $VehicleMotion)
+    return  # MUTATION W1: no vehicle may be under way
+   FAIL  journey refusal by vehicle (8005-workspace#68): opening, a charging journey on a vehicle RIoT shows moving -> JOURNEYS_IN_PROGRESS
+   FAIL  journey refusal by vehicle (8005-workspace#68): opening, the vehicles not judged (a control-server from before #68) -> JOURNEYS_IN_PROGRESS
+   FAIL  journey refusal by vehicle (8005-workspace#68): opening, no answer for the vehicle -> JOURNEYS_IN_PROGRESS
+   FAIL  journey refusal by vehicle (8005-workspace#68): opening, named stuck journey and a charging vehicle moving -> RECOVERY_JOURNEY_NOT_ALONE
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, the named journey's vehicle with an unfinished RIoT order -> JOURNEYS_IN_PROGRESS
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, another vehicle moving: only it is named -> JOURNEYS_IN_PROGRESS
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, the vehicles not judged -> JOURNEYS_IN_PROGRESS
+   FAIL  server set: a journey not Completed on a vehicle RIoT shows moving (a real SQLite store) is refused, no write, no restart
+   FAIL  server set: a journey not Completed on a vehicle RIoT shows moving, with allowConnectedVehicles is refused, no write, no restart
+   FAIL  server set: a journey not Completed on a vehicle standing with an unfinished RIoT order is refused, no write, no restart
+   FAIL  server set: a journey not Completed on a vehicle standing still but holding a fault is refused, no write, no restart
+   FAIL  server remove: a journey not Completed on a vehicle RIoT shows moving (a real SQLite store) is refused, no write, no restart
+   FAIL  server remove: a journey not Completed on a vehicle RIoT shows moving, with allowConnectedVehicles is refused, no write, no restart
+   FAIL  server remove: a journey not Completed on a vehicle standing with an unfinished RIoT order is refused, no write, no restart
+   FAIL  server remove: a journey not Completed on a vehicle standing still but holding a fault is refused, no write, no restart
+   FAIL  server set: the same stuck journey without recoveryJourney, its vehicle moving is refused, no write, no restart
+   FAIL  server set: recoveryJourney with another journey not Completed on a vehicle RIoT shows moving is refused, no write, no restart
+   FAIL  server set: recoveryJourney naming another journey than the stuck one, whose vehicle moves is refused, no write, no restart
+   FAIL  server remove: the same stuck journey without recoveryJourney, its vehicle moving is refused, no write, no restart
+   FAIL  server remove: recoveryJourney with another journey not Completed on a vehicle RIoT shows moving is refused, no write, no restart
+   FAIL  server remove: recoveryJourney naming another journey than the stuck one, whose vehicle moves is refused, no write, no restart
+   FAIL  server set on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+   FAIL  server remove on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+   FAIL  onboard-hmi\scripts\06-deploy-onboard-hmi.ps1 names no recovery variable and does not touch the switch
+## W2-no-read-after-stop (remote-ops/onboard-hmi/scripts/V2RecoveryWindow.psm1): 227 passed, 3 failed
+   - $again = & $journeyCheck
+   + $again = @{ Refusal = $null }  # MUTATION W2: not read again after the stop
+   FAIL  server set on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+   FAIL  server remove on a running service (8005-workspace#68): a vehicle that starts moving while the service is stopped -> refused after the stop, the Environment put back, started again
+   FAIL  onboard-hmi\scripts\06-deploy-onboard-hmi.ps1 names no recovery variable and does not touch the switch
+## W3-close-checks-named-journey (remote-ops/onboard-hmi/scripts/V2RecoveryWindow.psm1): 214 passed, 16 failed
+   - if ($null -eq $RecoveryJourney -or $Target -ceq 'remove') {
+   + if ($null -eq $RecoveryJourney) {  # MUTATION W3: closing judged like opening
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, the named journey gone on to its next pickup stop, its vehicle standing still (field instance 1) -> allowed
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, the named journey released back to the engine, standing still -> allowed
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, the named journey's vehicle with an unfinished RIoT order -> JOURNEYS_IN_PROGRESS
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, another vehicle moving: only it is named -> JOURNEYS_IN_PROGRESS
+   FAIL  journey refusal by vehicle (8005-workspace#68): closing, the vehicles not judged -> JOURNEYS_IN_PROGRESS
+   FAIL  server remove: recoveryJourney with another journey not Completed on a vehicle RIoT shows moving is refused, no write, no restart
+   FAIL  server remove: recoveryJourney naming another journey than the stuck one, whose vehicle moves is refused, no write, no restart
+   FAIL  server remove with recoveryJourney on another vehicle (8005-workspace#68): the window is closed regardless, written
+   FAIL  server remove with recoveryJourney with the right agvId but another vehicleKey (8005-workspace#68): the window is closed regardless, written
+   FAIL  server remove with recoveryJourney Blocked / ONBOARD_SESSION_LOST (8005-workspace#68): the window is closed regardless, written
+   FAIL  server remove with recoveryJourney Blocked / LoadCompensationResult_NOT_RECONCILED_ON_ENDED_DEMAND (8005-workspace#68): the window is closed regardless, written
+   FAIL  server remove with recoveryJourney AwaitingLoadResult / LOAD_RESULT_REQUIRES_RECOVERY (8005-workspace#68): the window is closed regardless, written
+   FAIL  server remove with recoveryJourney Blocked / no reason (8005-workspace#68): the window is closed regardless, written
+   FAIL  server remove with recoveryJourney (8005-workspace#68): the named row is not read at all, so one that cannot be read does not hold the close
+   FAIL  close with -RecoveryJourneyId, the named journey demand Cancelled by the fault cargo handoff, the journey on to its next pickup stops (8005-workspace#68, field instance 1): the server entry, the switch and the vehicle variable are all gone
+   FAIL  onboard-hmi\scripts\06-deploy-onboard-hmi.ps1 names no recovery variable and does not touch the switch
