@@ -32,6 +32,13 @@ That file is the authority on write access and applies from the start of every
 session. Where a repository restates any of it, that file wins. What follows
 here is specific to this workspace.
 
+**Start sessions in this workspace's root directory.** Only there is the import
+above inside the working directory. From a subdirectory it counts as an
+external import and is silently dropped unless external imports were approved
+for this repository (not approved on the control machine as of 2026-11-23), and
+a worktree of this repository has no `repos/` at all, so the import has no
+target; either way the write-authority rules are missing without any error.
+
 ## CI runner 网络排障（v1 留存）
 
 CI 的规则（不用托管 runner、runner 表、三条硬约束、不取消正在跑的 job）已搬到上面导入的共用规则文件。
