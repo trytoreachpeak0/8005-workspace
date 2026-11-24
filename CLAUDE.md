@@ -36,8 +36,9 @@ same versioned copy (trytoreachpeak0/8005-agv-program#228):
 @repos/8005-agv-program/docs/agents/workspace-rules.md
 
 That file is the authority on write access and applies from the start of every
-session. Where a repository restates any of it, that file wins. What follows
-here is specific to this workspace.
+session. Where a repository restates any of it, that file wins. What is
+specific to this workspace is in `AGENTS.md`, imported on the first line; what
+follows here is specific to Claude Code.
 
 **Start sessions in this workspace's root directory.** Only there is the import
 above inside the working directory. From a subdirectory it counts as an
